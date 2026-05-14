@@ -1,0 +1,3 @@
+# T265 raw backend.
+# Install and validate separately because pyrealsense2 is a native Intel RealSense binding.
+pyrealsense2

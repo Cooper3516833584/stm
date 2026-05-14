@@ -1,0 +1,13 @@
+# Target: STM32MP257 Debian / Python 3.11 / ARM64
+# Heavy native packages are installed by apt:
+#   python3-numpy python3-scipy python3-opencv python3-matplotlib
+
+# ==== 核心底层防爆锁 (ABI Compatibility Lock) ====
+numpy<2.0.0
+
+# ==== 飞控与基础组件 ====
+loguru==0.7.3
+pyserial==3.5
+attrs>=22.2,<27
+simple-pid==2.0.1
+onnxruntime>=1.16.3,<2.0

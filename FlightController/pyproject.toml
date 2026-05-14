@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "FlightController"
+version = "0.1.0"
+description = "STM32MP257 飞控上位机 - 无人机控制、雷达SLAM、导航系统"
+requires-python = ">=3.10"
+
+dependencies = [
+    "loguru==0.7.3",
+    "pyserial==3.5",
+    "attrs>=22.2,<27",
+    "simple-pid==2.0.1",
+    "onnxruntime>=1.16.3,<2.0",
+    "numpy<2.0.0",
+]
+
+[project.optional-dependencies]
+t265 = [
+    "pyrealsense2",
+]
+
+[tool.setuptools]
+packages = [
+    "FlightController",
+    "FlightController.Components",
+    "FlightController.Solutions",
+    "FlightController.models",
+    "FlightController.tools",
+]
+
+[tool.setuptools.package-dir]
+"FlightController" = "."
+"FlightController.Components" = "Components"
+"FlightController.Solutions" = "Solutions"
+"FlightController.models" = "models"
+"FlightController.tools" = "tools"

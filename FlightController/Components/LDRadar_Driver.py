@@ -203,7 +203,7 @@ class LD_Radar(object):
                         else:
                             self._crc_errors += 1
                 else:
-                    time.sleep(0)  # yield GIL without sleeping (ARM 100Hz kernel would turn sleep(0.001) into ~10ms)
+                    time.sleep(0.001)
             except Exception as e:
                 logger.exception(f"[RADAR] Listenning thread error")
                 buf = bytes()

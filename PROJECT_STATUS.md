@@ -13,6 +13,7 @@
 * **操作系统**: Debian 12 (Bookworm) aarch64, Linux 内核 (CONFIG_HZ=100)。
 * **飞控通信**: 匿名飞控（灵霄）二进制协议，UART 串口 500000 baud。协议栈位于 `FlightController/Base.py` → `Protocal.py` → `Application.py`。
 * **存储与内存极限管控 (Survival Mode)**:
+  * 板载 RAM 仅 **2GB**，严禁将日志或大文件写入 `/tmp`（tmpfs 占用 RAM），否则触发 OOM 系统卡死。
   * 已彻底斩杀图形桌面系统，进入纯 Headless (无头) 命令行模式以释放极其有限的 RAM。
   * 物理抹除 1GB Swap 分区，清空 APT 缓存，为 eMMC 腾出极限空间保障大型 C++ 库的安装。
   * 代码仓库已迁移至 30G 外置闪存卡（vfat, `/media/sdcard`），eMMC 仅保留系统与虚拟环境，详见 [§7.2](#72-%E2%9A%A0%EF%B8%8F-emmc-存储空间危机-critical)。
@@ -39,10 +40,11 @@
    * **症状**: `time.sleep(0.001)` 在 CONFIG_HZ=100 的 ARM 内核上实际睡眠 ~10ms（内核调度粒度 = 1/HZ = 10ms）。
    * **影响**: 串口读取线程每次等待新数据时 sleep 1ms 实际变为 10ms，期间 D500 以 ~300 包/秒持续输出，导致每个 sleep 间隙积压 ~3 个数据包。累积效应下串口缓冲区逐渐填满，处理延迟随时间线性增长（运行 3 分钟后延迟可超过 60 秒）。
    * **修复**: 将 `time.sleep(0.001)` 改为 `time.sleep(0)` — 仅让出 GIL 而不实际睡眠，线程以 busy-wait 方式轮询串口。批处理模式下数据到达即刻读取，消除积压。
-7. **loguru 同步文件写入导致 GIL 争用**:
+7. **loguru 同步文件写入导致 GIL 争用** ⚠️ 待进一步定位:
    * **症状**: `PROFILE` 日志行显示个别循环迭代耗时 88.9ms（正常 < 5ms），伴随 `Map_Circle` 有效点云数从 ~850 暴跌至 ~390，雷达吞吐降至 ~51%。
    * **根源**: `loguru.add(..., enqueue=False)` 同步写 eMMC 文件。当文件系统触发 journal commit 或写回缓存 flush 时，`write()` 调用阻塞主线程 80-90ms。Python GIL 在此期间被持有，串口读取线程无法执行 `Map_Circle.update()`，雷达帧积压在 `buf` 中无法处理，`timeout_clear` (0.15s) 清除过期点云导致覆盖率下降。
-   * **修复**: 将 `enqueue=False` 改为 `enqueue=True`。日志消息放入内存队列（微秒级），后台独立线程异步写文件。主线程不再受 eMMC I/O 影响，GIL 及时释放，串口线程始终保持实时。
+   * **代码修改已应用**: 将 `enqueue=False` 改为 `enqueue=True`。日志消息放入内存队列（微秒级），后台独立线程异步写文件。
+   * **⚠️ 验证实验 (2024-08-26)**: GIL 阻塞峰值从 88.9ms 降至 51.2ms（降幅 42%），但未根除 —— `total > 10ms` 仍间歇出现。同时出现 **CRC 错误激增** 的新回归（3 分钟内 0→92 次），可能是 `sleep(0)` busy-wait 串口策略的副作用。见 [§6.5b](#65b-loguru-async-验证实验结果-2024-08-26)。
 
 ## 4. 激光雷达 (LDROBOT D500) 硬件拓扑
 * **物理连线**: TX 接入 J13 Pin 11 (`PB6_UART4_RX`)。PWM 引脚强制拉高至 3.3V 防止高频电磁干扰触发 MCU 安全锁。
@@ -125,7 +127,7 @@ FlightController/
 
 ### 6.5 端到端性能验证
 
-在 STM32MP257 真机上持续运行测试脚本验证:
+在 STM32MP257 真机上持续运行测试脚本验证 (loguru `enqueue=True` 修复前):
 
 | 指标 | 实测值 | 状态 |
 |---|---|---|
@@ -137,7 +139,26 @@ FlightController/
 | planner 耗时 | 0.1-0.3ms | ✅ |
 | 单次循环总耗时 | 2.5-7.0ms | ✅ |
 | 端到端延迟 (障碍物出现→日志输出) | < 500ms | ✅ |
-| 延迟增长趋势 (DELAY_TREND) | →稳定 (无增长) | ✅ |
+| 延迟增长趋势 (DELAY_TREND) | →稳定 (无增长) | ⚠️ 偶发 GIL 争用时未测 |
+
+### 6.5b loguru async 验证实验结果 (2024-08-26)
+
+`enqueue=True` 修复后，在开发板上运行 `--profile --log-file /media/sdcard/radar_verify.log` 约 3 分钟的实测数据:
+
+| 指标 | 修复前 | 修复后 | 判断 |
+|---|---|---|---|
+| 串口吞吐 | 298-332 包/秒 | 170-309 包/秒 (57-104%) | ⚠️ 波动加剧 |
+| 单次循环最大耗时 | 88.9ms | 51.2ms | ⚠️ 改善但未根除 |
+| 循环耗时 > 10ms 频率 | 偶发 | ~3 分钟出现 11 次 | ⚠️ 仍存在 |
+| **CRC 错误** | **0 次** | **0→92 在 3 分钟内，速率攀升至 30.4/s** | ❌ 新增回归 |
+| 数据年龄 (最旧) | 120-155ms | 126-176ms | ⚠️ 略有恶化 |
+
+**关键发现**:
+1. **GIL 阻塞峰值得以降低** (88.9ms → 51.2ms)，但未根除，`total > 10ms` 的现象仍间歇出现
+2. **CRC 错误是新增回归**，从 0 激增至 30.4/s，可能与 `sleep(0)` busy-wait 串口读取策略有关
+3. 吞吐波动从稳定的 100-106% 变为 57-104%，不稳定性增加
+4. **日志输出 ~1 分钟延迟**：vfat 闪存卡不支持 inotify，`tail -f` 退化为轮询；loguru async 队列在慢设备上批量刷新。此为 cosmetic 可见性延迟，不影响管道实时性（数据年龄 ~176ms）
+5. **⚠️ 板载 RAM 仅 2GB**：`/tmp` 为 tmpfs 占用 RAM，日志写入 `/tmp` 会触发 OOM 导致系统卡死。日志务必写入闪存卡路径
 
 ### 6.6 诊断工具
 
@@ -181,6 +202,49 @@ tail -f /tmp/radar.log
 - Pipeline 各级耗时 (get / plan / total)
 - 点云覆盖率 (有效点 vs 理论 1080 仓)
 - DELAY_TREND (运行时间 vs 延迟趋势，每 ~30s 输出)
+
+### 6.7 loguru async 验证实验 (2024-08-26 已执行)
+
+**背景**: loguru 同步写入导致的 GIL 争用是间歇性问题（eMMC journal commit 时触发），`enqueue=True` 修改已应用但未经实验验证。
+
+**验证方法**:
+
+```bash
+# 在开发板 SSH 终端执行，建议运行 ≥ 30 分钟以覆盖 eMMC journal commit 周期
+PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py \
+    --no-fc --dry-run --profile \
+    --log-file /media/sdcard/radar_verify.log
+```
+
+同时在另一 SSH 窗口监控异常迭代:
+
+```bash
+# 实时监控 PROFILE 行，筛选耗时异常的迭代（正常 < 10ms），异常时输出完整行
+tail -f /media/sdcard/radar_verify.log | grep PROFILE | awk -F'total=' '{split($2,a,"ms"); if(a[1]+0>10) print}'
+```
+
+**验证通过标准** (三指标同时满足):
+
+| 指标 | 通过标准 | 说明 |
+|---|---|---|
+| 单次循环最大耗时 | **≤ 20ms**，持续 30 分钟 | 正常 < 10ms；偶尔 GC 可放宽至 20ms，但不应出现 80ms+ |
+| 有效点云数 | **≥ 800**，无周期性骤降 | 理论 1080 仓，正常 ~850；若出现骤降至 ~390 则未修复 |
+| DELAY_TREND | **→ 稳定**，数据年龄 (最旧) 始终 < 200ms | 长时间运行后不出现延迟累积增长 |
+
+**验证结果 (运行约 3 分钟)**:
+
+详见 [§6.5b](#65b-loguru-async-验证实验结果-2024-08-26)。核心结论:
+
+1. **GIL 阻塞部分缓解**: 峰值 88.9ms → 51.2ms，但未根除，仍有间歇性 `total > 10ms`（11 次 / 3 分钟）
+2. **CRC 错误是新增回归**: 0 → 92 次 (30.4/s)，可能是 `sleep(0)` busy-wait 与异步日志写入争用串口线程 CPU 时间所致
+3. **日志输出延迟**: 写入 vfat 闪存卡 + `tail -f` 无 inotify 支持，两端日志均有 ~1 分钟延迟
+
+**⚠️ 板载内存仅 2GB**，`/tmp` 为 tmpfs（占用 RAM），禁止将日志写入 `/tmp`，否则会触发 OOM 导致系统卡死。日志务必写入闪存卡路径。
+
+**下一步排查方向**:
+- CRC 错误激增是否为 `sleep(0)` busy-wait 串口策略的副作用（与异步日志线程 CPU 争用）
+- 尝试恢复 `time.sleep(0.001)` 同时保留 `enqueue=True`，观察 CRC 是否归零
+- 闪存卡日志的 ~1 分钟可见性延迟为 cosmetic 问题，不影响管道实时性（数据年龄最旧 ~176ms）
 
 ## 7. 代码仓库迁移与存储架构重构
 

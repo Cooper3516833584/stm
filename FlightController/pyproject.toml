@@ -27,7 +27,6 @@ packages = [
     "FlightController",
     "FlightController.Components",
     "FlightController.Solutions",
-    "FlightController.models",
     "FlightController.tools",
 ]
 
@@ -35,5 +34,4 @@ packages = [
 "FlightController" = "."
 "FlightController.Components" = "Components"
 "FlightController.Solutions" = "Solutions"
-"FlightController.models" = "models"
 "FlightController.tools" = "tools"

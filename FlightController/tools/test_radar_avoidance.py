@@ -118,6 +118,16 @@ def main() -> None:
         default=None,
         help="将日志同时写入文件 (用于 tail -f 实时监控，绕过SSH缓冲)",
     )
+    parser.add_argument(
+        "--raw-latency",
+        action="store_true",
+        help="用雷达包自带时间戳估算真实串口/解析积压，区别于 Map_Circle 数据年龄",
+    )
+    parser.add_argument(
+        "--raw-latency-stdout",
+        action="store_true",
+        help="将 RAW_LATENCY 诊断行用 print(..., flush=True) 直接输出，绕过 loguru 文件队列",
+    )
     args = parser.parse_args()
 
     # ---------- 日志文件输出 (绕过SSH缓冲) ----------
@@ -298,7 +308,7 @@ def main() -> None:
                 )
 
             # 6b. profile: 计时分析
-            if args.profile and loop_count % 30 == 0:
+            if (args.profile or args.raw_latency) and loop_count % 30 == 0:
                 now = time.perf_counter()
                 elapsed_profile = now - _last_profile_time
                 _last_profile_time = now
@@ -332,22 +342,44 @@ def main() -> None:
                 crc_err = radar._crc_errors
                 crc_rate = crc_err / max(elapsed_profile, 0.001)
                 throughput_pct = uc_rate / max(pps_expected, 1) * 100
+                raw_latency_text = ""
+                if args.raw_latency:
+                    raw_stats = radar.get_radar_latency_stats(reset_interval=True)
+                    raw_latency_text = (
+                        f"雷达帧年龄: 当前={raw_stats['latest_ms']:.0f}ms "
+                        f"区间峰值={raw_stats['interval_max_ms']:.0f}ms "
+                        f"全局峰值={raw_stats['max_ms']:.0f}ms | "
+                        f"设备钟速={raw_stats['device_rate_pct']:.2f}% "
+                        f"钟差={raw_stats['clock_drift_ms']:.0f}ms | "
+                        f"串口buf峰值={raw_stats['in_waiting_peak']}B "
+                        f"解析buf={raw_stats['parse_buffer_bytes']}B "
+                        f"有效帧={raw_stats['serial_frames_ok']}"
+                    )
 
-                logger.info(
-                    f"[PROFILE] 吞吐={uc_rate:.0f}/{pps_expected:.0f}包/s ({throughput_pct:.0f}%) | "
-                    f"CRC错误={crc_err}次 ({crc_rate:.1f}/s) | "
-                    f"数据年龄: 最新={data_age_min*1000:.0f}ms 最旧={data_age_max*1000:.0f}ms | "
-                    f"耗时: get={get_time_ms:.1f}ms plan={plan_time_ms:.1f}ms total={total_time_ms:.1f}ms"
-                )
-                if data_age_max > 1.0:
+                if args.profile:
+                    logger.info(
+                        f"[PROFILE] 吞吐={uc_rate:.0f}/{pps_expected:.0f}包/s ({throughput_pct:.0f}%) | "
+                        f"CRC错误={crc_err}次 ({crc_rate:.1f}/s) | "
+                        f"数据年龄: 最新={data_age_min*1000:.0f}ms 最旧={data_age_max*1000:.0f}ms | "
+                        f"耗时: get={get_time_ms:.1f}ms plan={plan_time_ms:.1f}ms total={total_time_ms:.1f}ms"
+                    )
+                if raw_latency_text:
+                    logger.info(f"[RAW_LATENCY] {raw_latency_text}")
+                    if args.raw_latency_stdout:
+                        print(
+                            f"{time.strftime('%Y-%m-%d %H:%M:%S')} [RAW_LATENCY] {raw_latency_text}",
+                            flush=True,
+                        )
+                if args.profile and data_age_max > 1.0:
                     logger.warning(
                         f"[PROFILE] ⚠ 数据年龄偏大 (最旧={data_age_max:.1f}s)! "
                         f"障碍物变化需等待 {data_age_max:.1f}s 才能被检测到"
                     )
 
                 # 采样运行时间 vs 延迟 (每10个 profile 输出一次趋势)
-                _uptime_delay_samples.append((radar.start_time, data_age_max, data_age_min))
-                if len(_uptime_delay_samples) >= 10:
+                if args.profile:
+                    _uptime_delay_samples.append((radar.start_time, data_age_max, data_age_min))
+                if args.profile and len(_uptime_delay_samples) >= 10:
                     run_times = [now - s[0] for s in _uptime_delay_samples]
                     max_ages = [s[1] for s in _uptime_delay_samples]
                     min_ages = [s[2] for s in _uptime_delay_samples]

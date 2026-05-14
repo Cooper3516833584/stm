@@ -55,6 +55,8 @@ class LD_Radar(object):
         self._data_buf = b""
         self._count = 0
         self._crc_errors = 0
+        self._latency_lock = threading.Lock()
+        self._reset_latency_stats()
         # 位姿估计
         self.rt_pose_update_event = threading.Event()
         self.rt_pose = [0, 0, 0]
@@ -88,6 +90,7 @@ class LD_Radar(object):
         self.subtask_event.clear()
         self.subtask_skip = subtask_skip
         self._ros_node = None
+        self._reset_latency_stats()
         if com == "ros":
             raise ValueError("ROS radar listener has been removed from this migration")
         elif isinstance(com, FC_Controller):
@@ -129,11 +132,115 @@ class LD_Radar(object):
         """
         self._update_callback = callback
 
+    def _reset_latency_stats(self):
+        with self._latency_lock:
+            self._radar_ts_wrap_ms = 30000.0
+            self._radar_ts_last_raw: Optional[int] = None
+            self._radar_ts_wrap_offset_ms = 0.0
+            self._radar_latency_min_delta_ms: Optional[float] = None
+            self._radar_latency_latest_ms = 0.0
+            self._radar_latency_max_ms = 0.0
+            self._radar_latency_interval_max_ms = 0.0
+            self._radar_latency_samples = 0
+            self._radar_latency_first_host_ms: Optional[float] = None
+            self._radar_latency_first_device_ms: Optional[float] = None
+            self._radar_latency_last_host_ms = 0.0
+            self._radar_latency_last_device_ms = 0.0
+            self._radar_latency_last_raw_ms = 0
+            self._serial_bytes_read = 0
+            self._serial_read_batches = 0
+            self._serial_frames_ok = 0
+            self._serial_parse_buffer_bytes = 0
+            self._serial_in_waiting_peak = 0
+
+    def _record_serial_batch(self, bytes_read: int, in_waiting: int, parse_buffer_bytes: int) -> None:
+        with self._latency_lock:
+            self._serial_bytes_read += bytes_read
+            self._serial_read_batches += 1
+            self._serial_parse_buffer_bytes = parse_buffer_bytes
+            self._serial_in_waiting_peak = max(self._serial_in_waiting_peak, in_waiting)
+
+    def _record_parse_buffer_bytes(self, parse_buffer_bytes: int) -> None:
+        with self._latency_lock:
+            self._serial_parse_buffer_bytes = parse_buffer_bytes
+
+    def _record_radar_latency(self, raw_timestamp_ms: int, host_time_s: Optional[float] = None) -> None:
+        if host_time_s is None:
+            host_time_s = time.perf_counter()
+        raw_timestamp_ms = int(raw_timestamp_ms)
+        host_ms = host_time_s * 1000.0
+        with self._latency_lock:
+            if self._radar_ts_last_raw is not None:
+                delta_raw = raw_timestamp_ms - self._radar_ts_last_raw
+                if delta_raw < -self._radar_ts_wrap_ms / 2:
+                    self._radar_ts_wrap_offset_ms += self._radar_ts_wrap_ms
+                elif delta_raw > self._radar_ts_wrap_ms / 2:
+                    self._radar_ts_wrap_offset_ms = 0.0
+                    self._radar_latency_min_delta_ms = None
+                    self._radar_latency_first_host_ms = None
+                    self._radar_latency_first_device_ms = None
+
+            device_ms = self._radar_ts_wrap_offset_ms + raw_timestamp_ms
+            delta_ms = host_ms - device_ms
+            if self._radar_latency_min_delta_ms is None or delta_ms < self._radar_latency_min_delta_ms:
+                self._radar_latency_min_delta_ms = delta_ms
+            latency_ms = max(0.0, delta_ms - self._radar_latency_min_delta_ms)
+
+            if self._radar_latency_first_host_ms is None:
+                self._radar_latency_first_host_ms = host_ms
+                self._radar_latency_first_device_ms = device_ms
+
+            self._radar_ts_last_raw = raw_timestamp_ms
+            self._radar_latency_latest_ms = latency_ms
+            self._radar_latency_max_ms = max(self._radar_latency_max_ms, latency_ms)
+            self._radar_latency_interval_max_ms = max(self._radar_latency_interval_max_ms, latency_ms)
+            self._radar_latency_samples += 1
+            self._radar_latency_last_host_ms = host_ms
+            self._radar_latency_last_device_ms = device_ms
+            self._radar_latency_last_raw_ms = raw_timestamp_ms
+            self._serial_frames_ok += 1
+
+    def get_radar_latency_stats(self, reset_interval: bool = False) -> dict[str, object]:
+        now_ms = time.perf_counter() * 1000.0
+        with self._latency_lock:
+            host_elapsed_ms = 0.0
+            device_elapsed_ms = 0.0
+            if self._radar_latency_first_host_ms is not None and self._radar_latency_first_device_ms is not None:
+                host_elapsed_ms = max(0.0, self._radar_latency_last_host_ms - self._radar_latency_first_host_ms)
+                device_elapsed_ms = max(0.0, self._radar_latency_last_device_ms - self._radar_latency_first_device_ms)
+            device_rate_pct = (device_elapsed_ms / host_elapsed_ms * 100.0) if host_elapsed_ms > 0 else 0.0
+            clock_drift_ms = host_elapsed_ms - device_elapsed_ms
+            stats = {
+                "samples": self._radar_latency_samples,
+                "latest_ms": self._radar_latency_latest_ms,
+                "max_ms": self._radar_latency_max_ms,
+                "interval_max_ms": self._radar_latency_interval_max_ms,
+                "last_raw_timestamp_ms": self._radar_latency_last_raw_ms,
+                "last_sample_age_ms": max(0.0, now_ms - self._radar_latency_last_host_ms)
+                if self._radar_latency_samples
+                else 0.0,
+                "device_rate_pct": device_rate_pct,
+                "clock_drift_ms": clock_drift_ms,
+                "serial_bytes_read": self._serial_bytes_read,
+                "serial_read_batches": self._serial_read_batches,
+                "serial_frames_ok": self._serial_frames_ok,
+                "crc_errors": self._crc_errors,
+                "parse_buffer_bytes": self._serial_parse_buffer_bytes,
+                "in_waiting_peak": self._serial_in_waiting_peak,
+            }
+            if reset_interval:
+                self._radar_latency_interval_max_ms = 0.0
+                self._serial_in_waiting_peak = 0
+            return stats
+
     def _fc_callback(self, buf: bytes):
         if not self.running:
             return
         self.connected = True
         if resolve_radar_data_multi(buf, self._package_multi):
+            host_time = time.perf_counter()
+            for timestamp in self._package_multi.time_stamps:
+                self._record_radar_latency(timestamp, host_time)
             with self._lock:
                 self.map.update(self._package_multi)
             if self._update_callback is not None:
@@ -147,6 +254,7 @@ class LD_Radar(object):
         if not self.running:
             return
         self.connected = True
+        self._record_radar_latency(pack.time_stamp)
         with self._lock:
             self.map.update(pack)
         if self._update_callback is not None:
@@ -179,7 +287,11 @@ class LD_Radar(object):
         while self.running:
             try:
                 if self._serial.in_waiting > 0:
-                    buf += self._serial.read(self._serial.in_waiting)
+                    waiting = self._serial.in_waiting
+                    chunk = self._serial.read(waiting)
+                    host_read_time = time.perf_counter()
+                    buf += chunk
+                    self._record_serial_batch(len(chunk), waiting, len(buf))
                     while len(buf) >= frame_length:
                         # Search for start bit
                         idx = buf.find(start_bit)
@@ -192,6 +304,7 @@ class LD_Radar(object):
                         buf = buf[frame_length:]
                         self.connected = True
                         if resolve_radar_data(frame, self._package):
+                            self._record_radar_latency(self._package.time_stamp, host_read_time)
                             with self._lock:
                                 self.map.update(self._package)
                             if self._update_callback is not None:
@@ -202,6 +315,7 @@ class LD_Radar(object):
                                 self.subtask_event.set()
                         else:
                             self._crc_errors += 1
+                    self._record_parse_buffer_bytes(len(buf))
                 else:
                     time.sleep(0.001)
             except Exception as e:

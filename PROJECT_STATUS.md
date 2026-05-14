@@ -1,8 +1,8 @@
 # 🚁 Cooper_drone 伴随计算机系统配置与开发进度纪要
 
 **项目名称**: Cooper_drone (基于 MYiR 开发板的无人机机载/伴随计算机开发)
-**当前阶段**: M4 阶段 (单雷达在线避障链路联调竣工，端到端延迟 < 500ms)
-**最后更新**: 2026年5月14日
+**当前阶段**: M4 阶段 (单雷达在线避障链路联调竣工，端到端延迟 < 500ms) + 基础设施迁移完成
+**最后更新**: 2026年5月14日 (仓库迁移、闪存卡挂载、eMMC 空间清理)
 
 ---
 
@@ -15,6 +15,7 @@
 * **存储与内存极限管控 (Survival Mode)**:
   * 已彻底斩杀图形桌面系统，进入纯 Headless (无头) 命令行模式以释放极其有限的 RAM。
   * 物理抹除 1GB Swap 分区，清空 APT 缓存，为 eMMC 腾出极限空间保障大型 C++ 库的安装。
+  * 代码仓库已迁移至 30G 外置闪存卡（vfat, `/media/sdcard`），eMMC 仅保留系统与虚拟环境，详见 [§7.2](#72-%E2%9A%A0%EF%B8%8F-emmc-存储空间危机-critical)。
   * 强制切断 Wi-Fi 休眠机制 (`wifi.powersave = 2`)，配合物理冷启动，防止 SDIO 总线假死。
 
 ## 2. 混合架构 Python 隔离舱 (UFC_venv) 状态
@@ -181,7 +182,66 @@ tail -f /tmp/radar.log
 - 点云覆盖率 (有效点 vs 理论 1080 仓)
 - DELAY_TREND (运行时间 vs 延迟趋势，每 ~30s 输出)
 
-## 7. 后续工作 (M5 阶段规划)
+## 7. 代码仓库迁移与存储架构重构
+
+### 7.1 仓库迁移
+
+原开发板仅有 `FlightController/` 目录连接旧 GitHub 仓库，现将整个 `ObstacleAvoidanceDrone/` 迁移至独立仓库 `github.com:Cooper3516833584/stm.git`，实现完整项目管理。
+
+| 项目 | 迁移前 | 迁移后 |
+|---|---|---|
+| 仓库地址 | 旧仓库（仅 FlightController） | `git@github.com:Cooper3516833584/stm.git`（全项目） |
+| 代码物理位置 | eMMC `/home/stm/Desktop/ObstacleAvoidanceDrone` | 闪存卡 `/media/sdcard/ObstacleAvoidanceDrone` |
+| 访问路径 | 真实目录 | 软链接 `~/Desktop/ObstacleAvoidanceDrone → /media/sdcard/ObstacleAvoidanceDrone` |
+| 虚拟环境集成 | 旧路径 `pip install -e .` | 重新安装，`Editable project location: /media/sdcard/...` |
+
+**迁移步骤摘要**:
+1. VS Code Server 离线手动安装（绕过微软下载服务器不可达问题）
+2. 清理 eMMC 残留旧目录，删除混乱嵌套结构
+3. 闪存卡重新挂载为 vfat，指定 `uid=stm,gid=stm` 解决权限问题
+4. SSH clone 新仓库至闪存卡，软链接保持原路径兼容
+
+### 7.2 ⚠️ eMMC 存储空间危机 (CRITICAL)
+
+**这是当前系统最严峻的硬件约束，必须在后续所有操作中持续关注。**
+
+| 存储介质 | 总容量 | 已用 | 可用 | 占用率 | 用途 |
+|---|---|---|---|---|---|
+| **eMMC** (`mmcblk1`) | **6.9G** | **5.6G** | **930M** | **87%** | 系统 + 虚拟环境 |
+| 闪存卡 (`mmcblk0`) | 30G | 2.9M | 30G | 1% | 代码仓库 + 日志 |
+
+**eMMC 空间占用分解 (清理后)**:
+
+| 目录 | 大小 | 可否清理 |
+|---|---|---|
+| `/usr/lib` | 2.2G | 否（系统库） |
+| `/home/stm/.vscode-server` | **1.6G** | 否（Remote SSH 必需，单版本已最小化） |
+| `/usr/share` | 1.1G | 部分（已清 doc/locale，剩余 fonts/icons 可压） |
+| `/home/stm/UFC_venv` | 365M | 否（Python 虚拟环境核心） |
+| `/var` | 303M | 受限（已清日志） |
+| `/home/stm/.cache` | ~144M | 已清理 |
+
+**已执行的清理措施**:
+- APT 缓存全清 (`apt clean`)
+- `/usr/share/doc/*` 删除（134M）
+- `/usr/share/locale` 去除非英文 locale（~200M）
+- `/home/stm/.cache/*` 清空（144M）
+- `.dotnet` 目录删除（252K）
+
+**⚠️ 硬性约束与风险**:
+- eMMC 仅剩 **930M**，禁止执行 `apt upgrade`（会拉取大量 deb 包导致爆盘）
+- 禁止安装任何新的大型 APT 包
+- 新 Python 包通过 `pip install` 安装到 `UFC_venv`（eMMC），需控制总大小
+- 日志文件、调试输出务必写入 `/tmp`（tmpfs，内存）或闪存卡路径
+- VS Code Server 更新时需手动删除旧版本再安装新版本，防止同时存在两个版本（×2 = 3.2G 直接爆盘）
+- `/usr/share/fonts`（126M）和 `/usr/share/icons`（43M）可作为紧急情况下的最后清理目标
+
+**闪存卡注意事项**:
+- 格式为 **vfat**，不支持 Unix 权限、符号链接等 ext4 特性
+- 自动挂载配置已写入 `/etc/fstab`: `vfat rw,uid=stm,gid=stm,noatime`
+- 闪存卡仅存代码和 git 数据，不存放运行时依赖或虚拟环境
+
+## 8. 后续工作 (M5 阶段规划)
 
 ### 7.1 飞控联调 (阶段 B/C)
 - [ ] `test_radar_avoidance.py --dry-run` → 连接飞控，确认状态回传正常

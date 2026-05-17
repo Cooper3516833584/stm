@@ -306,12 +306,13 @@ class Map_Circle(object):
                     deg_values_dict[base] = []
                 deg_values_dict[base].append(point.distance)
             else:
-                degs = np.arange(base - self.REMAP, base + self.REMAP + 1, dtype=int)
-                degs %= 360 * self.ACC
-                for deg in degs:
-                    if deg not in deg_values_dict:
-                        deg_values_dict[deg] = []
-                    deg_values_dict[deg].append(point.distance)
+                # Avoid np.arange() in hot path — pure int arithmetic is faster on ARM
+                for offset in range(-self.REMAP, self.REMAP + 1):
+                    deg = (base + offset) % (360 * self.ACC)
+                    try:
+                        deg_values_dict[deg].append(point.distance)
+                    except KeyError:
+                        deg_values_dict[deg] = [point.distance]
         for deg, values in deg_values_dict.items():
             if self.update_mode == self.MODE_MIN:
                 self.data[deg] = np.min(values)
@@ -321,11 +322,14 @@ class Map_Circle(object):
                 self.data[deg] = np.round(np.mean(values))
             if self.timeout_clear:
                 self.time_stamp[deg] = time.perf_counter()
-        if self.timeout_clear:
-            self.data[self.time_stamp < time.perf_counter() - self.timeout_time] = -1
         self.rotation_spd = data.rotation_spd / 360 * 60
         self.update_count += 1
-        self.avail_points = np.count_nonzero(self.data != -1)
+        # timeout_clear + avail_points are the two heaviest operations per frame
+        # (each does a 1080-element full scan).  Run them every 12 frames (40ms
+        # at 300fps) instead of every frame, cutting their cost by 12×.
+        if self.timeout_clear and self.update_count % 12 == 0:
+            self.data[self.time_stamp < time.perf_counter() - self.timeout_time] = -1
+            self.avail_points = np.count_nonzero(self.data != -1)
 
     def in_deg(self, from_: float, to_: float) -> List[Point_2D]:
         """

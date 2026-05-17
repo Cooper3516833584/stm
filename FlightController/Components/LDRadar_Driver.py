@@ -284,44 +284,40 @@ class LD_Radar(object):
         package_length = 45  # payload bytes after header
         frame_length = len(start_bit) + package_length  # 47
         buf = bytes()
-        # Use blocking read with timeout instead of sleep().
-        #  - Data available → returns immediately (no 10ms blind gap)
-        #  - No data       → blocks in kernel select() up to 10ms, GIL released
-        # pyserial's read() uses select() internally, so wake-up precision is
-        # sub-ms (UART interrupt driven), not limited by CONFIG_HZ=100.
-        self._serial.timeout = 0.01
         while self.running:
             try:
-                chunk = self._serial.read(4096)
-                if not chunk:
-                    continue
-                host_read_time = time.perf_counter()
-                buf += chunk
-                self._record_serial_batch(len(chunk), self._serial.in_waiting, len(buf))
-                while len(buf) >= frame_length:
-                    # Search for start bit
-                    idx = buf.find(start_bit)
-                    if idx == -1:
-                        buf = buf[-(len(start_bit) - 1):] if len(buf) >= len(start_bit) - 1 else buf
-                        break
-                    if idx > 0:
-                        buf = buf[idx:]
-                    frame = buf[:frame_length]
-                    buf = buf[frame_length:]
-                    self.connected = True
-                    if resolve_radar_data(frame, self._package):
-                        self._record_radar_latency(self._package.time_stamp, host_read_time)
-                        with self._lock:
-                            self.map.update(self._package)
-                        if self._update_callback is not None:
-                            self._update_callback(self._package)
-                        self._count += 1
-                        if self._count >= self.subtask_skip:
-                            self._count = 0
-                            self.subtask_event.set()
-                    else:
-                        self._crc_errors += 1
-                self._record_parse_buffer_bytes(len(buf))
+                if self._serial.in_waiting > 0:
+                    waiting = self._serial.in_waiting
+                    chunk = self._serial.read(waiting)
+                    host_read_time = time.perf_counter()
+                    buf += chunk
+                    self._record_serial_batch(len(chunk), waiting, len(buf))
+                    while len(buf) >= frame_length:
+                        # Search for start bit
+                        idx = buf.find(start_bit)
+                        if idx == -1:
+                            buf = buf[-(len(start_bit) - 1):] if len(buf) >= len(start_bit) - 1 else buf
+                            break
+                        if idx > 0:
+                            buf = buf[idx:]
+                        frame = buf[:frame_length]
+                        buf = buf[frame_length:]
+                        self.connected = True
+                        if resolve_radar_data(frame, self._package):
+                            self._record_radar_latency(self._package.time_stamp, host_read_time)
+                            with self._lock:
+                                self.map.update(self._package)
+                            if self._update_callback is not None:
+                                self._update_callback(self._package)
+                            self._count += 1
+                            if self._count >= self.subtask_skip:
+                                self._count = 0
+                                self.subtask_event.set()
+                        else:
+                            self._crc_errors += 1
+                    self._record_parse_buffer_bytes(len(buf))
+                else:
+                    time.sleep(0.001)
             except Exception as e:
                 logger.exception(f"[RADAR] Listenning thread error")
                 buf = bytes()

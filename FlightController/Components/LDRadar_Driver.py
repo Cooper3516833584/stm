@@ -284,53 +284,70 @@ class LD_Radar(object):
         package_length = 45  # payload bytes after header
         frame_length = len(start_bit) + package_length  # 47
         buf = bytes()
+        # Use blocking read with timeout instead of sleep().
+        #  - Data available → returns immediately (no 10ms blind gap)
+        #  - No data       → blocks in kernel select() up to 10ms, GIL released
+        # pyserial's read() uses select() internally, so wake-up precision is
+        # sub-ms (UART interrupt driven), not limited by CONFIG_HZ=100.
+        self._serial.timeout = 0.01
         while self.running:
             try:
-                if self._serial.in_waiting > 0:
-                    waiting = self._serial.in_waiting
-                    chunk = self._serial.read(waiting)
-                    host_read_time = time.perf_counter()
-                    buf += chunk
-                    self._record_serial_batch(len(chunk), waiting, len(buf))
-                    while len(buf) >= frame_length:
-                        # Search for start bit
-                        idx = buf.find(start_bit)
-                        if idx == -1:
-                            buf = buf[-(len(start_bit) - 1):] if len(buf) >= len(start_bit) - 1 else buf
-                            break
-                        if idx > 0:
-                            buf = buf[idx:]
-                        frame = buf[:frame_length]
-                        buf = buf[frame_length:]
-                        self.connected = True
-                        if resolve_radar_data(frame, self._package):
-                            self._record_radar_latency(self._package.time_stamp, host_read_time)
-                            with self._lock:
-                                self.map.update(self._package)
-                            if self._update_callback is not None:
-                                self._update_callback(self._package)
-                            self._count += 1
-                            if self._count >= self.subtask_skip:
-                                self._count = 0
-                                self.subtask_event.set()
-                        else:
-                            self._crc_errors += 1
-                    self._record_parse_buffer_bytes(len(buf))
-                else:
-                    time.sleep(0.001)
+                chunk = self._serial.read(4096)
+                if not chunk:
+                    continue
+                host_read_time = time.perf_counter()
+                buf += chunk
+                self._record_serial_batch(len(chunk), self._serial.in_waiting, len(buf))
+                while len(buf) >= frame_length:
+                    # Search for start bit
+                    idx = buf.find(start_bit)
+                    if idx == -1:
+                        buf = buf[-(len(start_bit) - 1):] if len(buf) >= len(start_bit) - 1 else buf
+                        break
+                    if idx > 0:
+                        buf = buf[idx:]
+                    frame = buf[:frame_length]
+                    buf = buf[frame_length:]
+                    self.connected = True
+                    if resolve_radar_data(frame, self._package):
+                        self._record_radar_latency(self._package.time_stamp, host_read_time)
+                        with self._lock:
+                            self.map.update(self._package)
+                        if self._update_callback is not None:
+                            self._update_callback(self._package)
+                        self._count += 1
+                        if self._count >= self.subtask_skip:
+                            self._count = 0
+                            self.subtask_event.set()
+                    else:
+                        self._crc_errors += 1
+                self._record_parse_buffer_bytes(len(buf))
             except Exception as e:
                 logger.exception(f"[RADAR] Listenning thread error")
                 buf = bytes()
                 time.sleep(0.5)
 
     def get_points_xy_cm(self, max_distance_cm: float | None = None) -> np.ndarray:
-        """Return current radar-frame point cloud as shape=(N, 2), unit cm."""
-        with self._lock:
-            points = self.map.output_points(scale=0.1, remove_unavil=True)
-            points = np.asarray(points, dtype=float)
+        """Return current radar-frame point cloud as shape=(N, 2), unit cm.
 
-        if points.size == 0:
+        Only holds self._lock for a fast data-copy (microseconds); all numpy
+        computation runs outside the lock so the serial thread can keep calling
+        map.update() without blocking.
+        """
+        with self._lock:
+            data_snapshot = self.map.data.copy()
+
+        cos_arr = self.map._cos_arr
+        sin_arr = self.map._sin_arr
+        select = data_snapshot != -1
+        if not np.any(select):
             return np.empty((0, 2), dtype=float)
+        points = np.array(
+            [data_snapshot[select] * cos_arr[select],
+             -data_snapshot[select] * sin_arr[select]],
+            dtype=float,
+        ) * 0.1
+
         if points.ndim != 2:
             points = points.reshape(2, -1)
         if points.shape[0] == 2:
@@ -341,7 +358,7 @@ class LD_Radar(object):
         if max_distance_cm is not None:
             distances = np.linalg.norm(points, axis=1)
             points = points[distances <= max_distance_cm]
-        return points.astype(float, copy=False)
+        return points
 
     def get_points_body_cm(self, max_distance_cm: float | None = None) -> np.ndarray:
         """Return body-frame point cloud as shape=(N, 2), unit cm."""

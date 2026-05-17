@@ -169,36 +169,50 @@ Phase B 全部通过！
 
 **目的**: 验证 `send_realtime_control_data()` 协议层（电机未接，只测通信不测响应）。
 
+**测试脚本**: [`debug/test_fc_realtime.py`](debug/test_fc_realtime.py)
+
 ```bash
-PYTHONPATH=. python -c "
-from FlightController import FC_Controller
-from loguru import logger
-import time
+# 默认: 10 条指令, 5 条 vx=10 + 5 条 vx=0, 间隔 200ms
+PYTHONPATH=. python debug/test_fc_realtime.py
 
-fc = FC_Controller()
-fc.start_listen_serial(block_until_connected=True)
-fc.wait_for_connection()
-fc.set_flight_mode(2)
-fc.wait_for_last_command_done()
+# 自定义
+PYTHONPATH=. python debug/test_fc_realtime.py --count 20 --speed 15 --interval 0.1
+```
 
-for i in range(10):
-    fc.send_realtime_control_data(
-        vel_x=10 if i < 5 else 0,
-        vel_y=0, vel_z=0, yaw=0
-    )
-    logger.info(f'发送 #{i}: vx={10 if i<5 else 0}, mode={fc.state.mode.value}')
-    time.sleep(0.2)
-
-fc.send_realtime_control_data(0, 0, 0, 0)
-time.sleep(0.1)
-fc.close()
-logger.info('实时控制测试完成')
-"
+**预期输出** (USB供电, 无电机):
+```
+=== Phase C: 飞控实时控制通信测试 ===
+正在连接飞控...
+[FC] Serial port opened
+[FC] Connected
+飞控已连接
+当前模式: mode=1, unlock=False
+切换到定点模式 (mode=2)...
+[FC] [ACTION] SET FLIGHT MODE -> 2
+[FC] [ACTION] WAIT OK -> last cmd done
+模式已切换: mode=2
+开始发送实时控制指令...
+  发送 #0: vx=10, connected=True, mode=2
+  发送 #4: vx=10, connected=True, mode=2
+  发送 #5: vx=0, connected=True, mode=2
+  发送 #9: vx=0, connected=True, mode=2
+--- 发送完成 ---
+发送: 10/10 成功, 0 异常, 0 断连
+耗时: 2.0s, 速率: 5.0 包/秒
+最终状态: connected=True, mode=2
+[PASS] 全部指令发送成功
+[PASS] 零异常
+[PASS] 全程无断连
+[PASS] 最终 connected=True
+Phase C 全部通过！
+飞控已断开。
 ```
 
 **验证项**:
-- 所有 `send_realtime_control_data()` 不掉异常
+- 全部 `send_realtime_control_data()` 不掉异常
 - `connected` 全程保持 True
+- mode 全程保持 2（定点模式）
+- 零速指令正确发送（finally 安全保障）
 - 无 SerialException / OSError
 
 **说明**: 电机未接，`vel_x` 指令下发后飞控不会实际产生速度变化，`state.vel_x` 回传可能不反映指令值。此阶段仅验证协议层通信正常。
@@ -264,7 +278,7 @@ PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py \
 | 0 | 否 | 否 | 否 | 无 | 手动命令 |
 | A | 否 | 是 | 否 | 无 | `debug/test_fc_connect.py` |
 | B | 否 | 是 | 模式切换 | 无 | `debug/test_fc_command.py` |
-| C | 否 | 是 | 实时控制 | 无 | (见下方) |
+| C | 否 | 是 | 实时控制 | 无 | `debug/test_fc_realtime.py` |
 | D | 是 | 是 | `--dry-run` 阻断 | 无 | `FlightController/tools/test_radar_avoidance.py` |
 | E | 是 | 是 | **是** | **无** | `FlightController/tools/test_radar_avoidance.py` |
 

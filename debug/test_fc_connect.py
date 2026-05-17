@@ -58,12 +58,21 @@ def main() -> None:
         logger.info(f"指令  = cid={s.cid.value} cmd_0={s.cmd_0.value} cmd_1={s.cmd_1.value}")
 
         # 验证项
-        checks = []
-        checks.append(("mode 非默认(>0)", s.mode.value > 0))
-        checks.append(("电池电压合理 (>5V)", s.bat.value > 5.0))
-        checks.append(("connected=True", fc.connected))
-
         all_ok = True
+
+        # 电池电压: USB供电时bat=0是正常的
+        if s.bat.value == 0.0:
+            logger.info("[WARN] 电池电压=0V — 飞控可能为USB供电，电池未接")
+        elif s.bat.value < 5.0:
+            logger.warning(f"[FAIL] 电池电压过低 ({s.bat.value:.1f}V < 5V)")
+            all_ok = False
+        else:
+            logger.info(f"[PASS] 电池电压 ({s.bat.value:.1f}V)")
+
+        checks = [
+            ("mode 非默认(>0)", s.mode.value > 0),
+            ("connected=True", fc.connected),
+        ]
         for desc, result in checks:
             status = "PASS" if result else "FAIL"
             if not result:

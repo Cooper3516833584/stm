@@ -82,14 +82,14 @@ PYTHONPATH=. python debug/test_fc_connect.py --port /dev/ttyACM0
 飞控已连接，等待状态数据稳定...
 mode  = 1 (定高)
 unlock = False
-bat   = 11.5V
-alt   = 0cm (add) / 0cm (fused)
-姿态  = roll=0.5 pit=1.2 yaw=45.0
-速度  = vx=0 vy=0 vz=0
-位置  = x=0 y=0
+bat   = 0.0V
+alt   = 10cm (add) / 227cm (fused)
+姿态  = roll=0.0 pit=0.0 yaw=0.0
+速度  = vx=0 vy=0 vz=-1
+位置  = x=-159 y=-233
 指令  = cid=0 cmd_0=0 cmd_1=0
+[WARN] 电池电压=0V — 飞控可能为USB供电，电池未接
 [PASS] mode 非默认(>0)
-[PASS] 电池电压合理 (>5V)
 [PASS] connected=True
 Phase A 全部通过！
 飞控已断开。
@@ -98,8 +98,9 @@ Phase A 全部通过！
 **验证项**:
 - 端口自动发现（不应报 `RuntimeError`）
 - `wait_for_connection()` 在 5 秒内返回
-- mode / unlock / bat 回传非默认值
-- 3 项检查全部 PASS
+- mode / unlock 回传非默认值
+- bat=0.0V 为 `[WARN]` 非 `[FAIL]`（USB供电正常现象）
+- connected=True (PASS)、mode>0 (PASS)
 - 无异常或超时
 
 **失败排查**:

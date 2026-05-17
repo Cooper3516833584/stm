@@ -114,44 +114,47 @@ Phase A 全部通过！
 
 **目的**: 验证飞控接收并响应指令（ACK 机制、状态变化）。
 
+**测试脚本**: [`debug/test_fc_command.py`](debug/test_fc_command.py)
+
 ```bash
-PYTHONPATH=. python -c "
-from FlightController import FC_Controller
-from loguru import logger
-import time
+# 切换至定点模式 (mode=2)
+PYTHONPATH=. python debug/test_fc_command.py
 
-fc = FC_Controller()
-fc.start_listen_serial(block_until_connected=True)
-fc.wait_for_connection()
+# 切换至指定模式
+PYTHONPATH=. python debug/test_fc_command.py --target-mode 3
 
-logger.info(f'当前 mode={fc.state.mode.value} unlock={fc.state.unlock.value}')
-
-fc.set_flight_mode(2)  # HOLD_POS_MODE
-fc.wait_for_last_command_done()
-logger.info(f'切换后 mode={fc.state.mode.value} (预期=2)')
-
-s = fc.state
-logger.info(f'IMU: roll={s.rol.value:.1f} pit={s.pit.value:.1f} yaw={s.yaw.value:.1f}')
-logger.info(f'位置: x={s.pos_x.value} y={s.pos_y.value} alt={s.alt_add.value}cm')
-logger.info(f'速度: vx={s.vel_x.value} vy={s.vel_y.value} vz={s.vel_z.value}')
-logger.info(f'电池: {s.bat.value:.1f}V')
-
-fc.close()
-"
+# 指定端口
+PYTHONPATH=. python debug/test_fc_command.py --port /dev/ttyACM0
 ```
 
-**预期输出**:
+**预期输出** (mode=1 → mode=2, USB供电):
 ```
-当前 mode=1 unlock=0
-切换后 mode=2 (预期=2)
-IMU: roll=...
+=== Phase B: 飞控指令下发测试 ===
+正在连接飞控...
+[FC] Serial port opened
+[FC] Connected
+飞控已连接
+当前模式: mode=1 (定高 (ALT_HOLD)), unlock=False
+发送 set_flight_mode(2) → 定点 (HOLD_POS)...
+[FC] [ACTION] WAIT OK -> last cmd done
+飞控 ACK 确认
+切换后模式: mode=2 (定点 (HOLD_POS))
+  IMU 姿态: roll=0.0°  pit=0.0°  yaw=0.0°
+  高度: alt_add=10cm  alt_fused=227cm
+  速度: vx=0  vy=0  vz=-1  cm/s
+  位置: pos_x=-159  pos_y=-233  cm
+  电池/解锁: bat=0.0V  unlock=False
+  当前指令: cid=0  cmd_0=0  cmd_1=0
+[PASS] 模式已切换 (mode=1→2)
+Phase B 全部通过！
+飞控已断开。
 ```
 
 **验证项**:
 - `set_flight_mode(2)` 不掉异常
-- `wait_for_last_command_done()` 不超时
-- mode 从旧值变为 2
-- 所有 16 个状态字段可读无异常
+- `wait_for_last_command_done()` 在 10 秒内返回 True
+- `state.mode.value` 从旧值变为目标值
+- 全部 6 组状态字段可读无异常
 
 **模式说明**:
 | mode 值 | 含义 |
@@ -260,7 +263,7 @@ PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py \
 |------|------|---------|---------|------|------|
 | 0 | 否 | 否 | 否 | 无 | 手动命令 |
 | A | 否 | 是 | 否 | 无 | `debug/test_fc_connect.py` |
-| B | 否 | 是 | 模式切换 | 无 | (见下方) |
+| B | 否 | 是 | 模式切换 | 无 | `debug/test_fc_command.py` |
 | C | 否 | 是 | 实时控制 | 无 | (见下方) |
 | D | 是 | 是 | `--dry-run` 阻断 | 无 | `FlightController/tools/test_radar_avoidance.py` |
 | E | 是 | 是 | **是** | **无** | `FlightController/tools/test_radar_avoidance.py` |

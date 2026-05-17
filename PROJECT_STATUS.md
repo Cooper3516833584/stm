@@ -1,8 +1,8 @@
 # 🚁 Cooper_drone 伴随计算机系统配置与开发进度纪要
 
 **项目名称**: Cooper_drone (基于 MYiR 开发板的无人机机载/伴随计算机开发)
-**当前阶段**: M4 阶段竣工 (单雷达在线避障链路联调完成，端到端延迟 < 5ms，设备钟速 100%，零积压，零 CRC 错误) + 基础设施迁移完成
-**最后更新**: 2026年5月17日 (map.update() 热路径优化终版，实物延迟验证通过)
+**当前阶段**: M5 阶段 — 飞控联调完成 (Phase A-E 全部通过) + 单雷达在线避障完整链路验证（雷达→避障→飞控指令下发，端到端 < 12ms）
+**最后更新**: 2026年5月17日 (飞控联调 Phase A-E 全部通过，FC+雷达完整链路验证完成)
 
 ---
 
@@ -308,10 +308,13 @@ tail -f /media/sdcard/latency_verify.log | grep LATENCY
 
 当前状态: 单雷达在线避障链路已 100% 验证（设备钟速 ≥100%、零积压、零 CRC 错误、端到端延迟 < 5ms、CPU 占用 12%）。以下为雷达相关后续工作，按优先级排序:
 
-### 8.1 飞控联调 (阶段 B/C) — 优先级 ⭐⭐⭐
-- [ ] `test_radar_avoidance.py` + `--no-fc` 去除，连接飞控，确认 `fc.state` 回传正常
-- [ ] 完整链路 `test_radar_avoidance.py`（无 `--dry-run`），确认 `send_realtime_control_data(vx, vy, vz, yaw)` 正确下发至匿名飞控
-- [ ] 地面推车测试：手持障碍物靠近雷达，通过飞控调试口验证速度指令变化（stop→slow→cruise 三段切换）
+### 8.1 飞控联调 (阶段 B/C) — 优先级 ⭐⭐⭐ ✅ 已完成 (2026-05-17)
+- [x] Phase A: `debug/test_fc_connect.py` — FC 基础连通性，mode/bat/姿态/速度/位置 16 字段回传正常
+- [x] Phase B: `debug/test_fc_command.py` — `set_flight_mode(2)` ACK 确认，mode 切换到 HOLD_POS 成功
+- [x] Phase C: `debug/test_fc_realtime.py` — `send_realtime_control_data()` 10/10 成功，零异常零断连
+- [x] Phase D: `test_radar_avoidance.py --dry-run` — FC+雷达并行运行，设备钟速 100%，FC 心跳对雷达链路零干扰
+- [x] Phase E: `test_radar_avoidance.py` (去除 --dry-run) — 真实飞控指令下发，stop/slow/cruise 三段避障完整验证，Ctrl+C 安全退出零速发送
+- [x] 地面推车测试：手持障碍物靠近雷达，通过 FC 状态回传验证速度指令变化（stop→slow→cruise 三段切换）
 
 ### 8.2 单雷达盲区评估 — 优先级 ⭐⭐⭐
 - [ ] 测绘 D500 单线雷达在无人机平台上的实际视野覆盖（水平 360° 全覆盖，俯仰为单平面）
@@ -333,6 +336,104 @@ tail -f /media/sdcard/latency_verify.log | grep LATENCY
 - [ ] 当前为纯前向走廊检测 (1D stop/slow/cruise)，升级为基于势场法 (PFBPP) 的方向性避障
 - [ ] 集成 `PathPlanner.py` 到在线 loop 中，实现 360° 障碍物排斥 + 目标吸引的路径规划
 - [ ] 评估 PFBPP vs VFH 在 D500 点云密度下的适用性（D500 单帧 12 点，远低于传统 2D LiDAR）
+
+---
+
+## 9. M5 阶段：飞控联调代码范式 (2026-05-17 完成)
+
+### 9.1 飞控连接最小范式
+
+Phases A-C 独立测试脚本位于 `debug/` 目录，Phase D-E 复用 `test_radar_avoidance.py`。以下为已验证的 FC 连接代码范式：
+
+```python
+from FlightController import FC_Controller
+
+fc = FC_Controller()
+
+# 自动探测 VID/PID 66CC:2233 端口, block 模式持续重试直到连接
+fc.start_listen_serial(block_until_connected=True)
+fc.wait_for_connection(timeout_s=5)
+
+# 读取状态 (FC_State_Struct, 16 字段)
+s = fc.state
+print(s.mode.value)     # 1=定高 2=定点 3=程控
+print(s.unlock.value)   # bool, 电机解锁状态
+print(s.bat.value)      # float, 电池电压 (USB供电=0.0V)
+print(s.rol.value)      # float, roll 角度
+# ... 其余 12 字段见 FC_State_Struct.RECV_ORDER
+
+# 模式切换 (实时控制需 HOLD_POS)
+fc.set_flight_mode(2)           # 切定点模式
+fc.wait_for_last_command_done() # 等待 ACK (timeout 10s)
+
+# 实时控制 (需先切 mode=2)
+fc.send_realtime_control_data(vel_x=30, vel_y=0, vel_z=0, yaw=0)
+
+# 安全退出: 发送零速 → 关闭
+fc.send_realtime_control_data(0, 0, 0, 0)  # 先归零
+fc.close()                                  # 再断开
+```
+
+### 9.2 避障链路集成范式 (test_radar_avoidance.py 核心循环)
+
+```python
+# --- 初始化 ---
+fc = FC_Controller()
+fc.start_listen_serial(block_until_connected=True)
+fc.wait_for_connection()
+fc.set_flight_mode(2)
+fc.wait_for_last_command_done()
+
+radar = LDRadar_Driver(port="/dev/ttySTM4")
+planner = LocalPlanner(enable_free_flight=True, forward_corridor_half_width_cm=50)
+
+# --- 主循环 (100Hz) ---
+while running:
+    points_body = radar.map.get_points_body_cm(max_distance=200)
+    obstacle_cm = planner.update(points_body)
+    vx, vy, vz, yaw = planner.get_velocity_command()
+    
+    if not dry_run:
+        fc.send_realtime_control_data(vel_x=vx, vel_y=vy, vel_z=vz, yaw=yaw)
+    
+    # 日志 (每10帧)
+    logger.info(f"FC[mode={fc.state.mode.value} ...] | "
+                f"点云={len(points_body)}点 | 前方={obstacle_cm}cm | "
+                f"指令=(vx={vx}, vy={vy}, vz={vz}, yaw={yaw})")
+
+# --- 安全退出 (finally 块) ---
+fc.send_realtime_control_data(0, 0, 0, 0)
+radar.stop()
+fc.close()
+```
+
+### 9.3 FC 与雷达并行性能验证
+
+| 指标 | Phase E 实测 | M4 纯雷达基准 | 结论 |
+|---|---|---|---|
+| 设备钟速 | 100.00-100.01% | 100.01% | 零干扰 |
+| 串口吞吐 | 415-417 包/秒 (139-140%) | 416 包/秒 (140%) | 零衰减 |
+| CRC 错误 | 0 次 | 0 次 | — |
+| 解析buf | 0B | 0B | — |
+| 单次循环 | 5.3-11.7ms | 4.4-12.1ms | 无差异 |
+| 点云数 | 835-955 | 804-827 | FC 线程无干扰 |
+
+FC 心跳线程 (每 250ms 发送 AA 22 帧) 对雷达串口读取线程无 GIL 争用影响，设备钟速保持 100% 收敛。
+
+### 9.4 调试脚本目录
+
+| 脚本 | 用途 | 关键参数 |
+|---|---|---|
+| `debug/test_fc_connect.py` | Phase A: FC 连通性 + 全状态打印 | `--port` 指定串口 |
+| `debug/test_fc_command.py` | Phase B: 模式切换 + ACK 验证 | `--target-mode` 1/2/3 |
+| `debug/test_fc_realtime.py` | Phase C: 实时控制协议层测试 | `--count` `--speed` `--interval` |
+| `FlightController/tools/test_radar_avoidance.py` | Phase D/E: 避障链路完整测试 | `--dry-run` `--profile` `--raw-latency` |
+
+运行方式: `cd ~/Desktop/ObstacleAvoidanceDrone && PYTHONPATH=. python debug/<script>.py`
+
+### 9.5 USB 供电注意事项
+
+FC 通过 USB 供电时 (无电池)，`state.bat.value` 回传 0.0V。此非故障——电池检测引脚悬空导致 ADC 读数为 0。Phase A 测试已适配此场景（bat=0 → WARN 非 FAIL）。实际飞行前需接入电池并验证 bat > 10V。
 
 ---
 

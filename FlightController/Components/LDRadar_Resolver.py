@@ -302,26 +302,24 @@ class Map_Circle(object):
             base = round(point.degree * self.ACC)
             if self.REMAP == 0:
                 base %= 360 * self.ACC
-                if base not in deg_values_dict:
-                    deg_values_dict[base] = []
-                deg_values_dict[base].append(point.distance)
+                deg_values_dict.setdefault(base, []).append(point.distance)
             else:
-                # Avoid np.arange() in hot path — pure int arithmetic is faster on ARM
                 for offset in range(-self.REMAP, self.REMAP + 1):
                     deg = (base + offset) % (360 * self.ACC)
-                    try:
-                        deg_values_dict[deg].append(point.distance)
-                    except KeyError:
-                        deg_values_dict[deg] = [point.distance]
+                    deg_values_dict.setdefault(deg, []).append(point.distance)
+        # Use Python builtins instead of numpy for tiny lists (1-3 elements):
+        # numpy C-layer dispatch dominates, Python min/max is ~20x faster here.
+        # Also hoist time.perf_counter() — one call per frame instead of one per bin.
+        _now = time.perf_counter() if self.timeout_clear else None
         for deg, values in deg_values_dict.items():
             if self.update_mode == self.MODE_MIN:
-                self.data[deg] = np.min(values)
+                self.data[deg] = min(values)
             elif self.update_mode == self.MODE_MAX:
-                self.data[deg] = np.max(values)
+                self.data[deg] = max(values)
             elif self.update_mode == self.MODE_AVG:
-                self.data[deg] = np.round(np.mean(values))
-            if self.timeout_clear:
-                self.time_stamp[deg] = time.perf_counter()
+                self.data[deg] = round(sum(values) / len(values))
+            if _now is not None:
+                self.time_stamp[deg] = _now
         self.rotation_spd = data.rotation_spd / 360 * 60
         self.update_count += 1
         # timeout_clear + avail_points are the two heaviest operations per frame

@@ -1,5 +1,6 @@
 """
-Micro-benchmark: measure per-step cost of Map_Circle.update() on the real board.
+Incremental micro-benchmark: measure the impact of each dict_apply / dict_build
+optimization across 6 variants.
 
 Usage:
     PYTHONPATH=. python -u FlightController/tools/bench_map_update.py
@@ -7,7 +8,6 @@ Usage:
 
 from __future__ import annotations
 
-import struct
 import sys
 import time
 from pathlib import Path
@@ -21,128 +21,353 @@ def _setup_path() -> None:
             sys.path.insert(0, value)
 
 
-def main() -> None:
-    _setup_path()
+# ---------------------------------------------------------------------------
+# Shared data
+# ---------------------------------------------------------------------------
+N_FRAMES = 300
+WARMUP = 30
+ACC = 3          # 360 * 3 = 1080 bins
+REMAP = 2        # ±2° mapping
+TOTAL_BINS = 360 * ACC  # 1080
 
+
+def _build_input_frames(n: int) -> list[list[tuple[int, int]]]:
+    """Return `n` frames, each a list of (degree_x10, distance_mm).  Degrees
+    rotate 1.0° per frame to exercise fresh dict keys every frame."""
+    frames = []
+    for f in range(n):
+        pts = []
+        base_deg = (f * 10) % 3600  # degrees × 10
+        for i in range(12):
+            d = base_deg + i * 300  # 30° spacing
+            dist = 1500 + (i * 23) % 500
+            pts.append((d % 3600, dist))
+        frames.append(pts)
+    return frames
+
+
+# ---------------------------------------------------------------------------
+# Variant implementations — each returns (dict_build_ms, dict_apply_ms)
+# ---------------------------------------------------------------------------
+
+def _v_baseline(frames: list[list[tuple[int, int]]]) -> tuple[list[float], list[float]]:
     import numpy as np
-    from FlightController.Components.LDRadar_Resolver import Map_Circle, Radar_Package, Point_2D
+    data = np.ones(TOTAL_BINS, dtype=np.int64) * -1
+    ts_arr = np.zeros(TOTAL_BINS, dtype=np.float64)
 
-    N_FRAMES = 300
-    WARMUP = 30
-
-    map_ = Map_Circle()
-    map_.timeout_clear = True
-    map_.timeout_time = 0.15
-
-    # -------- build a realistic 12-point Radar_Package --------
-    pkg = Radar_Package()
-    pkg.rotation_spd = 35800  # centi-degree/s  → 358 deg/s → ~10rps
-    pkg.time_stamp = 1000     # ms, D500 raw timestamp
-    for i in range(12):
-        deg = (i * 30.0 + 10.0) % 360.0
-        pkg.points.append(Point_2D(deg, 1500.0, 200))  # 1.5m, conf=200
-
-    # ---------- warmup ----------
-    for _ in range(WARMUP):
-        map_.update(pkg)
-
-    # ---------- step-by-step timing ----------
-    # We instrument a copy of update() logic to measure each phase.
-    data = pkg  # alias
-    timings: dict[str, list[float]] = {
-        "dict_build": [],
-        "dict_apply": [],
-        "timeout_clear": [],
-        "avail_points": [],
-        "total": [],
-    }
-
-    for _ in range(N_FRAMES):
-        t_total = time.perf_counter()
-
-        # --- Phase 1: build deg_values_dict (pure Python dict) ---
-        t1 = time.perf_counter()
-        deg_values_dict = {}
-        for point in data.points:
-            if point.distance < map_.distance_threshold or point.confidence < map_.confidence_threshold:
-                continue
-            base = round(point.degree * map_.ACC)
-            if map_.REMAP == 0:
-                base %= 360 * map_.ACC
+    build_times, apply_times = [], []
+    for pts in frames:
+        # dict_build
+        t0 = time.perf_counter()
+        deg_values_dict: dict[int, list[int]] = {}
+        for deg_x10, dist in pts:
+            base = round(deg_x10 / 10 * ACC)
+            if REMAP == 0:
+                base %= TOTAL_BINS
                 try:
-                    deg_values_dict[base].append(point.distance)
+                    deg_values_dict[base].append(dist)
                 except KeyError:
-                    deg_values_dict[base] = [point.distance]
+                    deg_values_dict[base] = [dist]
             else:
-                for offset in range(-map_.REMAP, map_.REMAP + 1):
-                    deg = (base + offset) % (360 * map_.ACC)
+                for offset in range(-REMAP, REMAP + 1):
+                    deg = (base + offset) % TOTAL_BINS
                     try:
-                        deg_values_dict[deg].append(point.distance)
+                        deg_values_dict[deg].append(dist)
                     except KeyError:
-                        deg_values_dict[deg] = [point.distance]
+                        deg_values_dict[deg] = [dist]
+        t1 = time.perf_counter()
+
+        # dict_apply
+        for deg, values in deg_values_dict.items():
+            data[deg] = np.min(values)
+            ts_arr[deg] = time.perf_counter()
         t2 = time.perf_counter()
 
-        # --- Phase 2: apply to data[] grid ---
+        build_times.append((t1 - t0) * 1000)
+        apply_times.append((t2 - t1) * 1000)
+
+    return build_times, apply_times
+
+
+def _v_apply_builtins(frames: list[list[tuple[int, int]]]) -> tuple[list[float], list[float]]:
+    import numpy as np
+    data = np.ones(TOTAL_BINS, dtype=np.int64) * -1
+    ts_arr = np.zeros(TOTAL_BINS, dtype=np.float64)
+
+    build_times, apply_times = [], []
+    for pts in frames:
+        # dict_build (same as baseline)
+        t0 = time.perf_counter()
+        deg_values_dict: dict[int, list[int]] = {}
+        for deg_x10, dist in pts:
+            base = round(deg_x10 / 10 * ACC)
+            if REMAP == 0:
+                base %= TOTAL_BINS
+                try:
+                    deg_values_dict[base].append(dist)
+                except KeyError:
+                    deg_values_dict[base] = [dist]
+            else:
+                for offset in range(-REMAP, REMAP + 1):
+                    deg = (base + offset) % TOTAL_BINS
+                    try:
+                        deg_values_dict[deg].append(dist)
+                    except KeyError:
+                        deg_values_dict[deg] = [dist]
+        t1 = time.perf_counter()
+
+        # dict_apply: Python builtins
         for deg, values in deg_values_dict.items():
-            if map_.update_mode == map_.MODE_MIN:
-                map_.data[deg] = np.min(values)
-            elif map_.update_mode == map_.MODE_MAX:
-                map_.data[deg] = np.max(values)
-            elif map_.update_mode == map_.MODE_AVG:
-                map_.data[deg] = np.round(np.mean(values))
-            if map_.timeout_clear:
-                map_.time_stamp[deg] = time.perf_counter()
-        t3 = time.perf_counter()
+            data[deg] = min(values)
+            ts_arr[deg] = time.perf_counter()
+        t2 = time.perf_counter()
 
-        # --- Phase 3: timeout_clear (full array scan) ---
-        if map_.timeout_clear:
-            map_.data[map_.time_stamp < time.perf_counter() - map_.timeout_time] = -1
-        t4 = time.perf_counter()
+        build_times.append((t1 - t0) * 1000)
+        apply_times.append((t2 - t1) * 1000)
 
-        # --- Phase 4: avail_points (full array scan) ---
-        map_.avail_points = np.count_nonzero(map_.data != -1)
-        t5 = time.perf_counter()
+    return build_times, apply_times
 
-        map_.rotation_spd = data.rotation_spd / 360 * 60
-        map_.update_count += 1
 
-        timings["dict_build"].append((t2 - t1) * 1000)
-        timings["dict_apply"].append((t3 - t2) * 1000)
-        timings["timeout_clear"].append((t4 - t3) * 1000)
-        timings["avail_points"].append((t5 - t4) * 1000)
-        timings["total"].append((t5 - t_total) * 1000)
+def _v_apply_one_ts(frames: list[list[tuple[int, int]]]) -> tuple[list[float], list[float]]:
+    import numpy as np
+    data = np.ones(TOTAL_BINS, dtype=np.int64) * -1
+    ts_arr = np.zeros(TOTAL_BINS, dtype=np.float64)
 
-    # ---------- report ----------
-    def _pct(values, p):
-        s = sorted(values)
-        return s[int(round((len(s) - 1) * p))]
+    build_times, apply_times = [], []
+    for pts in frames:
+        # dict_build (same as baseline)
+        t0 = time.perf_counter()
+        deg_values_dict: dict[int, list[int]] = {}
+        for deg_x10, dist in pts:
+            base = round(deg_x10 / 10 * ACC)
+            if REMAP == 0:
+                base %= TOTAL_BINS
+                try:
+                    deg_values_dict[base].append(dist)
+                except KeyError:
+                    deg_values_dict[base] = [dist]
+            else:
+                for offset in range(-REMAP, REMAP + 1):
+                    deg = (base + offset) % TOTAL_BINS
+                    try:
+                        deg_values_dict[deg].append(dist)
+                    except KeyError:
+                        deg_values_dict[deg] = [dist]
+        t1 = time.perf_counter()
 
-    print()
-    print(f"{'Step':<22} {'p50(ms)':>8} {'p95(ms)':>8} {'max(ms)':>8} {'sum/s':>10}")
-    print("-" * 56)
-    total_per_sec = 0.0
-    for name in ("dict_build", "dict_apply", "timeout_clear", "avail_points", "total"):
-        vals = timings[name]
+        # dict_apply: single time.perf_counter()
+        _now = time.perf_counter()
+        for deg, values in deg_values_dict.items():
+            data[deg] = np.min(values)
+            ts_arr[deg] = _now
+        t2 = time.perf_counter()
+
+        build_times.append((t1 - t0) * 1000)
+        apply_times.append((t2 - t1) * 1000)
+
+    return build_times, apply_times
+
+
+def _v_apply_both(frames: list[list[tuple[int, int]]]) -> tuple[list[float], list[float]]:
+    import numpy as np
+    data = np.ones(TOTAL_BINS, dtype=np.int64) * -1
+    ts_arr = np.zeros(TOTAL_BINS, dtype=np.float64)
+
+    build_times, apply_times = [], []
+    for pts in frames:
+        # dict_build (same as baseline)
+        t0 = time.perf_counter()
+        deg_values_dict: dict[int, list[int]] = {}
+        for deg_x10, dist in pts:
+            base = round(deg_x10 / 10 * ACC)
+            if REMAP == 0:
+                base %= TOTAL_BINS
+                try:
+                    deg_values_dict[base].append(dist)
+                except KeyError:
+                    deg_values_dict[base] = [dist]
+            else:
+                for offset in range(-REMAP, REMAP + 1):
+                    deg = (base + offset) % TOTAL_BINS
+                    try:
+                        deg_values_dict[deg].append(dist)
+                    except KeyError:
+                        deg_values_dict[deg] = [dist]
+        t1 = time.perf_counter()
+
+        # dict_apply: Python builtins + single timestamp
+        _now = time.perf_counter()
+        for deg, values in deg_values_dict.items():
+            data[deg] = min(values)
+            ts_arr[deg] = _now
+        t2 = time.perf_counter()
+
+        build_times.append((t1 - t0) * 1000)
+        apply_times.append((t2 - t1) * 1000)
+
+    return build_times, apply_times
+
+
+def _v_build_setdefault(frames: list[list[tuple[int, int]]]) -> tuple[list[float], list[float]]:
+    import numpy as np
+    data = np.ones(TOTAL_BINS, dtype=np.int64) * -1
+    ts_arr = np.zeros(TOTAL_BINS, dtype=np.float64)
+
+    build_times, apply_times = [], []
+    for pts in frames:
+        # dict_build: setdefault
+        t0 = time.perf_counter()
+        deg_values_dict: dict[int, list[int]] = {}
+        for deg_x10, dist in pts:
+            base = round(deg_x10 / 10 * ACC)
+            if REMAP == 0:
+                base %= TOTAL_BINS
+                deg_values_dict.setdefault(base, []).append(dist)
+            else:
+                for offset in range(-REMAP, REMAP + 1):
+                    deg = (base + offset) % TOTAL_BINS
+                    deg_values_dict.setdefault(deg, []).append(dist)
+        t1 = time.perf_counter()
+
+        # dict_apply (same as baseline)
+        for deg, values in deg_values_dict.items():
+            data[deg] = np.min(values)
+            ts_arr[deg] = time.perf_counter()
+        t2 = time.perf_counter()
+
+        build_times.append((t1 - t0) * 1000)
+        apply_times.append((t2 - t1) * 1000)
+
+    return build_times, apply_times
+
+
+def _v_full(frames: list[list[tuple[int, int]]]) -> tuple[list[float], list[float]]:
+    import numpy as np
+    data = np.ones(TOTAL_BINS, dtype=np.int64) * -1
+    ts_arr = np.zeros(TOTAL_BINS, dtype=np.float64)
+
+    build_times, apply_times = [], []
+    for pts in frames:
+        # dict_build: setdefault
+        t0 = time.perf_counter()
+        deg_values_dict: dict[int, list[int]] = {}
+        for deg_x10, dist in pts:
+            base = round(deg_x10 / 10 * ACC)
+            if REMAP == 0:
+                base %= TOTAL_BINS
+                deg_values_dict.setdefault(base, []).append(dist)
+            else:
+                for offset in range(-REMAP, REMAP + 1):
+                    deg = (base + offset) % TOTAL_BINS
+                    deg_values_dict.setdefault(deg, []).append(dist)
+        t1 = time.perf_counter()
+
+        # dict_apply: Python builtins + single timestamp
+        _now = time.perf_counter()
+        for deg, values in deg_values_dict.items():
+            data[deg] = min(values)
+            ts_arr[deg] = _now
+        t2 = time.perf_counter()
+
+        build_times.append((t1 - t0) * 1000)
+        apply_times.append((t2 - t1) * 1000)
+
+    return build_times, apply_times
+
+
+# ---------------------------------------------------------------------------
+# Reporting helpers
+# ---------------------------------------------------------------------------
+
+def _pct(values: list[float], p: float) -> float:
+    s = sorted(values)
+    return s[int(round((len(s) - 1) * p))]
+
+
+def _run_variant(name: str, fn, frames, warmup_idx: int) -> list[dict]:
+    """Run variant, return per-step rows for reporting."""
+    # warmup
+    fn(frames[:warmup_idx])
+    # measure
+    build, apply = fn(frames[warmup_idx:])
+    total = [b + a for b, a in zip(build, apply)]
+    n = len(build)
+
+    def _row(step: str, vals: list[float]) -> dict:
         p50 = _pct(vals, 0.5)
         p95 = _pct(vals, 0.95)
         mx = max(vals)
-        per_sec = sum(vals) / max(N_FRAMES, 1) * 300  # extrapolate to 300fps
-        print(f"{name:<22} {p50:8.3f} {p95:8.3f} {mx:8.3f} {per_sec:8.0f}ms")
-        total_per_sec += per_sec if name != "total" else 0
-    print("-" * 56)
-    print(f"{'extrapolated @300fps':<22} {'':>8} {'':>8} {'':>8} {total_per_sec:8.0f}ms")
-    print(f"{'CPU load (single core)':<22} {'':>8} {'':>8} {'':>8} {total_per_sec/10:7.1f}%")
+        per_sec = sum(vals) / n * 300  # extrapolate to 300fps
+        return {
+            "variant": name,
+            "step": step,
+            "p50": p50,
+            "p95": p95,
+            "max": mx,
+            "sum_s": per_sec,
+        }
+
+    return [
+        _row("dict_build", build),
+        _row("dict_apply", apply),
+        _row("total", total),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+VARIANTS = [
+    ("BASELINE", _v_baseline),
+    ("APPLY_BUILTINS", _v_apply_builtins),
+    ("APPLY_ONE_TS", _v_apply_one_ts),
+    ("APPLY_BOTH", _v_apply_both),
+    ("BUILD_SETDEFAULT", _v_build_setdefault),
+    ("FULL_OPT", _v_full),
+]
+
+
+def main() -> None:
+    _setup_path()
+
+    print(f"\n{'='*80}")
+    print(f"  map.update() incremental benchmark  ({N_FRAMES} frames + {WARMUP} warmup)")
+    print(f"{'='*80}\n")
+
+    frames_all = _build_input_frames(N_FRAMES + WARMUP)
+
+    all_rows = []
+    for name, fn in VARIANTS:
+        rows = _run_variant(name, fn, frames_all, WARMUP)
+        all_rows.extend(rows)
+        p50_total = rows[-1]["p50"]
+        cpu = rows[-1]["sum_s"] / 10
+        print(f"  {name:<18}  total p50={p50_total:7.3f}ms  @300fps={rows[-1]['sum_s']:5.0f}ms/s  CPU={cpu:5.1f}%")
     print()
 
-    # ---------- optimized mode projection ----------
-    print("--- projected with timeout_clear+avail reduced to every 12th frame ---")
-    base_per_frame = (_pct(timings["dict_build"], 0.5)
-                      + _pct(timings["dict_apply"], 0.5)
-                      + _pct(timings["timeout_clear"], 0.5) / 12
-                      + _pct(timings["avail_points"], 0.5) / 12)
-    per_sec_opt = base_per_frame * 300
-    print(f"Projected per-frame: {base_per_frame:.3f}ms  →  @300fps: {per_sec_opt:.0f}ms/s  "
-          f"CPU: {per_sec_opt/10:.1f}%")
+    # Detailed table
+    header = f"  {'Variant':<18} {'Step':<12} {'p50(ms)':>8} {'p95(ms)':>8} {'max(ms)':>8} {'sum/s':>8}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    baseline_total = None
+    for row in all_rows:
+        line = f"  {row['variant']:<18} {row['step']:<12} {row['p50']:8.3f} {row['p95']:8.3f} {row['max']:8.3f} {row['sum_s']:8.0f}"
+        print(line)
+        if row["variant"] == "BASELINE" and row["step"] == "total":
+            baseline_total = row
+    print()
+
+    # Savings summary
+    if baseline_total:
+        full_row = [r for r in all_rows if r["variant"] == "FULL_OPT" and r["step"] == "total"][0]
+        save_ms = baseline_total["p50"] - full_row["p50"]
+        save_pct = save_ms / baseline_total["p50"] * 100 if baseline_total["p50"] > 0 else 0
+        save_cpu = (baseline_total["sum_s"] - full_row["sum_s"]) / 10
+        print(f"  FULL_OPT vs BASELINE:")
+        print(f"    p50:  {baseline_total['p50']:.3f}ms → {full_row['p50']:.3f}ms  ({save_ms:.3f}ms, {save_pct:.0f}%)")
+        print(f"    CPU:  {baseline_total['sum_s']/10:.1f}% → {full_row['sum_s']/10:.1f}%  (saved {save_cpu:.1f}%)")
+        print(f"    @300fps: {full_row['sum_s']:.0f}ms/s  (headroom: {100-full_row['sum_s']/10:.0f}%)")
     print()
 
 

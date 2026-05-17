@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python debug/_fix_plan_d.py)",
+      "Bash(rm debug/_fix_plan_d.py)"
+    ]
+  }
+}

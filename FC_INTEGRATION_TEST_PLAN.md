@@ -232,8 +232,8 @@ PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py \
 
 **预期输出**:
 ```
-[#0010] FC[mode=2 unlock=0 bat=11.5V alt=0cm] | 点云=810点 | 前方=无 | 指令=(vx=30, vy=0, vz=0, yaw=0) | 原因=free_flight
-[#0020] FC[mode=2 unlock=0 bat=11.5V alt=0cm] | 点云=809点 | 前方=无 | 指令=(vx=30, vy=0, vz=0, yaw=0) | 原因=free_flight
+[#0010] FC[mode=2 unlock=0 bat=0.0V alt=10cm] | 点云=810点 | 前方=无 | 指令=(vx=30, vy=0, vz=0, yaw=0) | 原因=free_flight
+[#0020] FC[mode=2 unlock=0 bat=0.0V alt=10cm] | 点云=809点 | 前方=无 | 指令=(vx=30, vy=0, vz=0, yaw=0) | 原因=free_flight
 [RAW_LATENCY] 雷达帧年龄: 当前=1ms 区间峰值=16ms | 设备钟速=100.0x% | 串口buf峰值=3xxB 解析buf=0B
 ```
 

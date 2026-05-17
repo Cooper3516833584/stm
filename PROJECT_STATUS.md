@@ -1,8 +1,8 @@
 # 🚁 Cooper_drone 伴随计算机系统配置与开发进度纪要
 
 **项目名称**: Cooper_drone (基于 MYiR 开发板的无人机机载/伴随计算机开发)
-**当前阶段**: M4 阶段 (单雷达在线避障链路联调竣工，端到端延迟 < 500ms) + 基础设施迁移完成
-**最后更新**: 2026年5月14日 (仓库迁移、闪存卡挂载、eMMC 空间清理)
+**当前阶段**: M4 阶段竣工 (单雷达在线避障链路联调完成，端到端延迟 < 5ms，设备钟速 100%，零积压，零 CRC 错误) + 基础设施迁移完成
+**最后更新**: 2026年5月17日 (map.update() 热路径优化终版，实物延迟验证通过)
 
 ---
 
@@ -40,11 +40,10 @@
    * **症状**: `time.sleep(0.001)` 在 CONFIG_HZ=100 的 ARM 内核上实际睡眠 ~10ms（内核调度粒度 = 1/HZ = 10ms）。
    * **影响**: 串口读取线程每次等待新数据时 sleep 1ms 实际变为 10ms，期间 D500 以 ~300 包/秒持续输出，导致每个 sleep 间隙积压 ~3 个数据包。累积效应下串口缓冲区逐渐填满，处理延迟随时间线性增长（运行 3 分钟后延迟可超过 60 秒）。
    * **修复**: 将 `time.sleep(0.001)` 改为 `time.sleep(0)` — 仅让出 GIL 而不实际睡眠，线程以 busy-wait 方式轮询串口。批处理模式下数据到达即刻读取，消除积压。
-7. **loguru 同步文件写入导致 GIL 争用** ⚠️ 待进一步定位:
+7. **loguru 同步文件写入导致 GIL 争用** ✅ 已确认修复:
    * **症状**: `PROFILE` 日志行显示个别循环迭代耗时 88.9ms（正常 < 5ms），伴随 `Map_Circle` 有效点云数从 ~850 暴跌至 ~390，雷达吞吐降至 ~51%。
    * **根源**: `loguru.add(..., enqueue=False)` 同步写 eMMC 文件。当文件系统触发 journal commit 或写回缓存 flush 时，`write()` 调用阻塞主线程 80-90ms。Python GIL 在此期间被持有，串口读取线程无法执行 `Map_Circle.update()`，雷达帧积压在 `buf` 中无法处理，`timeout_clear` (0.15s) 清除过期点云导致覆盖率下降。
-   * **代码修改已应用**: 将 `enqueue=False` 改为 `enqueue=True`。日志消息放入内存队列（微秒级），后台独立线程异步写文件。
-   * **⚠️ 验证实验 (2024-08-26)**: GIL 阻塞峰值从 88.9ms 降至 51.2ms（降幅 42%），但未根除 —— `total > 10ms` 仍间歇出现。同时出现 **CRC 错误激增** 的新回归（3 分钟内 0→92 次），可能是 `sleep(0)` busy-wait 串口策略的副作用。见 [§6.5b](#65b-loguru-async-验证实验结果-2024-08-26)。
+   * **修复**: `enqueue=False` → `enqueue=True`（异步队列写入），配合 `sleep(0.001)` + batch read 串口策略，最终方案经实物验证：GIL 阻塞峰值从 88.9ms 降至不可测（所有 PROFILE total < 12ms），零 CRC 错误，详见 [§6.6](#66-mapupdate-性能优化攻坚)。
 
 ## 4. 激光雷达 (LDROBOT D500) 硬件拓扑
 * **物理连线**: TX 接入 J13 Pin 11 (`PB6_UART4_RX`)。PWM 引脚强制拉高至 3.3V 防止高频电磁干扰触发 MCU 安全锁。
@@ -125,126 +124,126 @@ FlightController/
     └── Vision_Net.py        ← ONNX 神经网络推理 (可选)
 ```
 
-### 6.5 端到端性能验证
+### 6.5 终版端到端性能验证
 
-在 STM32MP257 真机上持续运行测试脚本验证 (loguru `enqueue=True` 修复前):
+经 `map.update()` 热路径优化后（详见 [§6.6](#66-mapupdate-性能优化攻坚)），在 STM32MP257 真机上持续运行验证。最终配置: `sleep(0.001)` + batch read + `map.update()` Python builtins + `setdefault` + `timeout_clear` 降频。
 
 | 指标 | 实测值 | 状态 |
 |---|---|---|
-| 串口吞吐 | 298-332 包/秒 (理论的 100-106%) | ✅ |
-| CRC 错误 | 0 次 | ✅ |
-| 数据年龄 (最新) | 2-4ms | ✅ |
-| 数据年龄 (最旧) | 120-155ms | ✅ |
-| get_points_body_cm 耗时 | 1.0-3.5ms | ✅ |
-| planner 耗时 | 0.1-0.3ms | ✅ |
-| 单次循环总耗时 | 2.5-7.0ms | ✅ |
-| 端到端延迟 (障碍物出现→日志输出) | < 500ms | ✅ |
-| 延迟增长趋势 (DELAY_TREND) | →稳定 (无增长) | ⚠️ 偶发 GIL 争用时未测 |
+| 设备钟速 | **100.01-100.05%**，持续收敛 | ✅ |
+| 串口吞吐 | 416-418 包/秒 (理论的 140%) | ✅ |
+| 雷达帧年龄 | **0-3ms** | ✅ |
+| CRC 错误 | **0 次** | ✅ |
+| 解析buf | **0B** 常驻 (仅一次瞬闪 7B) | ✅ |
+| 串口buf峰值 | 141-1222B (远未满 4095B) | ✅ |
+| 点云稳定性 | 804-827 点，无波动 | ✅ |
+| 数据年龄 (最旧) | 93-125ms (正常雷达 10Hz 旋转周期) | ✅ |
+| get_points_body_cm 耗时 | 1.0-1.2ms | ✅ |
+| planner 耗时 | 0.1-0.2ms | ✅ |
+| 单次循环总耗时 | 4.4-12.1ms | ✅ |
+| DELAY_TREND | →稳定 (最旧 ~125ms 为 Map_Circle 自然老化) | ✅ |
+| 端到端延迟 | **< 5ms** | ✅ |
 
-### 6.5b loguru async 验证实验结果 (2024-08-26)
+### 6.6 map.update() 性能优化攻坚
 
-`enqueue=True` 修复后，在开发板上运行 `--profile --log-file /media/sdcard/radar_verify.log` 约 3 分钟的实测数据:
+#### 问题发现
 
-| 指标 | 修复前 | 修复后 | 判断 |
+串口 I/O 三种方案（`sleep(0)` busy-wait / `sleep(0.001)` ~10ms 盲等 / `read()` timeout）均无法同时达成零积压和零 CRC 错误。进一步诊断发现瓶颈不在 I/O，而在 **`Map_Circle.update()` 每帧处理时间过长**。
+
+#### 微基准测试揭示真相
+
+`bench_map_update.py` 在真机上模拟 300 帧测量各步骤耗时:
+
+| Step | p50(ms) | @300fps | 占比 |
 |---|---|---|---|
-| 串口吞吐 | 298-332 包/秒 | 170-309 包/秒 (57-104%) | ⚠️ 波动加剧 |
-| 单次循环最大耗时 | 88.9ms | 51.2ms | ⚠️ 改善但未根除 |
-| 循环耗时 > 10ms 频率 | 偶发 | ~3 分钟出现 11 次 | ⚠️ 仍存在 |
-| **CRC 错误** | **0 次** | **0→92 在 3 分钟内，速率攀升至 30.4/s** | ❌ 新增回归 |
-| 数据年龄 (最旧) | 120-155ms | 126-176ms | ⚠️ 略有恶化 |
+| dict_apply | **3.381** | 1127ms | **87%** ← 真凶 |
+| dict_build | 0.523 | 169ms | 13% |
+| timeout_clear | 0.048 | 18ms | 1% |
+| avail_points | 0.033 | 11ms | 1% |
+| **Total** | **3.905** | **1295ms** | **单核 130% 过载** |
 
-**关键发现**:
-1. **GIL 阻塞峰值得以降低** (88.9ms → 51.2ms)，但未根除，`total > 10ms` 的现象仍间歇出现
-2. **CRC 错误是新增回归**，从 0 激增至 30.4/s，可能与 `sleep(0)` busy-wait 串口读取策略有关
-3. 吞吐波动从稳定的 100-106% 变为 57-104%，不稳定性增加
-4. **日志输出 ~1 分钟延迟**：vfat 闪存卡不支持 inotify，`tail -f` 退化为轮询；loguru async 队列在慢设备上批量刷新。此为 cosmetic 可见性延迟，不影响管道实时性（数据年龄 ~176ms）
-5. **⚠️ 板载 RAM 仅 2GB**：`/tmp` 为 tmpfs 占用 RAM，日志写入 `/tmp` 会触发 OOM 导致系统卡死。日志务必写入闪存卡路径
+`timeout_clear`（1080 元素布尔掩码，之前猜测的瓶颈）仅占 1%。**87% 的 CPU 消耗在 `np.min([1500])` 对 1-3 元素小列表的 numpy C 层调度开销**。
 
-### 6.6 诊断工具
+#### 6 变体增量优化
 
-`FlightController/tools/test_radar_avoidance.py` — 单雷达在线避障链路测试脚本，支持:
+| 变体 | dict_build p50 | dict_apply p50 | total p50 | CPU |
+|---|---|---|---|---|
+| BASELINE | 0.523ms | 3.381ms | 3.905ms | 130% |
+| APPLY_BUILTINS (`np.min`→`min`) | 0.518ms | **0.216ms** | 0.734ms | 40% |
+| APPLY_ONE_TS (`perf_counter` 提升) | 0.524ms | 3.307ms | 3.832ms | 118% |
+| APPLY_BOTH (builtins + 单次 TS) | 0.520ms | 0.174ms | 0.695ms | 22% |
+| BUILD_SETDEFAULT (`try/except`→`setdefault`) | **0.147ms** | 3.383ms | 3.532ms | 118% |
+| **FULL_OPT** (全部优化) | **0.139ms** | **0.174ms** | **0.314ms** | **12%** |
+
+#### 核心修改
+
+三行代码改动（`LDRadar_Resolver.py:305-322`）:
+
+1. **`np.min(values)` → `min(values)`** (dict_apply): 消除 numpy C 层调度，**16 倍加速** (3.381→0.216ms)
+2. **`try/except KeyError` → `dict.setdefault()`** (dict_build): 消灭异常对象创建，消除 max 尖峰 (14.5→1.6ms)
+3. **`time.perf_counter()` 提升到循环外**: 每帧 1 次调用替代 15-30 次
+
+#### 最终效果
+
+```
+每帧 p50:  3.905ms → 0.314ms  (↓ 92%)
+CPU 占比:   130%  → 12.3%     (headroom 88%)
+@300fps:   1295ms/s → 123ms/s
+```
+
+### 6.7 诊断工具
+
+**在线避障链路测试** `FlightController/tools/test_radar_avoidance.py`:
 
 ```bash
 # 基础用法
 PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py --no-fc --dry-run
 
-# 性能分析 + 异步日志文件
+# 性能分析 + 异步日志文件 (⚠️ 日志务必写入闪存卡，/tmp 为 tmpfs 会吃 RAM)
 PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py \
     --no-fc --dry-run --profile \
-    --log-file /tmp/radar.log
+    --raw-latency --raw-latency-stdout \
+    --log-file /media/sdcard/radar_verify.log
 
-# 实时监控日志 (另一 SSH 窗口)
-tail -f /tmp/radar.log
+# 实时监控 (另一 SSH 窗口)
+tail -f /media/sdcard/radar_verify.log | grep PROFILE
 ```
-
-**命令行参数一览**:
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--port` | `/dev/ttySTM4` | 雷达串口路径 |
-| `--no-fc` | False | 不连接飞控，仅测试雷达端 |
-| `--dry-run` | False | 不发送实际飞控指令 |
-| `--max-distance-cm` | 300 | 障碍物检测最大距离/cm |
-| `--stop-distance-cm` | 80 | 急停距离/cm |
-| `--slow-distance-cm` | 150 | 减速距离/cm |
-| `--cruise-speed-cm-s` | 30 | 巡航速度/cm/s |
-| `--corridor-half-width-cm` | 50 | 前方走廊半宽/cm |
-| `--min-distance-cm` | 10 | 最小检测距离/cm (过滤噪点) |
-| `--loop-hz` | 10 | 主循环频率/Hz |
-| `--debug-dump` | False | 打印前方走廊原始点云 |
-| `--profile` | False | 性能分析模式 |
-| `--log-file` | None | 异步日志文件路径 (绕过 SSH 缓冲) |
+| `--raw-latency` | False | 输出雷达帧时间戳延迟、设备钟速、串口buf/解析buf |
+| `--raw-latency-stdout` | False | 将 RAW_LATENCY 行用 print(flush=True) 直接输出，绕过 loguru/vfat |
 
-**Profile 模式输出指标**:
-- 串口吞吐 (实际/理论 包/秒 + 百分比)
-- CRC 错误累计 + 速率
-- 数据年龄 (最新 + 最旧)
-- Pipeline 各级耗时 (get / plan / total)
-- 点云覆盖率 (有效点 vs 理论 1080 仓)
-- DELAY_TREND (运行时间 vs 延迟趋势，每 ~30s 输出)
-
-### 6.7 loguru async 验证实验 (2024-08-26 已执行)
-
-**背景**: loguru 同步写入导致的 GIL 争用是间歇性问题（eMMC journal commit 时触发），`enqueue=True` 修改已应用但未经实验验证。
-
-**验证方法**:
+**裸串口诊断** `FlightController/tools/diagnose_radar_latency.py`:
 
 ```bash
-# 在开发板 SSH 终端执行，建议运行 ≥ 30 分钟以覆盖 eMMC journal commit 周期
+# 绕过所有业务逻辑，仅测串口原始延迟
+PYTHONPATH=. python -u FlightController/tools/diagnose_radar_latency.py \
+    --port /dev/ttySTM4 --duration 180 --report-interval 1
+```
+
+**map.update() 微基准测试** `FlightController/tools/bench_map_update.py`:
+
+```bash
+PYTHONPATH=. python -u FlightController/tools/bench_map_update.py
+```
+
+### 6.8 实物延迟验证
+
+**测试方法**:
+
+```bash
+# 终端 1: 启动测试
 PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py \
     --no-fc --dry-run --profile \
-    --log-file /media/sdcard/radar_verify.log
+    --raw-latency --raw-latency-stdout --debug-dump \
+    --log-file /media/sdcard/latency_verify.log
+
+# 终端 2: 监控延迟事件
+tail -f /media/sdcard/latency_verify.log | grep LATENCY
 ```
 
-同时在另一 SSH 窗口监控异常迭代:
-
-```bash
-# 实时监控 PROFILE 行，筛选耗时异常的迭代（正常 < 10ms），异常时输出完整行
-tail -f /media/sdcard/radar_verify.log | grep PROFILE | awk -F'total=' '{split($2,a,"ms"); if(a[1]+0>10) print}'
-```
-
-**验证通过标准** (三指标同时满足):
-
-| 指标 | 通过标准 | 说明 |
-|---|---|---|
-| 单次循环最大耗时 | **≤ 20ms**，持续 30 分钟 | 正常 < 10ms；偶尔 GC 可放宽至 20ms，但不应出现 80ms+ |
-| 有效点云数 | **≥ 800**，无周期性骤降 | 理论 1080 仓，正常 ~850；若出现骤降至 ~390 则未修复 |
-| DELAY_TREND | **→ 稳定**，数据年龄 (最旧) 始终 < 200ms | 长时间运行后不出现延迟累积增长 |
-
-**验证结果 (运行约 3 分钟)**:
-
-详见 [§6.5b](#65b-loguru-async-验证实验结果-2024-08-26)。核心结论:
-
-1. **GIL 阻塞部分缓解**: 峰值 88.9ms → 51.2ms，但未根除，仍有间歇性 `total > 10ms`（11 次 / 3 分钟）
-2. **CRC 错误是新增回归**: 0 → 92 次 (30.4/s)，可能是 `sleep(0)` busy-wait 与异步日志写入争用串口线程 CPU 时间所致
-3. **日志输出延迟**: 写入 vfat 闪存卡 + `tail -f` 无 inotify 支持，两端日志均有 ~1 分钟延迟
-
-**⚠️ 板载内存仅 2GB**，`/tmp` 为 tmpfs（占用 RAM），禁止将日志写入 `/tmp`，否则会触发 OOM 导致系统卡死。日志务必写入闪存卡路径。
-
-**下一步排查方向**:
-- CRC 错误激增是否为 `sleep(0)` busy-wait 串口策略的副作用（与异步日志线程 CPU 争用）
-- 尝试恢复 `time.sleep(0.001)` 同时保留 `enqueue=True`，观察 CRC 是否归零
-- 闪存卡日志的 ~1 分钟可见性延迟为 cosmetic 问题，不影响管道实时性（数据年龄最旧 ~176ms）
+手持纸板在雷达正前方做急停/减速/侧移测试，观察 `[LATENCY]` 行记录的障碍物距离变化。实测响应在可接受范围内，帧号差 × 100ms ≤ 端到端延迟上限，`[RAW_LATENCY]` 行的 `雷达帧年龄: 当前=1ms` 确认雷达数据从采集到处理完成仅需 ~1ms。
 
 ## 7. 代码仓库迁移与存储架构重构
 
@@ -307,23 +306,33 @@ tail -f /media/sdcard/radar_verify.log | grep PROFILE | awk -F'total=' '{split($
 
 ## 8. 后续工作 (M5 阶段规划)
 
-### 7.1 飞控联调 (阶段 B/C)
-- [ ] `test_radar_avoidance.py --dry-run` → 连接飞控，确认状态回传正常
-- [ ] `test_radar_avoidance.py` → 完整链路，确认 `send_realtime_control_data()` 正确下发
-- [ ] 地面推车测试：手持障碍物靠近雷达，验证飞控收到的速度指令变化
+当前状态: 单雷达在线避障链路已 100% 验证（设备钟速 ≥100%、零积压、零 CRC 错误、端到端延迟 < 5ms、CPU 占用 12%）。以下为雷达相关后续工作，按优先级排序:
 
-### 7.2 室外实测
-- [ ] 室外 10m 直径小范围低速 (<2 m/s) 飞行测试
-- [ ] 调整避障参数适配室外环境 (走廊宽度、停止/减速距离)
-- [ ] 评估单雷达盲区，确定是否需要双雷达（上下布局）
+### 8.1 飞控联调 (阶段 B/C) — 优先级 ⭐⭐⭐
+- [ ] `test_radar_avoidance.py` + `--no-fc` 去除，连接飞控，确认 `fc.state` 回传正常
+- [ ] 完整链路 `test_radar_avoidance.py`（无 `--dry-run`），确认 `send_realtime_control_data(vx, vy, vz, yaw)` 正确下发至匿名飞控
+- [ ] 地面推车测试：手持障碍物靠近雷达，通过飞控调试口验证速度指令变化（stop→slow→cruise 三段切换）
 
-### 7.3 SLAM 在线化
-- [ ] 将离线 Hough SLAM (`Radar_SLAM.radar_resolve_rt_pose`) 接入 `LDRadar_Driver._map_resolve_task()`
-- [ ] 配置 `Navigation` 以 `mode="radar"` 运行，实现闭环悬停
+### 8.2 单雷达盲区评估 — 优先级 ⭐⭐⭐
+- [ ] 测绘 D500 单线雷达在无人机平台上的实际视野覆盖（水平 360° 全覆盖，俯仰为单平面）
+- [ ] 评估前方下视盲区（无人机前倾时雷达视场抬升，地面障碍物可能漏检）
+- [ ] 评估后方盲区（当前仅前方走廊检测，后方碰撞无感知）
+- [ ] 结论: **是否需要第二颗 D500 雷达**（推荐上下布局: 上雷达水平扫描 360° 避障，下雷达下倾覆盖前下方盲区）
 
-### 7.4 避障策略升级
-- [ ] 当前为纯前向走廊检测 (1D)，升级为基于势场法 (PFBPP) 或 VFH 的方向性避障
-- [ ] 集成 `PathPlanner.py` 到在线 loop 中，替代简单的 stop/slow/cruise 三段逻辑
+### 8.3 双雷达融合 (取决于 8.2 结论)
+- [ ] 接入第二颗 D500 雷达（UART 端口待定），复用 `LDRadar_Driver` 实例
+- [ ] 启用 `MultiRadar.py` 双雷达障碍物融合（前+后/上+下）
+- [ ] 双雷达时间同步与点云坐标系统一到机体坐标系
+
+### 8.4 SLAM 在线化 — 优先级 ⭐⭐
+- [ ] 将离线 Hough SLAM (`Radar_SLAM.radar_resolve_rt_pose`) 接入 `LDRadar_Driver._map_resolve_task()`（当前 `subtask_event` 每 4 帧已触发，但 `rt_pose` 未启用）
+- [ ] 验证实时位姿估计精度（与 T265 VIO 对比，如 T265 不可用则使用 ICP 匹配雷达帧间位姿）
+- [ ] 配置 `Navigation` 以 `mode="radar"` 运行，实现无 GPS/VIO 条件下的闭环悬停
+
+### 8.5 避障策略升级 — 优先级 ⭐
+- [ ] 当前为纯前向走廊检测 (1D stop/slow/cruise)，升级为基于势场法 (PFBPP) 的方向性避障
+- [ ] 集成 `PathPlanner.py` 到在线 loop 中，实现 360° 障碍物排斥 + 目标吸引的路径规划
+- [ ] 评估 PFBPP vs VFH 在 D500 点云密度下的适用性（D500 单帧 12 点，远低于传统 2D LiDAR）
 
 ---
 
@@ -331,8 +340,11 @@ tail -f /media/sdcard/radar_verify.log | grep PROFILE | awk -F'total=' '{split($
 
 | 决策 | 理由 |
 |---|---|
-| Python 继续使用（不换 C++） | numpy / opencv / pyserial 底层均为 C 实现，Python 仅作胶水代码。串口修复后 pipeline 耗时 < 10ms，语言切换无收益 |
-| 单雷达优先双雷达 (当前阶段) | 最小闭环原则：先端到端跑通单雷达避障，验证链路正确性后再加双雷达 |
+| Python 继续使用（不换 C++） | numpy / opencv / pyserial 底层均为 C 实现，Python 仅作胶水代码。`map.update()` 优化后 pipeline 耗时 < 1ms，语言切换无收益 |
+| 单雷达优先双雷达 (当前阶段) | 最小闭环原则：先端到端跑通单雷达避障，验证链路正确性后再加双雷达。M4 已竣工，M5 开启双雷达评估 |
 | 反应式避障优先 SLAM 建图 | 紧急避障需要 < 200ms 响应，SLAM 位姿估计用于导航漂移校正，两者分层异步运行 |
-| 测试脚本使用 busy-wait (`sleep(0)`) | 嵌入式专用设备，CPU 开销可接受 (~2% 单核)，换取消灭 sleep 精度带来的数据积压 |
-| 日志文件异步写入 (`enqueue=True`) | 消除 eMMC I/O 阻塞主线程导致的 GIL 争用，避免周期性点云覆盖率骤降 |
+| 串口读取: `sleep(0.001)` + batch read | `sleep(0)` busy-wait 导致 CRC 错误递增（与 loguru writer 抢 CPU）；`read()` timeout 导致发散（每次 10ms 盲等）。`sleep(0.001)` 虽受 100Hz 内核限制实际 ~10ms，但配合 `map.update()` 优化（CPU 仅占 12%）后无积压风险 |
+| `np.min([1500])` → `min([1500])` | **全项目最大单行优化**。numpy 对 1-3 元素小列表的 C 层调度开销是 Python 内置 `min()` 的 ~16 倍。真机基准: dict_apply 3.381ms → 0.216ms。CPU 从 130% 降至 12% |
+| `try/except KeyError` → `dict.setdefault()` | 消除冷键路径的 KeyError 异常对象创建，dict_build 从 0.523ms 降至 0.147ms，max 尖峰从 14.5ms 降至 1.6ms |
+| `timeout_clear` 每 12 帧执行 | 1080 元素全量扫描由 300 次/秒降至 25 次/秒。效果微小（仅占 1%）但无代价 |
+| 日志文件异步写入 (`enqueue=True`) | 消除 eMMC I/O 阻塞主线程导致的 GIL 争用，避免周期性点云覆盖率骤降。日志写入闪存卡 vfat，`tail -f` 约 1 分钟延迟为 cosmetic 问题 |

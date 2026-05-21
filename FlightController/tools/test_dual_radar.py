@@ -128,14 +128,21 @@ def main() -> None:
         if not multi_radar.connected:
             logger.warning("[DUAL-RADAR] 仅部分雷达连接，继续运行...")
 
+        # 采样窗口（~0.5s 汇总一次，即 ~50 帧 @10ms sleep）
+        loop_count = 0
+        loop_times = []       # 每帧耗时 ms
+        upper_counts = []     # 上雷达过滤后点数
+        lower_counts = []     # 下雷达过滤后点数
+        blocked_counts = []   # 机身屏蔽点数
+        obs_distances = []    # 前方障碍物距离
+
         while True:
             t0 = time.perf_counter()
 
-            # ① 获取融合点云（仅限最大距离）
+            # ① 获取融合点云
             all_points = multi_radar.get_obstacle_points_body_cm(
                 max_distance_cm=args.max_distance_cm
             )
-            raw_count = len(all_points)
 
             # ② 屏蔽机身范围
             filtered_points = _body_mask(
@@ -143,9 +150,8 @@ def main() -> None:
                 x_half=args.body_x_half_cm,
                 y_half=args.body_y_half_cm,
             )
-            body_blocked = raw_count - len(filtered_points)
 
-            # ③ 分别获取各雷达点云（也经 body mask）
+            # ③ 分别获取各雷达点云
             upper_points = multi_radar.radars[0].get_points_body_cm(
                 max_distance_cm=args.max_distance_cm
             )
@@ -155,7 +161,7 @@ def main() -> None:
             )
             lower_filtered = _body_mask(lower_points, args.body_x_half_cm, args.body_y_half_cm)
 
-            # ④ 避障决策（基于过滤后点云）
+            # ④ 避障决策
             command = planner.plan(obstacles_body_cm=filtered_points, target=None)
             obstacle_cm = planner._nearest_forward_obstacle_cm(filtered_points)
 
@@ -170,33 +176,58 @@ def main() -> None:
 
             t1 = time.perf_counter()
 
-            # ── 日志 ──
-            fc_str = ""
-            if fc is not None:
-                s = fc.state
-                fc_str = f"FC[mode={s.mode.value} bat={s.bat.value:.1f}V pit={s.pit.value:.1f}]"
+            # ── 累积采样 ──
+            loop_count += 1
+            loop_times.append((t1 - t0) * 1000.0)
+            upper_counts.append(len(upper_filtered))
+            lower_counts.append(len(lower_filtered))
+            blocked_counts.append(len(all_points) - len(filtered_points))
+            if obstacle_cm is not None:
+                obs_distances.append(obstacle_cm)
 
-            logger.info(
-                f"{fc_str} | "
-                f"融合={len(filtered_points)}/{raw_count}点 "
-                f"(上={len(upper_filtered)} 下={len(lower_filtered)} "
-                f"机身屏蔽={body_blocked}) | "
-                f"前方={obstacle_cm:.0f}cm | " if obstacle_cm is not None else "前方=无 | "
-                f"指令=(vx={command.vx_cm_s:.0f} vy={command.vy_cm_s:.0f}) reason={command.reason}"
-            )
+            # ── 每 50 帧 (~0.5s) 汇总输出 ──
+            if loop_count >= 50:
+                t_arr = np.array(loop_times)
+                u_arr = np.array(upper_counts)
+                l_arr = np.array(lower_counts)
+                b_arr = np.array(blocked_counts)
 
-            if args.profile:
-                logger.info(f"[PROFILE] loop={ (t1 - t0) * 1000:.1f}ms")
+                effective_hz = 1000.0 / t_arr.mean() if t_arr.mean() > 0 else 0
+                cpu_pct = t_arr.mean() / 10.0 * 100.0  # 相对 10ms 周期
 
-            if args.debug_dump and len(filtered_points) > 0:
-                fwd = filtered_points[filtered_points[:, 0] > 10]
-                fwd_corridor = fwd[abs(fwd[:, 1]) < args.corridor_half_width_cm]
-                if len(fwd_corridor) > 0:
-                    dists = np.linalg.norm(fwd_corridor, axis=1)
-                    logger.info(
-                        f"[DEBUG] 前方走廊={len(fwd_corridor)}点 "
-                        f"最近={dists.min():.0f}cm 最远={dists.max():.0f}cm"
-                    )
+                fc_str = ""
+                if fc is not None:
+                    s = fc.state
+                    fc_str = f"FC[mode={s.mode.value} bat={s.bat.value:.1f}V pit={s.pit.value:.1f}] "
+
+                obs_str = f"前={np.mean(obs_distances):.0f}cm" if obs_distances else "前=无"
+
+                logger.info(
+                    f"{fc_str}| "
+                    f"融合={u_arr.mean():.0f}+{l_arr.mean():.0f}点 "
+                    f"机身={b_arr.mean():.0f} | {obs_str} "
+                    f"vx={command.vx_cm_s:.0f} | "
+                    f"loop={t_arr.mean():.1f}/{t_arr.max():.1f}/{t_arr.min():.1f}ms "
+                    f"(avg/max/min) "
+                    f"eff={effective_hz:.0f}Hz cpu≈{cpu_pct:.0f}%"
+                )
+
+                if args.debug_dump and len(filtered_points) > 0:
+                    fwd = filtered_points[filtered_points[:, 0] > 10]
+                    fwd_corridor = fwd[abs(fwd[:, 1]) < args.corridor_half_width_cm]
+                    if len(fwd_corridor) > 0:
+                        dists = np.linalg.norm(fwd_corridor, axis=1)
+                        logger.info(
+                            f"[DEBUG] 前方走廊={len(fwd_corridor)}点 "
+                            f"最近={dists.min():.0f}cm 最远={dists.max():.0f}cm"
+                        )
+
+                loop_count = 0
+                loop_times.clear()
+                upper_counts.clear()
+                lower_counts.clear()
+                blocked_counts.clear()
+                obs_distances.clear()
 
             time.sleep(0.01)
 

@@ -1,7 +1,7 @@
 """
 双雷达统一避障链路测试。
 
-接线: 上雷达 /dev/ttySTM4 (index=0), 下雷达 /dev/ttySTM9 (index=1, 倒装 mirror_y)
+接线: 上雷达 UART4 /dev/ttySTM4 (index=0), 下雷达 UART9 /dev/ttySTM9 (index=1, 倒装 mirror_y)
 机身范围 -25cm < x < 25cm, -25cm < y < 25cm 内的点自动屏蔽。
 
 用法:
@@ -44,8 +44,8 @@ def main() -> None:
     from loguru import logger
 
     parser = argparse.ArgumentParser(description="双雷达统一避障链路测试")
-    parser.add_argument("--upper-port", default=None, help="上雷达串口 (默认: /dev/ttySTM4)")
-    parser.add_argument("--lower-port", default=None, help="下雷达串口 (默认: /dev/ttySTM9)")
+    parser.add_argument("--upper-port", default="/dev/ttySTM4", help="上雷达串口 (默认: /dev/ttySTM4)")
+    parser.add_argument("--lower-port", default="/dev/ttySTM9", help="下雷达串口 (默认: /dev/ttySTM9)")
     parser.add_argument("--fc-port", default=None, help="飞控串口 (默认: 自动探测)")
     parser.add_argument("--no-fc", action="store_true", help="不连接飞控")
     parser.add_argument("--dry-run", action="store_true", help="连接飞控但不发送指令")
@@ -80,7 +80,7 @@ def main() -> None:
             index=0,
             mount_xy_cm=(0.0, 0.0),
             mount_yaw_deg=0.0,
-            port=args.upper_port or None,
+            port=args.upper_port,
         ),
         RadarConfig(
             name="lower",
@@ -88,7 +88,7 @@ def main() -> None:
             mount_xy_cm=(0.96, 0.15),
             mount_yaw_deg=0.0,
             mount_mirror_y=True,
-            port=args.lower_port or None,
+            port=args.lower_port,
         ),
     ]
     multi_radar = MultiRadar(configs)

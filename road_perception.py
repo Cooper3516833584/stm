@@ -1,0 +1,1257 @@
+"""Road perception module for YOLO segmentation based visual line following.
+
+The only required public entry point is ``get_road_perception(frame, ...)``.
+This module does not implement flight control, route selection, MAVLink, or
+ArduPilot logic. It only converts one BGR image into structured road geometry.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+from dataclasses import dataclass, field
+from typing import Any, List, Tuple
+
+import cv2
+import numpy as np
+
+
+@dataclass
+class RoadBranch:
+    pixel_error: float
+    centerline_angle: float
+    path_width_px: float
+    score: float
+    points: List[Tuple[float, float]] = field(default_factory=list)
+
+
+@dataclass
+class RoadPerceptionResult:
+    is_road_found: bool
+
+    # single / fork / intersection / ambiguous / lost
+    road_state: str
+
+    # Selected path result.
+    pixel_error: float
+    centerline_angle: float
+    path_width_px: float
+    confidence: float
+
+    # V1 keeps this equal to pixel_error.
+    corrected_pixel_error: float
+
+    # Candidate branches around a fork/intersection.
+    branches: List[RoadBranch] = field(default_factory=list)
+
+    debug_msg: str = ""
+
+
+@dataclass
+class RoadInstance:
+    mask: np.ndarray
+    score: float
+    box_xywh: Tuple[float, float, float, float]
+    area: int
+    bottom_touch_px: int
+    bottom_cx: float
+    centerline_points: List[CenterPoint] = field(default_factory=list)
+
+
+MODEL_PATH = "FlightController/Solutions/model/road_yolo11n_seg.onnx"
+
+INP_SIZE = 320
+CONF_THRESH = 0.4
+IOU_THRESH = 0.45
+MASK_THRESH = 0.5
+
+MIN_AREA_RATIO = 0.02
+MIN_ROAD_PX_PER_ROW = 12
+BOTTOM_RATIO = 0.10
+BOTTOM_IGNORE_RATIO = 0.03
+BOTTOM_ERROR_Y_MIN_RATIO = 0.82
+BOTTOM_ERROR_Y_MAX_RATIO = 0.96
+ANGLE_Y_MIN_RATIO = 0.60
+CONTROL_ANGLE_Y_MIN_RATIO = 0.72
+CONTROL_ANGLE_Y_MAX_RATIO = 0.98
+CENTERLINE_SCAN_Y_MAX_RATIO = 0.97
+MIN_FIT_PTS = 5
+
+FORK_INTERVAL_ROWS_MIN = 8
+FORK_WIDTH_GROWTH_RATIO = 1.6
+WIDE_INTERVAL_RATIO = 0.45
+WIDTH_JUMP_LOCK_RATIO = 1.45
+CENTER_SMOOTH_ALPHA = 0.65
+
+
+_SESSION: Any | None = None
+_INPUT_NAME: str | None = None
+_MODEL_INPUT_SIZE: int | None = None
+
+
+CenterPoint = Tuple[float, int, float]  # center_x, y, width
+Interval = Tuple[int, int]
+RowIntervals = List[Tuple[int, List[Interval]]]
+
+
+def _lost_result(reason: str) -> RoadPerceptionResult:
+    return RoadPerceptionResult(
+        is_road_found=False,
+        road_state="lost",
+        pixel_error=0.0,
+        centerline_angle=90.0,
+        path_width_px=0.0,
+        confidence=0.0,
+        corrected_pixel_error=0.0,
+        branches=[],
+        debug_msg=reason,
+    )
+
+
+def _resolve_model_path() -> str:
+    if os.path.isabs(MODEL_PATH):
+        return MODEL_PATH
+
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    module_relative = os.path.join(module_dir, MODEL_PATH)
+    if os.path.isfile(module_relative):
+        return module_relative
+    return MODEL_PATH
+
+
+def _get_session():
+    global _SESSION, _INPUT_NAME, _MODEL_INPUT_SIZE
+
+    if _SESSION is None:
+        model_path = _resolve_model_path()
+        if not os.path.isfile(model_path):
+            raise FileNotFoundError(f"ONNX model not found: {model_path}")
+
+        import onnxruntime as ort
+
+        _SESSION = ort.InferenceSession(
+            model_path,
+            providers=["CPUExecutionProvider"],
+        )
+        input_meta = _SESSION.get_inputs()[0]
+        _INPUT_NAME = input_meta.name
+        _MODEL_INPUT_SIZE = _input_size_from_meta(input_meta.shape)
+
+    return _SESSION, _INPUT_NAME
+
+
+def _input_size_from_meta(shape: Any) -> int:
+    if shape and len(shape) >= 4:
+        h_value = shape[2]
+        w_value = shape[3]
+        if isinstance(h_value, int) and isinstance(w_value, int):
+            if h_value > 0 and h_value == w_value:
+                return int(h_value)
+    return INP_SIZE
+
+
+def _letterbox(frame: np.ndarray, new_size: int = INP_SIZE):
+    """Resize a BGR frame with unchanged aspect ratio and gray padding."""
+    h, w = frame.shape[:2]
+    if h <= 0 or w <= 0:
+        raise ValueError("frame has invalid shape")
+
+    scale = min(new_size / float(w), new_size / float(h))
+    resized_w = max(1, int(round(w * scale)))
+    resized_h = max(1, int(round(h * scale)))
+    pad_x = (new_size - resized_w) / 2.0
+    pad_y = (new_size - resized_h) / 2.0
+
+    resized = cv2.resize(frame, (resized_w, resized_h), interpolation=cv2.INTER_LINEAR)
+    img = np.full((new_size, new_size, 3), 114, dtype=np.uint8)
+
+    left = int(round(pad_x))
+    top = int(round(pad_y))
+    img[top : top + resized_h, left : left + resized_w] = resized
+
+    return img, scale, pad_x, pad_y
+
+
+def _preprocess(frame: np.ndarray, input_size: int):
+    img, scale, pad_x, pad_y = _letterbox(frame, input_size)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = img.astype(np.float32) / 255.0
+    img = np.transpose(img, (2, 0, 1))
+    img = np.expand_dims(img, axis=0).astype(np.float32)
+    return img, scale, pad_x, pad_y
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -60.0, 60.0)))
+
+
+def _prepare_yolo_seg_tensors(output0: np.ndarray, output1: np.ndarray):
+    if output0.ndim != 3:
+        raise ValueError(f"output0 must be [1, C, N], got shape={output0.shape}")
+
+    if output1.ndim == 4:
+        proto = output1[0]
+    elif output1.ndim == 3:
+        proto = output1
+    else:
+        raise ValueError(f"output1 must be [1, M, H, W], got shape={output1.shape}")
+
+    if proto.ndim != 3:
+        raise ValueError(f"proto must be [M, H, W], got shape={proto.shape}")
+
+    # Preferred YOLO segmentation export: output0[0] is [channels, candidates].
+    # Transposing makes candidate count fully dynamic: [num_candidates, channels].
+    raw = output0[0]
+    preferred = raw.T
+    alternatives = [preferred, raw]
+    num_masks = int(proto.shape[0])
+
+    for preds in alternatives:
+        if preds.ndim != 2:
+            continue
+        channels = int(preds.shape[1])
+        num_classes = channels - 4 - num_masks
+        if 1 <= num_classes <= 100:
+            return preds.astype(np.float32, copy=False), proto.astype(np.float32, copy=False)
+
+    channels = int(preferred.shape[1]) if preferred.ndim == 2 else -1
+    raise ValueError(
+        f"invalid YOLO segmentation channels={channels}, num_masks={num_masks}"
+    )
+
+
+def _nms_indices(boxes_xywh: List[List[float]], scores: List[float]) -> List[int]:
+    if not boxes_xywh:
+        return []
+
+    indices = cv2.dnn.NMSBoxes(boxes_xywh, scores, CONF_THRESH, IOU_THRESH)
+    if indices is None or len(indices) == 0:
+        return []
+
+    return [int(i) for i in np.array(indices).reshape(-1)]
+
+
+def _decode_yolo_segmentation(
+    outputs: List[np.ndarray],
+    orig_w: int,
+    orig_h: int,
+    input_size: int,
+    pad_x: float,
+    pad_y: float,
+) -> Tuple[np.ndarray | None, List[RoadInstance], float, str]:
+    if len(outputs) < 2:
+        return None, [], 0.0, f"expected at least 2 ONNX outputs, got {len(outputs)}"
+
+    output0 = np.asarray(outputs[0])
+    output1 = np.asarray(outputs[1])
+    preds, proto = _prepare_yolo_seg_tensors(output0, output1)
+
+    num_masks = int(proto.shape[0])
+    channels = int(preds.shape[1])
+    num_classes = channels - 4 - num_masks
+    if num_classes <= 0:
+        return None, [], 0.0, (
+            f"invalid output layout: channels={channels}, num_masks={num_masks}"
+        )
+
+    boxes_xywh: List[List[float]] = []
+    scores: List[float] = []
+    coeffs: List[np.ndarray] = []
+
+    for pred in preds:
+        box_xywh = pred[0:4]
+        class_scores = pred[4 : 4 + num_classes]
+        if class_scores.size == 0:
+            continue
+
+        score = float(np.max(class_scores))
+        cls_id = int(np.argmax(class_scores))
+        _ = cls_id  # Kept for future multi-class handling.
+        if not math.isfinite(score) or score < CONF_THRESH:
+            continue
+
+        mask_coeff = pred[4 + num_classes :]
+        if mask_coeff.shape[0] != num_masks:
+            continue
+
+        cx, cy, w, h = [float(v) for v in box_xywh]
+        if not all(math.isfinite(v) for v in (cx, cy, w, h)):
+            continue
+        if w <= 1.0 or h <= 1.0:
+            continue
+
+        boxes_xywh.append([cx - w / 2.0, cy - h / 2.0, w, h])
+        scores.append(score)
+        coeffs.append(mask_coeff.astype(np.float32, copy=False))
+
+    if not boxes_xywh:
+        return None, [], 0.0, "no road detection above confidence threshold"
+
+    keep = _nms_indices(boxes_xywh, scores)
+    if not keep:
+        return None, [], 0.0, "no road detection remained after NMS"
+
+    proto_h, proto_w = int(proto.shape[1]), int(proto.shape[2])
+    proto_flat = proto.reshape(num_masks, -1)
+    merged_mask = np.zeros((orig_h, orig_w), dtype=np.uint8)
+    instances: List[RoadInstance] = []
+    selected_scores: List[float] = []
+
+    crop_x1 = max(0, min(input_size, int(round(pad_x))))
+    crop_y1 = max(0, min(input_size, int(round(pad_y))))
+    crop_x2 = max(crop_x1, min(input_size, int(round(input_size - pad_x))))
+    crop_y2 = max(crop_y1, min(input_size, int(round(input_size - pad_y))))
+
+    for idx in keep:
+        raw_mask = coeffs[idx] @ proto_flat
+        raw_mask = _sigmoid(raw_mask).reshape(proto_h, proto_w)
+
+        mask_input = cv2.resize(
+            raw_mask,
+            (input_size, input_size),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        mask_input = (mask_input > MASK_THRESH).astype(np.uint8) * 255
+
+        box_x, box_y, box_w, box_h = boxes_xywh[idx]
+        box_x1 = max(0, min(input_size, int(math.floor(box_x))))
+        box_y1 = max(0, min(input_size, int(math.floor(box_y))))
+        box_x2 = max(box_x1, min(input_size, int(math.ceil(box_x + box_w))))
+        box_y2 = max(box_y1, min(input_size, int(math.ceil(box_y + box_h))))
+        clipped_mask = np.zeros_like(mask_input)
+        if box_x2 > box_x1 and box_y2 > box_y1:
+            clipped_mask[box_y1:box_y2, box_x1:box_x2] = mask_input[
+                box_y1:box_y2,
+                box_x1:box_x2,
+            ]
+        mask_input = clipped_mask
+
+        mask_crop = mask_input[crop_y1:crop_y2, crop_x1:crop_x2]
+        if mask_crop.size == 0:
+            continue
+
+        final_mask = cv2.resize(
+            mask_crop,
+            (orig_w, orig_h),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        final_mask = (final_mask > 0).astype(np.uint8) * 255
+
+        area = int(np.count_nonzero(final_mask))
+        if area <= 0:
+            continue
+
+        bottom_y_start = int(orig_h * 0.85)
+        bottom_region = final_mask[bottom_y_start:, :]
+        bottom_cols = np.where(bottom_region > 0)[1]
+        bottom_touch_px = int(len(bottom_cols))
+        if bottom_touch_px > 0:
+            bottom_cx = float(np.mean(bottom_cols))
+        else:
+            content_w = max(1.0, float(crop_x2 - crop_x1))
+            box_center_x = box_x + box_w / 2.0
+            bottom_cx = (box_center_x - crop_x1) / content_w * orig_w
+            bottom_cx = float(max(0.0, min(float(orig_w - 1), bottom_cx)))
+
+        content_w = max(1.0, float(crop_x2 - crop_x1))
+        content_h = max(1.0, float(crop_y2 - crop_y1))
+        orig_box_x = (box_x - crop_x1) / content_w * orig_w
+        orig_box_y = (box_y - crop_y1) / content_h * orig_h
+        orig_box_w = box_w / content_w * orig_w
+        orig_box_h = box_h / content_h * orig_h
+
+        instance = RoadInstance(
+            mask=final_mask,
+            score=float(scores[idx]),
+            box_xywh=(
+                float(orig_box_x),
+                float(orig_box_y),
+                float(orig_box_w),
+                float(orig_box_h),
+            ),
+            area=area,
+            bottom_touch_px=bottom_touch_px,
+            bottom_cx=bottom_cx,
+        )
+
+        instances.append(instance)
+        merged_mask = cv2.bitwise_or(merged_mask, final_mask)
+        selected_scores.append(float(scores[idx]))
+
+    if not instances or not selected_scores or np.count_nonzero(merged_mask) == 0:
+        return None, [], 0.0, "decoded road instances are empty"
+
+    return merged_mask, instances, float(np.mean(selected_scores)), "ok"
+
+
+def _clean_mask(mask: np.ndarray) -> np.ndarray:
+    """Fill holes and keep the most plausible road component."""
+    if mask is None or mask.size == 0:
+        return np.zeros((0, 0), dtype=np.uint8)
+
+    mask = (mask > 0).astype(np.uint8) * 255
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        mask,
+        connectivity=8,
+    )
+    if num_labels <= 1:
+        return np.zeros_like(mask)
+
+    h, w = mask.shape[:2]
+    min_area = int(h * w * MIN_AREA_RATIO)
+    bottom_y_start = int(h * 0.90)
+    bottom_labels = set(int(v) for v in np.unique(labels[bottom_y_start:, :]))
+    bottom_labels.discard(0)
+
+    candidates: List[Tuple[int, int, bool]] = []
+    for label_id in range(1, num_labels):
+        area = int(stats[label_id, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+
+        is_bottom_connected = label_id in bottom_labels
+        candidates.append((label_id, area, is_bottom_connected))
+
+    if not candidates:
+        return np.zeros_like(mask)
+
+    bottom_candidates = [c for c in candidates if c[2]]
+    if bottom_candidates:
+        best_label = max(bottom_candidates, key=lambda item: item[1])[0]
+    else:
+        best_label = max(candidates, key=lambda item: item[1])[0]
+
+    return np.where(labels == best_label, 255, 0).astype(np.uint8)
+
+
+def _clean_mask_keep_single_instance(mask: np.ndarray) -> np.ndarray:
+    if mask is None or mask.size == 0:
+        return np.zeros((0, 0), dtype=np.uint8)
+
+    mask = (mask > 0).astype(np.uint8) * 255
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    return mask
+
+
+def _refresh_instance_geometry(inst: RoadInstance, w: int, h: int) -> None:
+    inst.area = int(np.count_nonzero(inst.mask))
+
+    bottom_y_start = int(h * 0.85)
+    bottom_region = inst.mask[bottom_y_start:, :]
+    bottom_cols = np.where(bottom_region > 0)[1]
+    inst.bottom_touch_px = int(len(bottom_cols))
+    if inst.bottom_touch_px > 0:
+        inst.bottom_cx = float(np.mean(bottom_cols))
+        return
+
+    x, _, box_w, _ = inst.box_xywh
+    inst.bottom_cx = float(max(0.0, min(float(w - 1), x + box_w / 2.0)))
+
+
+def _find_intervals(
+    row_mask: np.ndarray,
+    min_width: int = MIN_ROAD_PX_PER_ROW,
+) -> List[Interval]:
+    cols = np.where(row_mask > 0)[0]
+    if len(cols) == 0:
+        return []
+
+    intervals: List[Interval] = []
+    start = int(cols[0])
+    prev = int(cols[0])
+
+    for c_value in cols[1:]:
+        c = int(c_value)
+        if c == prev + 1:
+            prev = c
+            continue
+
+        if prev - start + 1 >= min_width:
+            intervals.append((start, prev))
+        start = c
+        prev = c
+
+    if prev - start + 1 >= min_width:
+        intervals.append((start, prev))
+
+    return intervals
+
+
+def _extract_centerline_and_intervals(clean_mask: np.ndarray) -> Tuple[List[CenterPoint], RowIntervals]:
+    h, w = clean_mask.shape[:2]
+    points: List[CenterPoint] = []
+    all_row_intervals: RowIntervals = []
+
+    last_cx = w / 2.0
+    last_width: float | None = None
+    bottom_y = min(h - 1, int(h * CENTERLINE_SCAN_Y_MAX_RATIO))
+
+    for y in range(bottom_y, h // 2, -1):
+        intervals = _find_intervals(clean_mask[y, :], MIN_ROAD_PX_PER_ROW)
+        all_row_intervals.append((y, intervals))
+
+        if not intervals:
+            continue
+
+        best = min(
+            intervals,
+            key=lambda interval: abs(((interval[0] + interval[1]) / 2.0) - last_cx),
+        )
+        left, right = best
+        width = float(right - left + 1)
+        interval_mid = (left + right) / 2.0
+
+        cx = (
+            CENTER_SMOOTH_ALPHA * interval_mid
+            + (1.0 - CENTER_SMOOTH_ALPHA) * last_cx
+        )
+
+        points.append((float(cx), int(y), width))
+        last_cx = cx
+        last_width = width
+
+    points = _smooth_centerline_through_junction(points, all_row_intervals, w)
+    return _trim_bottom_centerline_outliers(points, w), all_row_intervals
+
+
+def _smooth_centerline_through_junction(
+    points: List[CenterPoint],
+    all_row_intervals: RowIntervals,
+    w: int,
+) -> List[CenterPoint]:
+    if len(points) < MIN_FIT_PTS * 3:
+        return points
+
+    widths = np.array([p[2] for p in points], dtype=np.float32)
+    narrow_ref = float(np.percentile(widths, 25))
+    if narrow_ref <= 0.0:
+        return points
+
+    wide_threshold = max(w * WIDE_INTERVAL_RATIO, narrow_ref * FORK_WIDTH_GROWTH_RATIO)
+    intervals_by_y = {y: intervals for y, intervals in all_row_intervals}
+
+    junction_flags = []
+    for cx, y, width in points:
+        intervals = intervals_by_y.get(int(y), [])
+        is_wide = width >= wide_threshold
+        has_multiple_intervals = len(intervals) >= 2
+        junction_flags.append(is_wide or has_multiple_intervals)
+
+    blocks: List[Tuple[int, int]] = []
+    block_start: int | None = None
+    for idx, is_junction in enumerate(junction_flags):
+        if is_junction and block_start is None:
+            block_start = idx
+        elif not is_junction and block_start is not None:
+            if idx - block_start >= FORK_INTERVAL_ROWS_MIN:
+                blocks.append((block_start, idx - 1))
+            block_start = None
+    if block_start is not None and len(junction_flags) - block_start >= FORK_INTERVAL_ROWS_MIN:
+        blocks.append((block_start, len(junction_flags) - 1))
+
+    if not blocks:
+        return points
+
+    start, end = max(blocks, key=lambda item: item[1] - item[0])
+    jump_limit = max(25.0, w * 0.06)
+    center_lag_limit = max(25.0, w * 0.05)
+    while end + MIN_FIT_PTS + 1 < len(points):
+        prev_x = float(points[end][0])
+        next_x = float(points[end + 1][0])
+        next_y = int(points[end + 1][1])
+        intervals = intervals_by_y.get(next_y, [])
+        center_lag = 0.0
+        if len(intervals) == 1:
+            left, right = intervals[0]
+            interval_mid = (left + right) / 2.0
+            center_lag = abs(next_x - interval_mid)
+
+        if abs(next_x - prev_x) <= jump_limit and center_lag <= center_lag_limit:
+            break
+        end += 1
+
+    if end + MIN_FIT_PTS >= len(points):
+        return points
+
+    lower_anchor = points[start - 1] if start > 0 else points[start]
+    upper_candidates = points[end + 1 : min(len(points), end + 1 + 80)]
+    upper_pts = [p for p in upper_candidates if p[2] < wide_threshold]
+    if len(upper_pts) < MIN_FIT_PTS:
+        upper_pts = upper_candidates
+    if len(upper_pts) < MIN_FIT_PTS:
+        return points
+
+    try:
+        arr = np.array([(p[0], p[1]) for p in upper_pts], dtype=np.float32)
+        coeffs = np.polyfit(arr[:, 1], arr[:, 0], deg=1)
+        guide_a = float(coeffs[0])
+        guide_b = float(coeffs[1])
+    except Exception:
+        return points
+
+    lower_x = float(lower_anchor[0])
+    lower_y = float(lower_anchor[1])
+    upper_y = float(points[end + 1][1])
+    denom = max(1.0, lower_y - upper_y)
+
+    smoothed = list(points)
+    for idx in range(start, end + 1):
+        x, y, width = points[idx]
+        t = max(0.0, min(1.0, (lower_y - float(y)) / denom))
+        s = t * t * (3.0 - 2.0 * t)
+        guide_x = guide_a * float(y) + guide_b
+        new_x = (1.0 - s) * lower_x + s * guide_x
+        smoothed[idx] = (float(new_x), int(y), float(width))
+
+    return smoothed
+
+
+def _trim_bottom_centerline_outliers(
+    points: List[CenterPoint],
+    w: int,
+) -> List[CenterPoint]:
+    if len(points) < MIN_FIT_PTS + 2:
+        return points
+
+    trimmed = list(points)
+    while len(trimmed) >= MIN_FIT_PTS + 2:
+        lookahead = trimmed[1 : min(len(trimmed), 18)]
+        if len(lookahead) < MIN_FIT_PTS:
+            break
+
+        ref_x = float(np.median([p[0] for p in lookahead]))
+        ref_width = float(np.median([p[2] for p in lookahead]))
+        max_jump = max(30.0, min(w * 0.08, ref_width * 0.35))
+
+        if abs(trimmed[0][0] - ref_x) > max_jump:
+            trimmed.pop(0)
+            continue
+        break
+
+    return trimmed
+
+
+def _bottom_points(points: List[CenterPoint], h: int) -> List[CenterPoint]:
+    bottom_y_min = int(h * BOTTOM_ERROR_Y_MIN_RATIO)
+    bottom_y_max = int(h * BOTTOM_ERROR_Y_MAX_RATIO)
+    bottom_pts = [p for p in points if bottom_y_min <= p[1] <= bottom_y_max]
+    if bottom_pts:
+        return bottom_pts
+    bottom_y_min = int(h * (1.0 - BOTTOM_RATIO - BOTTOM_IGNORE_RATIO))
+    bottom_y_max = int(h * (1.0 - BOTTOM_IGNORE_RATIO))
+    bottom_pts = [p for p in points if bottom_y_min <= p[1] <= bottom_y_max]
+    if bottom_pts:
+        return bottom_pts
+    return points[: min(5, len(points))]
+
+
+def _compute_pixel_error(points: List[CenterPoint], w: int, h: int) -> Tuple[float, float]:
+    pts = _bottom_points(points, h)
+    if not pts:
+        return 0.0, w / 2.0
+
+    cx_bottom = float(np.median([p[0] for p in pts]))
+    return cx_bottom - w / 2.0, cx_bottom
+
+
+def _compute_path_width(points: List[CenterPoint], h: int) -> float:
+    pts = [
+        p
+        for p in points
+        if h * 0.55 <= p[1] <= h * 0.90
+    ]
+    if len(pts) < MIN_FIT_PTS:
+        pts = _bottom_points(points, h)
+    if not pts:
+        return 0.0
+
+    widths = sorted(float(p[2]) for p in pts)
+    if len(widths) >= MIN_FIT_PTS * 2:
+        # Intersections create many extra-wide scan rows. Estimate the current
+        # usable path width from the narrower near-path rows instead.
+        narrow_count = max(MIN_FIT_PTS, len(widths) // 10)
+        widths = widths[:narrow_count]
+    return float(np.median(widths))
+
+
+def _compute_centerline_angle(points: List[CenterPoint], h: int) -> float:
+    fit_pts = [
+        (p[0], p[1])
+        for p in points
+        if h * CONTROL_ANGLE_Y_MIN_RATIO <= p[1] <= h * CONTROL_ANGLE_Y_MAX_RATIO
+    ]
+    if len(fit_pts) < MIN_FIT_PTS:
+        fit_pts = [
+            (p[0], p[1])
+            for p in points
+            if h * ANGLE_Y_MIN_RATIO <= p[1] <= h
+        ]
+
+    if len(fit_pts) < MIN_FIT_PTS:
+        return 90.0
+
+    try:
+        arr = np.array(fit_pts, dtype=np.float32)
+        coeffs = np.polyfit(arr[:, 1], arr[:, 0], deg=1)
+        a = float(coeffs[0])
+
+        angle_deg = math.degrees(math.atan2(1.0, -a))
+        if angle_deg < 0:
+            angle_deg += 360.0
+        return float(angle_deg)
+    except Exception:
+        return 90.0
+
+
+def _detect_road_state(
+    points: List[CenterPoint],
+    all_row_intervals: RowIntervals,
+    h: int,
+) -> Tuple[str, int, bool]:
+    if not points:
+        return "lost", 0, False
+
+    multi_interval_rows = sum(
+        1 for _, intervals in all_row_intervals if len(intervals) >= 2
+    )
+
+    bottom_pts = _bottom_points(points, h)
+    mid_pts = [
+        p
+        for p in points
+        if int(0.55 * h) <= p[1] <= int(0.75 * h)
+    ]
+
+    bottom_width = float(np.mean([p[2] for p in bottom_pts])) if bottom_pts else 0.0
+    mid_width = float(np.mean([p[2] for p in mid_pts])) if mid_pts else 0.0
+    width_growth = (
+        bottom_width > 0.0
+        and mid_width > bottom_width * FORK_WIDTH_GROWTH_RATIO
+    )
+
+    if multi_interval_rows >= FORK_INTERVAL_ROWS_MIN:
+        return "fork", multi_interval_rows, width_growth
+    if width_growth:
+        return "intersection", multi_interval_rows, width_growth
+    return "single", multi_interval_rows, width_growth
+
+
+def _select_current_instance(
+    instances: List[RoadInstance],
+    w: int,
+    h: int,
+) -> RoadInstance | None:
+    if not instances:
+        return None
+
+    min_area = int(w * h * MIN_AREA_RATIO * 0.3)
+    candidates = [inst for inst in instances if inst.area >= min_area]
+    if not candidates:
+        return None
+
+    bottom_candidates = [
+        inst
+        for inst in candidates
+        if inst.bottom_touch_px > MIN_ROAD_PX_PER_ROW
+    ]
+
+    if not bottom_candidates:
+        return max(
+            candidates,
+            key=lambda inst: (
+                -abs(inst.bottom_cx - w / 2.0),
+                inst.score,
+                inst.area,
+            ),
+        )
+
+    def score_instance(inst: RoadInstance) -> float:
+        center_penalty = abs(inst.bottom_cx - w / 2.0) / max(1.0, w / 2.0)
+        bottom_score = min(1.0, inst.bottom_touch_px / max(1.0, w * 0.2))
+        area_score = min(1.0, inst.area / max(1.0, w * h * 0.25))
+        return (
+            3.0 * bottom_score
+            + 2.0 * inst.score
+            + 1.0 * area_score
+            - 2.0 * center_penalty
+        )
+
+    return max(bottom_candidates, key=score_instance)
+
+
+def _detect_road_state_from_instances(
+    current: RoadInstance,
+    instances: List[RoadInstance],
+    w: int,
+    h: int,
+) -> str:
+    others = [inst for inst in instances if inst is not current]
+    if not others:
+        return "single"
+
+    current_angle = _compute_centerline_angle(current.centerline_points, h)
+    cur_error, _ = _compute_pixel_error(current.centerline_points, w, h)
+    min_area = w * h * MIN_AREA_RATIO * 0.3
+
+    branch_like_count = 0
+    for inst in others:
+        if len(inst.centerline_points) < MIN_FIT_PTS:
+            continue
+        if inst.area < min_area:
+            continue
+
+        angle = _compute_centerline_angle(inst.centerline_points, h)
+        angle_diff = abs(angle - current_angle)
+        angle_diff = min(angle_diff, 360.0 - angle_diff)
+
+        inst_error, _ = _compute_pixel_error(inst.centerline_points, w, h)
+        error_diff = abs(inst_error - cur_error)
+
+        if angle_diff > 20.0 or error_diff > w * 0.15:
+            branch_like_count += 1
+
+    if branch_like_count >= 2:
+        return "intersection"
+    if branch_like_count >= 1:
+        return "fork"
+    return "single"
+
+
+def _branch_from_points(
+    points: List[CenterPoint],
+    w: int,
+    h: int,
+    score: float,
+) -> RoadBranch:
+    pixel_error, _ = _compute_pixel_error(points, w, h)
+    angle = _compute_centerline_angle(points, h)
+    width = _compute_path_width(points, h)
+    return RoadBranch(
+        pixel_error=float(pixel_error),
+        centerline_angle=float(angle),
+        path_width_px=float(width),
+        score=float(score),
+        points=[(float(p[0]), float(p[1])) for p in points],
+    )
+
+
+def _instance_to_branch(inst: RoadInstance, w: int, h: int) -> RoadBranch:
+    return _branch_from_points(inst.centerline_points, w, h, inst.score)
+
+
+def _build_branches_from_instances(
+    current: RoadInstance,
+    instances: List[RoadInstance],
+    w: int,
+    h: int,
+    confidence: float,
+) -> List[RoadBranch]:
+    _ = confidence
+    branches: List[RoadBranch] = [_instance_to_branch(current, w, h)]
+    min_area = w * h * MIN_AREA_RATIO * 0.3
+
+    for inst in instances:
+        if inst is current:
+            continue
+        if len(inst.centerline_points) < MIN_FIT_PTS:
+            continue
+        if inst.area < min_area:
+            continue
+
+        branch = _instance_to_branch(inst, w, h)
+        duplicated = False
+        for existing in branches:
+            angle_diff = abs(branch.centerline_angle - existing.centerline_angle)
+            angle_diff = min(angle_diff, 360.0 - angle_diff)
+            error_diff = abs(branch.pixel_error - existing.pixel_error)
+            if angle_diff < 12.0 and error_diff < w * 0.08:
+                duplicated = True
+                break
+
+        if not duplicated:
+            branches.append(branch)
+
+    if len(branches) > 1:
+        current_branch = branches[0]
+        rest = sorted(branches[1:], key=lambda branch: branch.pixel_error)
+        branches = [current_branch] + rest
+
+    return branches
+
+
+def _build_branches(
+    points: List[CenterPoint],
+    all_row_intervals: RowIntervals,
+    w: int,
+    h: int,
+    confidence: float,
+    road_state: str,
+) -> List[RoadBranch]:
+    main_branch = _branch_from_points(points, w, h, confidence)
+    branches = [main_branch]
+
+    if road_state not in {"fork", "intersection"}:
+        return branches
+
+    grouped: dict[str, List[CenterPoint]] = {"left": [], "center": [], "right": []}
+    for y, intervals in all_row_intervals:
+        if len(intervals) < 2:
+            continue
+
+        for left, right in intervals:
+            cx = (left + right) / 2.0
+            width = float(right - left + 1)
+            if cx < w * 0.40:
+                grouped["left"].append((float(cx), int(y), width))
+            elif cx > w * 0.60:
+                grouped["right"].append((float(cx), int(y), width))
+            else:
+                grouped["center"].append((float(cx), int(y), width))
+
+    extra_branches: List[RoadBranch] = []
+    for bucket_points in grouped.values():
+        if len(bucket_points) < MIN_FIT_PTS:
+            continue
+        extra_branches.append(_branch_from_points(bucket_points, w, h, confidence))
+
+    extra_branches.sort(key=lambda branch: branch.pixel_error)
+    for branch in extra_branches:
+        is_duplicate = any(
+            abs(branch.pixel_error - existing.pixel_error) < MIN_ROAD_PX_PER_ROW
+            and abs(branch.centerline_angle - existing.centerline_angle) < 5.0
+            for existing in branches
+        )
+        if not is_duplicate:
+            branches.append(branch)
+
+    return branches
+
+
+def _normalize_frame(frame: np.ndarray) -> np.ndarray:
+    if frame.dtype == np.uint8:
+        return np.ascontiguousarray(frame)
+
+    frame_float = np.nan_to_num(frame.astype(np.float32, copy=False), nan=0.0)
+    max_value = float(np.max(frame_float)) if frame_float.size else 0.0
+    if max_value <= 1.0:
+        frame_float = frame_float * 255.0
+
+    return np.ascontiguousarray(np.clip(frame_float, 0.0, 255.0).astype(np.uint8))
+
+
+def _draw_polyline(
+    img: np.ndarray,
+    points: List[Tuple[float, float]],
+    color: Tuple[int, int, int],
+    thickness: int,
+) -> None:
+    if len(points) < 2:
+        return
+
+    pts = np.array(
+        [[int(round(x)), int(round(y))] for x, y in points],
+        dtype=np.int32,
+    )
+    cv2.polylines(img, [pts], isClosed=False, color=color, thickness=thickness)
+
+
+def _save_debug_image(
+    frame: np.ndarray,
+    mask: np.ndarray | None,
+    result: RoadPerceptionResult,
+    debug_save_path: str,
+) -> None:
+    try:
+        debug_img = frame.copy()
+        h, w = debug_img.shape[:2]
+
+        if mask is not None and mask.size != 0:
+            overlay = np.zeros_like(debug_img)
+            overlay[mask > 0] = (255, 0, 0)
+            debug_img = cv2.addWeighted(debug_img, 1.0, overlay, 0.35, 0.0)
+
+        cv2.line(
+            debug_img,
+            (int(round(w / 2.0)), 0),
+            (int(round(w / 2.0)), h - 1),
+            (0, 255, 0),
+            1,
+        )
+
+        if result.branches:
+            branch_colors = [
+                (0, 0, 255),
+                (0, 255, 255),
+                (255, 0, 255),
+                (0, 165, 255),
+                (255, 255, 255),
+            ]
+            for idx, branch in enumerate(result.branches):
+                color = branch_colors[idx % len(branch_colors)]
+                thickness = 3 if idx == 0 else 2
+                _draw_polyline(debug_img, branch.points, color, thickness)
+                if branch.points:
+                    label_idx = min(len(branch.points) - 1, max(0, len(branch.points) // 2))
+                    lx, ly = branch.points[label_idx]
+                    label = (
+                        f"b{idx} e={branch.pixel_error:.0f} "
+                        f"a={branch.centerline_angle:.0f}"
+                    )
+                    cv2.putText(
+                        debug_img,
+                        label,
+                        (int(round(lx)) + 6, int(round(ly)) - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45,
+                        (0, 0, 0),
+                        3,
+                        cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        debug_img,
+                        label,
+                        (int(round(lx)) + 6, int(round(ly)) - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45,
+                        color,
+                        1,
+                        cv2.LINE_AA,
+                    )
+
+        cx_bottom = int(round(w / 2.0 + result.pixel_error))
+        cx_bottom = max(0, min(w - 1, cx_bottom))
+        bottom_y = h - 12
+        cv2.circle(debug_img, (cx_bottom, bottom_y), 6, (0, 255, 255), -1)
+
+        arrow_len = max(35, int(min(w, h) * 0.16))
+        angle_rad = math.radians(result.centerline_angle)
+        end_x = int(round(cx_bottom + arrow_len * math.cos(angle_rad)))
+        end_y = int(round(bottom_y - arrow_len * math.sin(angle_rad)))
+        cv2.arrowedLine(
+            debug_img,
+            (cx_bottom, bottom_y),
+            (end_x, end_y),
+            (255, 255, 255),
+            2,
+            tipLength=0.25,
+        )
+
+        text_lines = [
+            f"state={result.road_state} found={result.is_road_found}",
+            f"error={result.pixel_error:.1f}px corrected={result.corrected_pixel_error:.1f}px",
+            f"angle={result.centerline_angle:.1f}deg width={result.path_width_px:.1f}px",
+            f"conf={result.confidence:.2f} branches={len(result.branches)}",
+        ]
+        if result.debug_msg:
+            text_lines.append(result.debug_msg[:72])
+        x0, y0 = 10, 24
+        for i, line in enumerate(text_lines):
+            y = y0 + i * 22
+            cv2.putText(
+                debug_img,
+                line,
+                (x0, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 0),
+                3,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                debug_img,
+                line,
+                (x0, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
+        debug_dir = os.path.dirname(debug_save_path)
+        if debug_dir:
+            os.makedirs(debug_dir, exist_ok=True)
+        cv2.imwrite(debug_save_path, debug_img)
+    except Exception:
+        # Debug output must never break the perception call.
+        return
+
+
+def _validate_frame(frame: np.ndarray) -> str | None:
+    if frame is None:
+        return "frame is None"
+    if not isinstance(frame, np.ndarray):
+        return f"frame must be np.ndarray, got {type(frame).__name__}"
+    if frame.ndim != 3:
+        return f"frame must be a 3-channel BGR image, got ndim={frame.ndim}"
+    if frame.shape[2] != 3:
+        return f"frame must have 3 channels, got shape={frame.shape}"
+    if frame.shape[0] <= 0 or frame.shape[1] <= 0:
+        return f"frame has invalid shape={frame.shape}"
+    return None
+
+
+def get_model_io_info() -> dict[str, Any]:
+    """Optional helper for inspecting ONNX model input/output metadata."""
+    session, _ = _get_session()
+    return {
+        "input_size": _MODEL_INPUT_SIZE or INP_SIZE,
+        "inputs": [
+            {"name": item.name, "shape": item.shape, "type": item.type}
+            for item in session.get_inputs()
+        ],
+        "outputs": [
+            {"name": item.name, "shape": item.shape, "type": item.type}
+            for item in session.get_outputs()
+        ],
+    }
+
+
+def get_road_perception(
+    frame: np.ndarray,
+    yaw_rate_deg_s: float = 0.0,
+    cam_offset_m: float = 0.15,
+    flight_height_m: float = 1.5,
+    debug_save_path: str | None = None,
+) -> RoadPerceptionResult:
+    """Run one-frame visual road perception on an OpenCV BGR frame."""
+    frame_error = _validate_frame(frame)
+    if frame_error is not None:
+        return _lost_result(frame_error)
+
+    frame_bgr = _normalize_frame(frame)
+    debug_mask: np.ndarray | None = None
+
+    try:
+        orig_h, orig_w = frame_bgr.shape[:2]
+
+        session, input_name = _get_session()
+        input_size = _MODEL_INPUT_SIZE or INP_SIZE
+        blob, _scale, pad_x, pad_y = _preprocess(frame_bgr, input_size)
+        outputs = session.run(None, {input_name: blob})
+
+        merged_mask, instances, confidence, decode_msg = _decode_yolo_segmentation(
+            outputs,
+            orig_w=orig_w,
+            orig_h=orig_h,
+            input_size=input_size,
+            pad_x=pad_x,
+            pad_y=pad_y,
+        )
+        debug_mask = merged_mask
+        if merged_mask is None or not instances or np.count_nonzero(merged_mask) == 0:
+            result = _lost_result(decode_msg)
+            if debug_save_path:
+                _save_debug_image(frame_bgr, merged_mask, result, debug_save_path)
+            return result
+
+        valid_instances: List[RoadInstance] = []
+        for inst in instances:
+            inst_clean = _clean_mask_keep_single_instance(inst.mask)
+            if inst_clean.size == 0 or np.count_nonzero(inst_clean) == 0:
+                continue
+
+            points, _row_intervals = _extract_centerline_and_intervals(inst_clean)
+            if len(points) < MIN_FIT_PTS:
+                continue
+
+            inst.mask = inst_clean
+            _refresh_instance_geometry(inst, orig_w, orig_h)
+            inst.centerline_points = points
+            valid_instances.append(inst)
+
+        if not valid_instances:
+            result = _lost_result("no valid road instances after cleanup")
+            if debug_save_path:
+                _save_debug_image(frame_bgr, merged_mask, result, debug_save_path)
+            return result
+
+        current = _select_current_instance(valid_instances, orig_w, orig_h)
+        if current is None:
+            result = _lost_result("no current road instance selected")
+            if debug_save_path:
+                _save_debug_image(frame_bgr, merged_mask, result, debug_save_path)
+            return result
+
+        pixel_error, _ = _compute_pixel_error(
+            current.centerline_points,
+            orig_w,
+            orig_h,
+        )
+        centerline_angle = _compute_centerline_angle(current.centerline_points, orig_h)
+        path_width_px = _compute_path_width(current.centerline_points, orig_h)
+
+        road_state = _detect_road_state_from_instances(
+            current,
+            valid_instances,
+            orig_w,
+            orig_h,
+        )
+        fallback_msg = ""
+        if len(valid_instances) == 1:
+            _points, all_row_intervals = _extract_centerline_and_intervals(current.mask)
+            fallback_state, multi_rows, width_growth = _detect_road_state(
+                current.centerline_points,
+                all_row_intervals,
+                orig_h,
+            )
+            fallback_msg = (
+                f", fallback={fallback_state}, "
+                f"multi_interval_rows={multi_rows}, "
+                f"width_growth={bool(width_growth)}"
+            )
+            if fallback_state in {"fork", "intersection"}:
+                road_state = fallback_state
+
+        # V1 does not apply yaw/camera-offset compensation.
+        # For real geometric compensation, implement BEV/IPM in a later version.
+        _ = (yaw_rate_deg_s, cam_offset_m, flight_height_m)
+        corrected_pixel_error = pixel_error
+
+        branches = _build_branches_from_instances(
+            current,
+            valid_instances,
+            orig_w,
+            orig_h,
+            confidence,
+        )
+
+        result = RoadPerceptionResult(
+            is_road_found=True,
+            road_state=road_state,
+            pixel_error=float(pixel_error),
+            centerline_angle=float(centerline_angle),
+            path_width_px=float(path_width_px),
+            confidence=float(confidence),
+            corrected_pixel_error=float(corrected_pixel_error),
+            branches=branches,
+            debug_msg=(
+                f"instances={len(valid_instances)}, "
+                f"branches={len(branches)}"
+                f"{fallback_msg}"
+            ),
+        )
+
+        if debug_save_path:
+            _save_debug_image(frame_bgr, merged_mask, result, debug_save_path)
+
+        return result
+    except Exception as exc:
+        result = _lost_result(f"{type(exc).__name__}: {exc}")
+        if debug_save_path:
+            _save_debug_image(frame_bgr, debug_mask, result, debug_save_path)
+        return result
+
+
+__all__ = [
+    "RoadBranch",
+    "RoadInstance",
+    "RoadPerceptionResult",
+    "get_model_io_info",
+    "get_road_perception",
+]

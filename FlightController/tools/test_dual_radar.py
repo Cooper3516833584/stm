@@ -58,6 +58,7 @@ def main() -> None:
     parser.add_argument("--profile", action="store_true", help="打印每帧耗时")
     parser.add_argument("--debug-dump", action="store_true", help="打印前方走廊原始点云数据")
     parser.add_argument("--log-file", default=None, help="日志文件路径")
+    parser.add_argument("--loop-hz", type=float, default=30.0, help="主循环目标频率/Hz (默认: 30)")
     args = parser.parse_args()
 
     if args.log_file:
@@ -127,6 +128,9 @@ def main() -> None:
                 break
         if not multi_radar.connected:
             logger.warning("[DUAL-RADAR] 仅部分雷达连接，继续运行...")
+
+        period = 1.0 / max(args.loop_hz, 0.1)
+        logger.info(f"[DUAL-RADAR] 主循环 @ {args.loop_hz}Hz (周期 {period:.3f}s)")
 
         # 采样窗口（~0.5s 汇总一次，即 ~50 帧 @10ms sleep）
         loop_count = 0
@@ -230,7 +234,11 @@ def main() -> None:
                 blocked_counts.clear()
                 obs_distances.clear()
 
-            time.sleep(0)
+            # ── 速率控制：按目标频率 sleep 剩余时间 ──
+            elapsed = time.perf_counter() - t0
+            remaining = period - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
 
     except KeyboardInterrupt:
         logger.info("[DUAL-RADAR] 用户中断")

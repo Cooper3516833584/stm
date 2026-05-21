@@ -64,7 +64,7 @@ class MultiRadar:
 # Example upper+lower mounting convention (lower radar mounted upside-down):
 # configs = [
 #     RadarConfig(name="upper", index=0, mount_xy_cm=(0.0, 0.0), mount_yaw_deg=0.0),
-#     RadarConfig(name="lower", index=1, mount_xy_cm=(0.0, 0.0), mount_yaw_deg=0.0, mount_mirror_y=True),
+#     RadarConfig(name="lower", index=1, mount_xy_cm=(0.96, 0.15), mount_yaw_deg=0.0, mount_mirror_y=True),
 # ]
 
 

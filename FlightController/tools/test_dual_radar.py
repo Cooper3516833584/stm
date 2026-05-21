@@ -1,0 +1,195 @@
+"""
+双雷达统一避障链路测试。
+
+接线: 上雷达 /dev/ttySTM4 (index=0), 下雷达 /dev/ttySTM9 (index=1, 倒装 mirror_y)
+机身范围 -25cm < x < 25cm, -25cm < y < 25cm 内的点自动屏蔽。
+
+用法:
+    # 仅测双雷达连通性和点云统计
+    PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py --no-fc
+
+    # 双雷达 + 飞控（不发送指令，只读状态）
+    PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py --dry-run
+
+    # 完整链路
+    PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py
+"""
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+
+def _setup_path() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for p in (root, root.parent):
+        value = str(p)
+        if value not in sys.path:
+            sys.path.insert(0, value)
+
+
+def _body_mask(points: "np.ndarray", x_half: float = 25.0, y_half: float = 25.0) -> "np.ndarray":
+    """滤除机身范围内的自反射点。"""
+    return points[~((abs(points[:, 0]) < x_half) & (abs(points[:, 1]) < y_half))]
+
+
+def main() -> None:
+    _setup_path()
+
+    from FlightController import FC_Controller
+    from FlightController.Components import MultiRadar, RadarConfig
+    from FlightController.Solutions.LocalPlanner import LocalPlanner, PlannerConfig
+    import numpy as np
+    from loguru import logger
+
+    parser = argparse.ArgumentParser(description="双雷达统一避障链路测试")
+    parser.add_argument("--upper-port", default=None, help="上雷达串口 (默认: /dev/ttySTM4)")
+    parser.add_argument("--lower-port", default=None, help="下雷达串口 (默认: /dev/ttySTM9)")
+    parser.add_argument("--fc-port", default=None, help="飞控串口 (默认: 自动探测)")
+    parser.add_argument("--no-fc", action="store_true", help="不连接飞控")
+    parser.add_argument("--dry-run", action="store_true", help="连接飞控但不发送指令")
+    parser.add_argument("--max-distance-cm", type=float, default=300.0, help="障碍物检测最大距离/cm")
+    parser.add_argument("--stop-distance-cm", type=float, default=80.0, help="急停距离/cm")
+    parser.add_argument("--slow-distance-cm", type=float, default=150.0, help="减速距离/cm")
+    parser.add_argument("--corridor-half-width-cm", type=float, default=50.0, help="前方走廊半宽/cm")
+    parser.add_argument("--body-x-half-cm", type=float, default=25.0, help="机身 X 屏蔽半宽/cm")
+    parser.add_argument("--body-y-half-cm", type=float, default=25.0, help="机身 Y 屏蔽半宽/cm")
+    parser.add_argument("--profile", action="store_true", help="打印每帧耗时")
+    parser.add_argument("--debug-dump", action="store_true", help="打印前方走廊原始点云数据")
+    parser.add_argument("--log-file", default=None, help="日志文件路径")
+    args = parser.parse_args()
+
+    if args.log_file:
+        logger.add(args.log_file, enqueue=True, level="DEBUG")
+
+    # ── 飞控 ──
+    fc = None
+    if not args.no_fc:
+        fc = FC_Controller()
+        fc.start_listen_serial(block_until_connected=True, explicit_port=args.fc_port)
+        fc.wait_for_connection(timeout_s=10)
+        fc.set_flight_mode(2)
+        fc.wait_for_last_command_done()
+        logger.info("[FC] 连接成功，已切定点模式")
+
+    # ── 双雷达 ──
+    configs = [
+        RadarConfig(
+            name="upper",
+            index=0,
+            mount_xy_cm=(0.0, 0.0),
+            mount_yaw_deg=0.0,
+            port=args.upper_port or None,
+        ),
+        RadarConfig(
+            name="lower",
+            index=1,
+            mount_xy_cm=(0.96, 0.15),
+            mount_yaw_deg=0.0,
+            mount_mirror_y=True,
+            port=args.lower_port or None,
+        ),
+    ]
+    multi_radar = MultiRadar(configs)
+    planner_config = PlannerConfig(
+        enable_free_flight=True,
+        free_flight_speed_cm_s=20.0,
+        max_speed_cm_s=50.0,
+        obstacle_stop_distance_cm=args.stop_distance_cm,
+        obstacle_slow_distance_cm=args.slow_distance_cm,
+        forward_corridor_half_width_cm=args.corridor_half_width_cm,
+    )
+    planner = LocalPlanner(config=planner_config)
+
+    try:
+        multi_radar.start()
+        logger.info("[DUAL-RADAR] 双雷达已启动，等待数据就绪...")
+        while not multi_radar.connected:
+            time.sleep(0.1)
+        logger.info("[DUAL-RADAR] 双雷达均已连接")
+
+        while True:
+            t0 = time.perf_counter()
+
+            # ① 获取融合点云（仅限最大距离）
+            all_points = multi_radar.get_obstacle_points_body_cm(
+                max_distance_cm=args.max_distance_cm
+            )
+            raw_count = len(all_points)
+
+            # ② 屏蔽机身范围
+            filtered_points = _body_mask(
+                all_points,
+                x_half=args.body_x_half_cm,
+                y_half=args.body_y_half_cm,
+            )
+            body_blocked = raw_count - len(filtered_points)
+
+            # ③ 分别获取各雷达点云（也经 body mask）
+            upper_points = multi_radar.radars[0].get_points_body_cm(
+                max_distance_cm=args.max_distance_cm
+            )
+            upper_filtered = _body_mask(upper_points, args.body_x_half_cm, args.body_y_half_cm)
+            lower_points = multi_radar.radars[1].get_points_body_cm(
+                max_distance_cm=args.max_distance_cm
+            )
+            lower_filtered = _body_mask(lower_points, args.body_x_half_cm, args.body_y_half_cm)
+
+            # ④ 避障决策（基于过滤后点云）
+            command = planner.plan(obstacles_body_cm=filtered_points, target=None)
+            obstacle_cm = planner._nearest_forward_obstacle_cm(filtered_points)
+
+            # ⑤ 发送飞控指令
+            if fc is not None and not args.dry_run:
+                fc.send_realtime_control_data(
+                    vel_x=round(command.vx_cm_s),
+                    vel_y=round(command.vy_cm_s),
+                    vel_z=round(command.vz_cm_s),
+                    yaw=round(command.yaw_rate_deg_s),
+                )
+
+            t1 = time.perf_counter()
+
+            # ── 日志 ──
+            fc_str = ""
+            if fc is not None:
+                s = fc.state
+                fc_str = f"FC[mode={s.mode.value} bat={s.bat.value:.1f}V pit={s.pit.value:.1f}]"
+
+            logger.info(
+                f"{fc_str} | "
+                f"融合={len(filtered_points)}/{raw_count}点 "
+                f"(上={len(upper_filtered)} 下={len(lower_filtered)} "
+                f"机身屏蔽={body_blocked}) | "
+                f"前方={obstacle_cm:.0f}cm | " if obstacle_cm is not None else "前方=无 | "
+                f"指令=(vx={command.vx_cm_s:.0f} vy={command.vy_cm_s:.0f}) reason={command.reason}"
+            )
+
+            if args.profile:
+                logger.info(f"[PROFILE] loop={ (t1 - t0) * 1000:.1f}ms")
+
+            if args.debug_dump and len(filtered_points) > 0:
+                fwd = filtered_points[filtered_points[:, 0] > 10]
+                fwd_corridor = fwd[abs(fwd[:, 1]) < args.corridor_half_width_cm]
+                if len(fwd_corridor) > 0:
+                    dists = np.linalg.norm(fwd_corridor, axis=1)
+                    logger.info(
+                        f"[DEBUG] 前方走廊={len(fwd_corridor)}点 "
+                        f"最近={dists.min():.0f}cm 最远={dists.max():.0f}cm"
+                    )
+
+            time.sleep(0.01)
+
+    except KeyboardInterrupt:
+        logger.info("[DUAL-RADAR] 用户中断")
+    finally:
+        if fc is not None:
+            fc.send_realtime_control_data(0, 0, 0, 0)
+            fc.close()
+        multi_radar.stop()
+        logger.info("[DUAL-RADAR] 安全退出")
+
+
+if __name__ == "__main__":
+    main()

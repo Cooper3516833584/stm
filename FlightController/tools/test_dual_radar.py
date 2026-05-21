@@ -139,7 +139,7 @@ def main() -> None:
         while True:
             t0 = time.perf_counter()
 
-            # ① 获取融合点云
+            # ① 获取融合点云（仅一次坐标变换）
             all_points = multi_radar.get_obstacle_points_body_cm(
                 max_distance_cm=args.max_distance_cm
             )
@@ -151,15 +151,9 @@ def main() -> None:
                 y_half=args.body_y_half_cm,
             )
 
-            # ③ 分别获取各雷达点云
-            upper_points = multi_radar.radars[0].get_points_body_cm(
-                max_distance_cm=args.max_distance_cm
-            )
-            upper_filtered = _body_mask(upper_points, args.body_x_half_cm, args.body_y_half_cm)
-            lower_points = multi_radar.radars[1].get_points_body_cm(
-                max_distance_cm=args.max_distance_cm
-            )
-            lower_filtered = _body_mask(lower_points, args.body_x_half_cm, args.body_y_half_cm)
+            # ③ 各雷达点数统计（直接读 map.data，不做坐标变换）
+            raw_upper = int(np.count_nonzero(multi_radar.radars[0].map.data != -1))
+            raw_lower = int(np.count_nonzero(multi_radar.radars[1].map.data != -1))
 
             # ④ 避障决策
             command = planner.plan(obstacles_body_cm=filtered_points, target=None)
@@ -179,8 +173,8 @@ def main() -> None:
             # ── 累积采样 ──
             loop_count += 1
             loop_times.append((t1 - t0) * 1000.0)
-            upper_counts.append(len(upper_filtered))
-            lower_counts.append(len(lower_filtered))
+            upper_counts.append(raw_upper)
+            lower_counts.append(raw_lower)
             blocked_counts.append(len(all_points) - len(filtered_points))
             if obstacle_cm is not None:
                 obs_distances.append(obstacle_cm)

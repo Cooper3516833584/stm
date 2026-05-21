@@ -130,9 +130,11 @@ def main() -> None:
 
         # 采样窗口（~0.5s 汇总一次，即 ~50 帧 @10ms sleep）
         loop_count = 0
+        wall_start = time.perf_counter()
+        work_total_s = 0.0
         loop_times = []       # 每帧耗时 ms
-        upper_counts = []     # 上雷达过滤后点数
-        lower_counts = []     # 下雷达过滤后点数
+        upper_counts = []     # 上雷达点数
+        lower_counts = []     # 下雷达点数
         blocked_counts = []   # 机身屏蔽点数
         obs_distances = []    # 前方障碍物距离
 
@@ -169,10 +171,12 @@ def main() -> None:
                 )
 
             t1 = time.perf_counter()
+            work_s = t1 - t0
 
             # ── 累积采样 ──
             loop_count += 1
-            loop_times.append((t1 - t0) * 1000.0)
+            work_total_s += work_s
+            loop_times.append(work_s * 1000.0)
             upper_counts.append(raw_upper)
             lower_counts.append(raw_lower)
             blocked_counts.append(len(all_points) - len(filtered_points))
@@ -181,13 +185,14 @@ def main() -> None:
 
             # ── 每 50 帧 (~0.5s) 汇总输出 ──
             if loop_count >= 50:
+                wall_elapsed_s = time.perf_counter() - wall_start
                 t_arr = np.array(loop_times)
                 u_arr = np.array(upper_counts)
                 l_arr = np.array(lower_counts)
                 b_arr = np.array(blocked_counts)
 
-                effective_hz = 1000.0 / t_arr.mean() if t_arr.mean() > 0 else 0
-                cpu_pct = t_arr.mean() / 10.0 * 100.0  # 相对 10ms 周期
+                effective_hz = loop_count / wall_elapsed_s
+                cpu_pct = work_total_s / wall_elapsed_s * 100.0 if wall_elapsed_s > 0 else 0
 
                 fc_str = ""
                 if fc is not None:
@@ -217,6 +222,8 @@ def main() -> None:
                         )
 
                 loop_count = 0
+                wall_start = time.perf_counter()
+                work_total_s = 0.0
                 loop_times.clear()
                 upper_counts.clear()
                 lower_counts.clear()

@@ -105,9 +105,28 @@ def main() -> None:
     try:
         multi_radar.start()
         logger.info("[DUAL-RADAR] 双雷达已启动，等待数据就绪...")
+
+        # 等待连接 + 诊断输出
+        wait_start = time.perf_counter()
         while not multi_radar.connected:
-            time.sleep(0.1)
-        logger.info("[DUAL-RADAR] 双雷达均已连接")
+            time.sleep(1.0)
+            elapsed = time.perf_counter() - wait_start
+            for radar in multi_radar.radars:
+                stats = radar.get_radar_latency_stats()
+                logger.info(
+                    f"[WAIT {elapsed:.0f}s] {radar.name}: "
+                    f"connected={radar.connected} "
+                    f"bytes_read={stats['serial_bytes_read']} "
+                    f"frames_ok={stats['serial_frames_ok']} "
+                    f"crc_errors={stats['crc_errors']} "
+                    f"samples={stats['samples']} "
+                    f"parse_buf={stats['parse_buffer_bytes']}B"
+                )
+            if elapsed > 10.0:
+                logger.error("[DUAL-RADAR] 连接超时(>10s)，可能某颗雷达无数据")
+                break
+        if not multi_radar.connected:
+            logger.warning("[DUAL-RADAR] 仅部分雷达连接，继续运行...")
 
         while True:
             t0 = time.perf_counter()

@@ -93,8 +93,8 @@ def main() -> None:
     parser.add_argument(
         "--min-distance-cm",
         type=float,
-        default=10.0,
-        help="障碍物最小检测距离/cm，过滤雷达自反射噪点 (默认: 10)",
+        default=0.0,
+        help="障碍物最小检测距离/cm，过滤雷达自反射噪点 (默认: 0)",
     )
     parser.add_argument(
         "--debug-dump",

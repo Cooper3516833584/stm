@@ -34,11 +34,13 @@ class LD_Radar(object):
         index: int = 0,
         mount_xy_cm: tuple[float, float] = (0.0, 0.0),
         mount_yaw_deg: float = 0.0,
+        mount_mirror_y: bool = False,
     ):
         self.name = name
         self.index = index
         self.mount_xy_cm = np.asarray(mount_xy_cm, dtype=float)
         self.mount_yaw_deg = float(mount_yaw_deg)
+        self.mount_mirror_y = bool(mount_mirror_y)
         self._lock = threading.RLock()
         self.map = Map_Circle()
         self.running = False
@@ -361,6 +363,8 @@ class LD_Radar(object):
         points = self.get_points_xy_cm(max_distance_cm=max_distance_cm)
         if points.size == 0:
             return np.empty((0, 2), dtype=float)
+        if self.mount_mirror_y:
+            points[:, 1] *= -1.0
         rad = np.deg2rad(self.mount_yaw_deg)
         rotation = np.array(
             [

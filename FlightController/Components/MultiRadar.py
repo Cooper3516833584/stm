@@ -12,6 +12,7 @@ class RadarConfig:
     mount_xy_cm: tuple[float, float]
     mount_yaw_deg: float
     port: str | None = None
+    mount_mirror_y: bool = False
 
 
 class MultiRadar:
@@ -27,6 +28,7 @@ class MultiRadar:
                 index=config.index,
                 mount_xy_cm=config.mount_xy_cm,
                 mount_yaw_deg=config.mount_yaw_deg,
+                mount_mirror_y=config.mount_mirror_y,
             )
             for config in self.configs
         ]
@@ -59,10 +61,10 @@ class MultiRadar:
         return np.vstack(point_sets)
 
 
-# Example two-D500 mounting convention:
+# Example upper+lower mounting convention (lower radar mounted upside-down):
 # configs = [
-#     RadarConfig(name="front", index=0, mount_xy_cm=(0.0, 12.0), mount_yaw_deg=0.0),
-#     RadarConfig(name="rear", index=1, mount_xy_cm=(0.0, -12.0), mount_yaw_deg=180.0),
+#     RadarConfig(name="upper", index=0, mount_xy_cm=(0.0, 0.0), mount_yaw_deg=0.0),
+#     RadarConfig(name="lower", index=1, mount_xy_cm=(0.0, 0.0), mount_yaw_deg=0.0, mount_mirror_y=True),
 # ]
 
 

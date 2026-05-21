@@ -17,26 +17,27 @@ def main() -> None:
 
     from FlightController.Components import MultiRadar, RadarConfig
 
-    parser = argparse.ArgumentParser(description="Smoke test two direct-connected D500 radars.")
-    parser.add_argument("--front-port", default=None, help="Front radar serial device path.")
-    parser.add_argument("--rear-port", default=None, help="Rear radar serial device path.")
+    parser = argparse.ArgumentParser(description="Smoke test two direct-connected D500 radars (upper+lower).")
+    parser.add_argument("--upper-port", default=None, help="Upper radar serial device path (index=0).")
+    parser.add_argument("--lower-port", default=None, help="Lower radar serial device path (index=1).")
     parser.add_argument("--seconds", type=float, default=5.0, help="Test duration.")
     args = parser.parse_args()
 
     configs = [
         RadarConfig(
-            name="front",
+            name="upper",
             index=0,
-            mount_xy_cm=(0.0, 12.0),
+            mount_xy_cm=(0.0, 0.0),
             mount_yaw_deg=0.0,
-            port=args.front_port,
+            port=args.upper_port,
         ),
         RadarConfig(
-            name="rear",
+            name="lower",
             index=1,
-            mount_xy_cm=(0.0, -12.0),
-            mount_yaw_deg=180.0,
-            port=args.rear_port,
+            mount_xy_cm=(0.0, 0.0),
+            mount_yaw_deg=0.0,
+            mount_mirror_y=True,
+            port=args.lower_port,
         ),
     ]
     multi_radar = MultiRadar(configs)

@@ -230,7 +230,7 @@ def main() -> None:
                 blocked_counts.clear()
                 obs_distances.clear()
 
-            time.sleep(0.01)
+            time.sleep(0)
 
     except KeyboardInterrupt:
         logger.info("[DUAL-RADAR] 用户中断")

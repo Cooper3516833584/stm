@@ -353,6 +353,7 @@ class FC_Base_Uart_Comunication(object):
         print_state=False,
         callback: Optional[Callable[[FC_State_Struct], None]] = None,
         block_until_connected: bool = False,
+        open_timeout_s: Optional[float] = None,
     ):
         """连接飞控通信串口
 
@@ -373,6 +374,8 @@ class FC_Base_Uart_Comunication(object):
                 serial_dev = resolve_fc_port(required=True)
             self._open_serial(serial_dev)
         else:
+            start_s = time.perf_counter()
+            last_error: Exception | None = None
             while True:
                 try:
                     serial_dev_to_open = (
@@ -384,8 +387,20 @@ class FC_Base_Uart_Comunication(object):
                     self._open_serial(serial_dev_to_open)
                     break
                 except Exception as e:
+                    last_error = e
+                    if open_timeout_s is not None and open_timeout_s > 0:
+                        elapsed_s = time.perf_counter() - start_s
+                        if elapsed_s >= open_timeout_s:
+                            raise TimeoutError(
+                                f"FC serial open timeout after {open_timeout_s:.1f}s"
+                            ) from last_error
                     logger.warning(f"[FC] Serial port open failed: {e}, retrying")
-                    time.sleep(1)
+                    if open_timeout_s is not None and open_timeout_s > 0:
+                        elapsed_s = time.perf_counter() - start_s
+                        remaining_s = max(0.0, open_timeout_s - elapsed_s)
+                        time.sleep(min(1.0, remaining_s))
+                    else:
+                        time.sleep(1)
         logger.info("[FC] Serial port opened")
         self.running = True
         _listen_thread = threading.Thread(target=self._listen_serial_task)

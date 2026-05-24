@@ -1,4 +1,4 @@
-"""Hardware helper functions for root-level autonomy entry points."""
+"""Compatibility hardware helpers for root-level autonomy scripts."""
 
 from __future__ import annotations
 
@@ -8,35 +8,18 @@ from typing import Any
 def build_dual_radar(upper_port: str, lower_port: str):
     from FlightController.Components import MultiRadar, RadarConfig
 
-    configs = [
-        RadarConfig(
-            name="upper",
-            index=0,
-            mount_xy_cm=(0.0, 0.0),
-            mount_yaw_deg=0.0,
-            port=upper_port,
-        ),
-        RadarConfig(
-            name="lower",
-            index=1,
-            mount_xy_cm=(0.96, 0.15),
-            mount_yaw_deg=0.0,
-            mount_mirror_y=True,
-            port=lower_port,
-        ),
-    ]
-    return MultiRadar(configs)
+    return MultiRadar(
+        [
+            RadarConfig("upper", 0, (0.0, 0.0), 0.0, port=upper_port),
+            RadarConfig("lower", 1, (0.96, 0.15), 0.0, port=lower_port, mount_mirror_y=True),
+        ]
+    )
 
 
 def connect_fc(fc_port: str | None = None):
-    from FlightController import FC_Controller
+    from FlightController.Components.FCConnector import FCConnectConfig, connect_fc as _connect_fc
 
-    fc = FC_Controller()
-    fc.start_listen_serial(block_until_connected=True, explicit_port=fc_port)
-    fc.wait_for_connection(timeout_s=10)
-    fc.set_flight_mode(2)
-    fc.wait_for_last_command_done()
-    return fc
+    return _connect_fc(FCConnectConfig(port=fc_port, mode=2, timeout_s=10.0))
 
 
 def open_camera(device: str | int | None, width: int, height: int, fps: int):
@@ -50,16 +33,16 @@ def open_camera(device: str | int | None, width: int, height: int, fps: int):
 def send_fc_command(fc: Any | None, command, enable_flight: bool) -> None:
     if fc is None or not enable_flight:
         return
-    vx, vy, vz, yaw = command.as_fc_tuple()
-    fc.send_realtime_control_data(vx, vy, vz, yaw)
+    fc.send_realtime_control_data(*command.as_fc_tuple())
 
 
-def stop_fc(fc: Any | None, enable_flight: bool) -> None:
+def stop_fc(fc: Any | None) -> None:
     if fc is None:
         return
     try:
-        if enable_flight:
-            fc.send_realtime_control_data(0, 0, 0, 0)
+        fc.send_realtime_control_data(0, 0, 0, 0)
     finally:
         fc.close()
 
+
+__all__ = ["build_dual_radar", "connect_fc", "open_camera", "send_fc_command", "stop_fc"]

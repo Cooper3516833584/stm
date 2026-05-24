@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import time
 from typing import Iterable
 
 import numpy as np
@@ -49,6 +50,27 @@ class MultiRadar:
     @property
     def connected(self) -> bool:
         return bool(self.radars) and all(radar.connected for radar in self.radars)
+
+    def get_health_snapshot(self, now_s: float | None = None, max_age_s: float = 0.5) -> dict[str, object]:
+        if now_s is None:
+            now_s = time.perf_counter()
+        radar_states = [radar.get_health_snapshot(now_s=now_s) for radar in self.radars]
+        required_ok = True
+        for state in radar_states:
+            age = state["last_frame_age_s"]
+            if not state["connected"] or age is None or age > max_age_s:
+                required_ok = False
+        return {
+            "connected": self.connected,
+            "fresh": required_ok,
+            "max_age_s": max_age_s,
+            "radars": radar_states,
+        }
+
+    def is_fresh(self, max_age_s: float = 0.5, now_s: float | None = None) -> bool:
+        if now_s is None:
+            now_s = time.perf_counter()
+        return all(radar.is_fresh(max_age_s=max_age_s, now_s=now_s) for radar in self.radars)
 
     def get_obstacle_points_body_cm(self, max_distance_cm: float | None = None) -> np.ndarray:
         point_sets = [

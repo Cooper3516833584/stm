@@ -58,6 +58,9 @@ class LD_Radar(object):
         self._count = 0
         self._crc_errors = 0
         self._latency_lock = threading.Lock()
+        self._last_valid_frame_host_time_s: float | None = None
+        self._last_valid_frame_device_timestamp_ms: int | None = None
+        self._frames_ok_total = 0
         self._reset_latency_stats()
         # 位姿估计
         self.rt_pose_update_event = threading.Event()
@@ -149,6 +152,9 @@ class LD_Radar(object):
             self._radar_latency_last_host_ms = 0.0
             self._radar_latency_last_device_ms = 0.0
             self._radar_latency_last_raw_ms = 0
+            self._last_valid_frame_host_time_s = None
+            self._last_valid_frame_device_timestamp_ms = None
+            self._frames_ok_total = 0
             self._serial_bytes_read = 0
             self._serial_read_batches = 0
             self._serial_frames_ok = 0
@@ -201,6 +207,9 @@ class LD_Radar(object):
             self._radar_latency_last_device_ms = device_ms
             self._radar_latency_last_raw_ms = raw_timestamp_ms
             self._serial_frames_ok += 1
+            self._last_valid_frame_host_time_s = host_time_s
+            self._last_valid_frame_device_timestamp_ms = raw_timestamp_ms
+            self._frames_ok_total += 1
 
     def get_radar_latency_stats(self, reset_interval: bool = False) -> dict[str, object]:
         now_ms = time.perf_counter() * 1000.0
@@ -234,6 +243,39 @@ class LD_Radar(object):
                 self._radar_latency_interval_max_ms = 0.0
                 self._serial_in_waiting_peak = 0
             return stats
+
+    def get_last_frame_age_s(self, now_s: float | None = None) -> float | None:
+        if now_s is None:
+            now_s = time.perf_counter()
+        with self._latency_lock:
+            last = self._last_valid_frame_host_time_s
+        if last is None:
+            return None
+        return max(0.0, now_s - last)
+
+    def is_fresh(self, max_age_s: float, now_s: float | None = None) -> bool:
+        age = self.get_last_frame_age_s(now_s=now_s)
+        return age is not None and age <= max_age_s
+
+    def get_health_snapshot(self, now_s: float | None = None) -> dict[str, object]:
+        if now_s is None:
+            now_s = time.perf_counter()
+        stats = self.get_radar_latency_stats(reset_interval=False)
+        age_s = self.get_last_frame_age_s(now_s=now_s)
+        with self._latency_lock:
+            frames_ok_total = self._frames_ok_total
+        return {
+            "name": self.name,
+            "index": self.index,
+            "connected": bool(self.connected),
+            "running": bool(self.running),
+            "last_frame_age_s": age_s,
+            "frames_ok_total": int(frames_ok_total),
+            "crc_errors": int(stats.get("crc_errors", 0)),
+            "parse_buffer_bytes": int(stats.get("parse_buffer_bytes", 0)),
+            "in_waiting_peak": int(stats.get("in_waiting_peak", 0)),
+            "latest_latency_ms": float(stats.get("latest_ms", 0.0)),
+        }
 
     def _fc_callback(self, buf: bytes):
         if not self.running:

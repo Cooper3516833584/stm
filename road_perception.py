@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, List, Tuple
 
 import cv2
@@ -20,9 +21,16 @@ import numpy as np
 class RoadBranch:
     pixel_error: float
     centerline_angle: float
-    path_width_px: float
-    score: float
+    path_width_px: float = 0.0
+    score: float = 0.0
+    confidence: float = 0.0
+    label: str = "unknown"
+    branch_id: int = 0
     points: List[Tuple[float, float]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.confidence <= 0.0 and self.score > 0.0:
+            self.confidence = float(self.score)
 
 
 @dataclass
@@ -43,8 +51,27 @@ class RoadPerceptionResult:
 
     # Candidate branches around a fork/intersection.
     branches: List[RoadBranch] = field(default_factory=list)
+    selected_branch: RoadBranch | None = None
+    branch_decision: str = "none"
 
     debug_msg: str = ""
+
+
+@dataclass
+class CameraOffsetCompensationConfig:
+    enabled: bool = False
+    cam_forward_offset_m: float = 0.15
+    meters_per_pixel_x: float | None = None
+    correction_sign: float = 1.0
+    max_correction_px: float = 120.0
+    pipeline_latency_s: float = 0.0
+
+
+class BranchPreference(str, Enum):
+    AUTO = "auto"
+    STRAIGHT = "straight"
+    LEFT = "left"
+    RIGHT = "right"
 
 
 @dataclass
@@ -104,8 +131,102 @@ def _lost_result(reason: str) -> RoadPerceptionResult:
         confidence=0.0,
         corrected_pixel_error=0.0,
         branches=[],
+        selected_branch=None,
+        branch_decision="no_branch",
         debug_msg=reason,
     )
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, float(value)))
+
+
+def normalize_angle_deg(angle_deg: float) -> float:
+    return (float(angle_deg) + 180.0) % 360.0 - 180.0
+
+
+def apply_camera_offset_compensation(
+    *,
+    pixel_error: float,
+    centerline_angle_deg: float,
+    image_width: int,
+    config: CameraOffsetCompensationConfig,
+    yaw_rate_deg_s: float = 0.0,
+) -> tuple[float, float]:
+    """Return (corrected_pixel_error, correction_px)."""
+    _ = image_width
+    if not config.enabled:
+        return float(pixel_error), 0.0
+    if config.meters_per_pixel_x is None or config.meters_per_pixel_x <= 0.0:
+        return float(pixel_error), 0.0
+
+    predicted_angle_deg = float(centerline_angle_deg) + float(yaw_rate_deg_s) * config.pipeline_latency_s
+    heading_error_rad = math.radians(predicted_angle_deg - 90.0)
+    heading_error_rad = _clamp(
+        heading_error_rad,
+        -math.radians(60.0),
+        math.radians(60.0),
+    )
+    correction_px = (
+        config.correction_sign
+        * (config.cam_forward_offset_m / config.meters_per_pixel_x)
+        * math.tan(heading_error_rad)
+    )
+    correction_px = _clamp(correction_px, -config.max_correction_px, config.max_correction_px)
+    corrected = float(pixel_error) - correction_px
+    return corrected, correction_px
+
+
+def classify_branch_label(branch: RoadBranch, *, turn_threshold_deg: float = 20.0) -> str:
+    heading_error = normalize_angle_deg(branch.centerline_angle - 90.0)
+    if heading_error > turn_threshold_deg:
+        return "left"
+    if heading_error < -turn_threshold_deg:
+        return "right"
+    return "straight"
+
+
+def choose_branch(
+    branches: List[RoadBranch],
+    *,
+    preference: str = "auto",
+    previous_branch_label: str | None = None,
+) -> tuple[RoadBranch | None, str]:
+    if not branches:
+        return None, "no_branch"
+
+    normalized_preference = str(preference or "auto").lower()
+    valid_preferences = {item.value for item in BranchPreference}
+    if normalized_preference not in valid_preferences:
+        normalized_preference = BranchPreference.AUTO.value
+
+    by_label: dict[str, List[RoadBranch]] = {}
+    for branch in branches:
+        by_label.setdefault(branch.label, []).append(branch)
+
+    if normalized_preference in {"left", "right", "straight"}:
+        labeled = by_label.get(normalized_preference, [])
+        if labeled:
+            return max(labeled, key=_branch_quality), f"preferred_{normalized_preference}"
+        normalized_preference = BranchPreference.AUTO.value
+
+    if previous_branch_label:
+        previous = by_label.get(previous_branch_label, [])
+        if previous:
+            return max(previous, key=lambda branch: _branch_quality(branch) + 0.08), (
+                f"hold_{previous_branch_label}"
+            )
+
+    straight = by_label.get("straight", [])
+    if straight:
+        return min(straight, key=lambda branch: (abs(branch.pixel_error), -branch.confidence)), "auto_straight"
+
+    return max(branches, key=_branch_quality), "auto_best"
+
+
+def _branch_quality(branch: RoadBranch) -> float:
+    error_penalty = abs(float(branch.pixel_error)) / 320.0
+    return float(branch.confidence) - 0.25 * error_penalty
 
 
 def _resolve_model_path() -> str:
@@ -836,6 +957,7 @@ def _branch_from_points(
         centerline_angle=float(angle),
         path_width_px=float(width),
         score=float(score),
+        confidence=float(score),
         points=[(float(p[0]), float(p[1])) for p in points],
     )
 
@@ -932,6 +1054,15 @@ def _build_branches(
     return branches
 
 
+def _label_and_number_branches(branches: List[RoadBranch]) -> List[RoadBranch]:
+    for idx, branch in enumerate(branches):
+        branch.branch_id = idx
+        branch.label = classify_branch_label(branch)
+        if branch.confidence <= 0.0 and branch.score > 0.0:
+            branch.confidence = float(branch.score)
+    return branches
+
+
 def _normalize_frame(frame: np.ndarray) -> np.ndarray:
     if frame.dtype == np.uint8:
         return np.ascontiguousarray(frame)
@@ -993,15 +1124,23 @@ def _save_debug_image(
             ]
             for idx, branch in enumerate(result.branches):
                 color = branch_colors[idx % len(branch_colors)]
-                thickness = 3 if idx == 0 else 2
+                is_selected = branch is result.selected_branch or (
+                    result.selected_branch is not None
+                    and branch.branch_id == result.selected_branch.branch_id
+                )
+                thickness = 5 if is_selected else (3 if idx == 0 else 2)
                 _draw_polyline(debug_img, branch.points, color, thickness)
                 if branch.points:
                     label_idx = min(len(branch.points) - 1, max(0, len(branch.points) // 2))
                     lx, ly = branch.points[label_idx]
                     label = (
-                        f"b{idx} e={branch.pixel_error:.0f} "
-                        f"a={branch.centerline_angle:.0f}"
+                        f"B{branch.branch_id} {branch.label} "
+                        f"err={branch.pixel_error:.0f} "
+                        f"angle={branch.centerline_angle:.0f} "
+                        f"conf={branch.confidence:.2f}"
                     )
+                    if is_selected:
+                        label = f"SELECTED {label}"
                     cv2.putText(
                         debug_img,
                         label,
@@ -1118,6 +1257,9 @@ def get_road_perception(
     cam_offset_m: float = 0.15,
     flight_height_m: float = 1.5,
     debug_save_path: str | None = None,
+    offset_comp_config: CameraOffsetCompensationConfig | None = None,
+    branch_preference: str = "auto",
+    previous_branch_label: str | None = None,
 ) -> RoadPerceptionResult:
     """Run one-frame visual road perception on an OpenCV BGR frame."""
     frame_error = _validate_frame(frame)
@@ -1208,17 +1350,51 @@ def get_road_perception(
             if fallback_state in {"fork", "intersection"}:
                 road_state = fallback_state
 
-        # V1 does not apply yaw/camera-offset compensation.
-        # For real geometric compensation, implement BEV/IPM in a later version.
-        _ = (yaw_rate_deg_s, cam_offset_m, flight_height_m)
-        corrected_pixel_error = pixel_error
-
         branches = _build_branches_from_instances(
             current,
             valid_instances,
             orig_w,
             orig_h,
             confidence,
+        )
+        if len(branches) <= 1 and road_state in {"fork", "intersection"}:
+            _points, all_row_intervals = _extract_centerline_and_intervals(current.mask)
+            branches = _build_branches(
+                current.centerline_points,
+                all_row_intervals,
+                orig_w,
+                orig_h,
+                confidence,
+                road_state,
+            )
+        branches = _label_and_number_branches(branches)
+        selected_branch, branch_decision = choose_branch(
+            branches,
+            preference=branch_preference,
+            previous_branch_label=previous_branch_label,
+        )
+
+        cfg = offset_comp_config or CameraOffsetCompensationConfig(
+            enabled=False,
+            cam_forward_offset_m=cam_offset_m,
+        )
+        _ = flight_height_m
+        control_pixel_error = (
+            float(selected_branch.pixel_error)
+            if selected_branch is not None
+            else float(pixel_error)
+        )
+        control_angle = (
+            float(selected_branch.centerline_angle)
+            if selected_branch is not None
+            else float(centerline_angle)
+        )
+        corrected_pixel_error, correction_px = apply_camera_offset_compensation(
+            pixel_error=control_pixel_error,
+            centerline_angle_deg=control_angle,
+            image_width=orig_w,
+            config=cfg,
+            yaw_rate_deg_s=yaw_rate_deg_s,
         )
 
         result = RoadPerceptionResult(
@@ -1230,9 +1406,15 @@ def get_road_perception(
             confidence=float(confidence),
             corrected_pixel_error=float(corrected_pixel_error),
             branches=branches,
+            selected_branch=selected_branch,
+            branch_decision=branch_decision,
             debug_msg=(
                 f"instances={len(valid_instances)}, "
-                f"branches={len(branches)}"
+                f"branches={len(branches)}, "
+                f"selected={getattr(selected_branch, 'label', 'none')}, "
+                f"decision={branch_decision}, "
+                f"offset_corr_px={correction_px:.1f}, "
+                f"corrected_error={corrected_pixel_error:.1f}"
                 f"{fallback_msg}"
             ),
         )
@@ -1248,10 +1430,94 @@ def get_road_perception(
         return result
 
 
+def _parse_cli_args():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run road perception on one image")
+    parser.add_argument("--image", required=True, help="Input BGR/RGB image path")
+    parser.add_argument("--model", default=None, help="ONNX model path")
+    parser.add_argument("--debug-out", default=None, help="Optional debug image output path")
+    parser.add_argument("--branch-preference", choices=["auto", "straight", "left", "right"], default="auto")
+    parser.add_argument("--enable-offset-comp", action="store_true")
+    parser.add_argument("--cam-forward-offset-m", type=float, default=0.15)
+    parser.add_argument("--meters-per-pixel-x", type=float, default=None)
+    parser.add_argument("--offset-correction-sign", type=float, default=1.0)
+    parser.add_argument("--offset-max-correction-px", type=float, default=120.0)
+    parser.add_argument("--pipeline-latency-s", type=float, default=0.0)
+    parser.add_argument("--yaw-rate-deg-s", type=float, default=0.0)
+    return parser.parse_args()
+
+
+def _main_cli() -> int:
+    args = _parse_cli_args()
+    if args.model:
+        global MODEL_PATH
+        MODEL_PATH = args.model
+
+    frame = cv2.imread(args.image, cv2.IMREAD_COLOR)
+    if frame is None:
+        print(f"failed to read image: {args.image}")
+        return 2
+
+    offset_cfg = CameraOffsetCompensationConfig(
+        enabled=bool(args.enable_offset_comp),
+        cam_forward_offset_m=args.cam_forward_offset_m,
+        meters_per_pixel_x=args.meters_per_pixel_x,
+        correction_sign=args.offset_correction_sign,
+        max_correction_px=args.offset_max_correction_px,
+        pipeline_latency_s=args.pipeline_latency_s,
+    )
+    result = get_road_perception(
+        frame,
+        yaw_rate_deg_s=args.yaw_rate_deg_s,
+        debug_save_path=args.debug_out,
+        offset_comp_config=offset_cfg,
+        branch_preference=args.branch_preference,
+    )
+    selected = result.selected_branch
+    selected_label = selected.label if selected is not None else "none"
+    print(
+        "road_state={} found={} conf={:.3f} error={:.1f} corrected={:.1f} "
+        "angle={:.1f} branches={} selected={} decision={} debug={}".format(
+            result.road_state,
+            result.is_road_found,
+            result.confidence,
+            result.pixel_error,
+            result.corrected_pixel_error,
+            result.centerline_angle,
+            len(result.branches),
+            selected_label,
+            result.branch_decision,
+            result.debug_msg,
+        )
+    )
+    for branch in result.branches:
+        print(
+            "branch id={} label={} err={:.1f} angle={:.1f} conf={:.3f}".format(
+                branch.branch_id,
+                branch.label,
+                branch.pixel_error,
+                branch.centerline_angle,
+                branch.confidence,
+            )
+        )
+    return 0
+
+
 __all__ = [
+    "BranchPreference",
+    "CameraOffsetCompensationConfig",
     "RoadBranch",
     "RoadInstance",
     "RoadPerceptionResult",
+    "apply_camera_offset_compensation",
+    "choose_branch",
+    "classify_branch_label",
     "get_model_io_info",
     "get_road_perception",
+    "normalize_angle_deg",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main_cli())

@@ -3,6 +3,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .ObstacleUtils import select_forward_corridor
+
 
 @dataclass
 class PlannerConfig:
@@ -132,16 +134,15 @@ class LocalPlanner:
             self.config.yaw_rate_limit_deg_s,
         )
 
+    def nearest_forward_obstacle_cm(self, obstacles_body_cm: np.ndarray) -> float | None:
+        return self._nearest_forward_obstacle_cm(obstacles_body_cm)
+
     def _nearest_forward_obstacle_cm(self, obstacles_body_cm: np.ndarray) -> float | None:
-        points = np.asarray(obstacles_body_cm, dtype=float)
-        if points.size == 0:
-            return None
-        points = points.reshape(-1, 2)
-        half_width = self.config.forward_corridor_half_width_cm
-        min_dist = self.config.min_obstacle_distance_cm
-        forward = points[
-            (points[:, 0] > min_dist) & (np.abs(points[:, 1]) < half_width)
-        ]
+        forward = select_forward_corridor(
+            obstacles_body_cm,
+            min_x_cm=self.config.min_obstacle_distance_cm,
+            half_width_cm=self.config.forward_corridor_half_width_cm,
+        )
         if forward.size == 0:
             return None
         return float(np.min(forward[:, 0]))

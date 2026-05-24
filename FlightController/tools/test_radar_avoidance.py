@@ -31,9 +31,19 @@ def _setup_path() -> None:
 def main() -> None:
     _setup_path()
 
-    from FlightController import FC_Controller
+    from FlightController.Components.FCConnector import FCConnectConfig, connect_fc
     from FlightController.Components.LDRadar_Driver import LD_Radar
-    from FlightController.Solutions.LocalPlanner import LocalPlanner, PlannerConfig, VelocityCommand
+    from FlightController.Solutions.LocalPlanner import LocalPlanner, PlannerConfig
+    from FlightController.Solutions.Safety import (
+        Command as SafeCommand,
+        RadarFieldConfig,
+        RadarObstacleField,
+        SafetyArbiter,
+        SafetyConfig,
+        flight_status_from_fc,
+        flight_health_from_sources,
+        send_command_safely,
+    )
     import numpy as np
     from loguru import logger
 
@@ -59,6 +69,11 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help="不发送实际飞控指令（但仍连接飞控读取状态）",
+    )
+    parser.add_argument(
+        "--enable-flight",
+        action="store_true",
+        help="Explicitly allow non-zero velocity commands to be sent to FC",
     )
     parser.add_argument(
         "--max-distance-cm",
@@ -113,6 +128,12 @@ def main() -> None:
         help="主循环频率/Hz (默认: 10)",
     )
     parser.add_argument(
+        "--radar-timeout-s",
+        type=float,
+        default=0.5,
+        help="雷达真实帧超时 watchdog/s (默认: 0.5)",
+    )
+    parser.add_argument(
         "--log-file",
         type=str,
         default=None,
@@ -152,10 +173,8 @@ def main() -> None:
     fc = None
     if not args.no_fc:
         logger.info("正在连接飞控...")
-        fc = FC_Controller()
         try:
-            fc.start_listen_serial(serial_dev=args.fc_port, block_until_connected=True)
-            fc.wait_for_connection()
+            fc = connect_fc(FCConnectConfig(port=args.fc_port, mode=2, timeout_s=10.0))
             state = fc.state
             logger.info(
                 f"FC 已连接 | mode={state.mode.value} unlock={state.unlock.value} "
@@ -176,6 +195,23 @@ def main() -> None:
         min_obstacle_distance_cm=args.min_distance_cm,
     )
     planner = LocalPlanner(config=planner_config)
+    radar_field = RadarObstacleField(
+        RadarFieldConfig(
+            max_distance_cm=args.max_distance_cm,
+            forward_corridor_half_width_cm=args.corridor_half_width_cm,
+            min_obstacle_distance_cm=args.min_distance_cm,
+        )
+    )
+    safety = SafetyArbiter(
+        SafetyConfig(
+            radar_timeout_s=0.5,
+            obstacle_stop_distance_cm=args.stop_distance_cm,
+            obstacle_slow_distance_cm=args.slow_distance_cm,
+        )
+    )
+    send_enabled = bool(args.enable_flight and fc is not None)
+    if not send_enabled:
+        logger.info("[SAFETY] dry-run active; use --enable-flight to send non-zero FC velocity")
 
     logger.info(
         f"规划器参数: stop<{args.stop_distance_cm}cm "
@@ -219,8 +255,19 @@ def main() -> None:
             # 1. 检查雷达连接状态
             if not radar.connected:
                 logger.warning("雷达断连！")
-                if fc is not None and not args.dry_run:
-                    fc.send_realtime_control_data(0, 0, 0, 0)
+                if fc is not None and args.enable_flight:
+                    health = flight_health_from_sources(
+                        fc=fc,
+                        radar=radar,
+                        radar_timeout_s=args.radar_timeout_s,
+                    )
+                    send_command_safely(
+                        fc,
+                        SafeCommand.zero("radar_disconnected"),
+                        safety,
+                        health,
+                        dry_run=not send_enabled,
+                    )
                 time.sleep(0.5)
                 continue
 
@@ -229,11 +276,12 @@ def main() -> None:
             obstacles = radar.get_points_body_cm(
                 max_distance_cm=args.max_distance_cm
             )
+            radar_field.update(obstacles, t_start)
             t_after_get = time.perf_counter()
 
             # 3. 计算前方最近障碍物距离
             t_before_plan = time.perf_counter()
-            forward_dist = planner._nearest_forward_obstacle_cm(obstacles)
+            forward_dist = radar_field.nearest_forward_obstacle_cm()
             t_after_plan = time.perf_counter()
 
             # 3b. debug: dump 前方走廊内的原始点云
@@ -269,20 +317,44 @@ def main() -> None:
                 _last_forward_dist = dist_now
 
             # 4. 规划避障决策
-            command = planner.plan(obstacles_body_cm=obstacles, target=None)
+            local_command = planner.plan(obstacles_body_cm=radar_field.points_body_cm, target=None)
+            desired_command = SafeCommand(
+                local_command.vx_cm_s,
+                local_command.vy_cm_s,
+                local_command.vz_cm_s,
+                local_command.yaw_rate_deg_s,
+                local_command.reason,
+            )
+            health = flight_health_from_sources(
+                fc=fc,
+                radar=radar,
+                radar_timeout_s=args.radar_timeout_s,
+            )
+            safety_result = safety.filter(
+                desired_command,
+                flight=flight_status_from_fc(fc),
+                radar_connected=bool(radar.connected and radar.is_fresh(max_age_s=args.radar_timeout_s)),
+                radar_age_s=health.radar_max_age_s,
+                radar_field=radar_field,
+                enable_flight=send_enabled,
+            )
+            command = safety_result.command
+            forward_dist = safety_result.nearest_forward_obstacle_cm
+            send_decision = send_command_safely(
+                fc,
+                command,
+                safety,
+                health,
+                dry_run=not send_enabled,
+            )
 
-            # 5. 发送到飞控
-            if fc is not None and not args.dry_run:
-                fc.send_realtime_control_data(
-                    round(command.vx_cm_s),
-                    round(command.vy_cm_s),
-                    round(command.vz_cm_s),
-                    round(command.yaw_rate_deg_s),
-                )
+            # 5. 指令已通过 SafetyArbiter + send_command_safely() 闸门
 
             # 6. 日志输出
             dist_str = f"{forward_dist:.0f}cm" if forward_dist is not None else "无"
             if loop_count % 10 == 0:
+                age_s = radar.get_last_frame_age_s()
+                age_str = "None" if age_s is None else f"{age_s * 1000:.0f}ms"
                 fc_state_str = ""
                 if fc is not None:
                     try:
@@ -301,6 +373,7 @@ def main() -> None:
                     f"vz={command.vz_cm_s:.0f}, yaw={command.yaw_rate_deg_s:.0f}) | "
                     f"原因={command.reason}"
                 )
+                logger.info(f"RADAR_HEALTH last_frame_age={age_str} connected={radar.connected}")
             else:
                 logger.debug(
                     f"[#{loop_count:04d}] 前方={dist_str} "
@@ -413,9 +486,20 @@ def main() -> None:
         logger.info("收到中断信号，正在安全退出...")
     finally:
         # 发送零速度
-        if fc is not None and not args.dry_run:
+        if fc is not None and args.enable_flight:
             logger.info("发送零速度指令...")
-            fc.send_realtime_control_data(0, 0, 0, 0)
+            health = flight_health_from_sources(
+                fc=fc,
+                radar=radar,
+                radar_timeout_s=args.radar_timeout_s,
+            )
+            send_command_safely(
+                fc,
+                SafeCommand.zero("shutdown"),
+                safety,
+                health,
+                dry_run=not send_enabled,
+            )
             time.sleep(0.1)
 
         radar.stop()

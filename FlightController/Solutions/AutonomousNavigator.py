@@ -3,6 +3,13 @@ import time
 from dataclasses import dataclass
 
 from .LocalPlanner import LocalPlanner, TargetObservation, VelocityCommand
+from .Safety import (
+    Command,
+    SafetyArbiter,
+    SafetyConfig,
+    flight_health_from_sources,
+    send_command_safely,
+)
 
 
 @dataclass
@@ -13,7 +20,19 @@ class AutonomousNavigatorConfig:
 
 
 class AutonomousNavigator:
-    def __init__(self, *, fc, multi_radar, t265=None, camera=None, detector=None, planner=None, config=None):
+    def __init__(
+        self,
+        *,
+        fc,
+        multi_radar,
+        t265=None,
+        camera=None,
+        detector=None,
+        planner=None,
+        config=None,
+        safety=None,
+        dry_run=False,
+    ):
         self.fc = fc
         self.t265 = t265
         self.multi_radar = multi_radar
@@ -24,6 +43,8 @@ class AutonomousNavigator:
             planner = LocalPlanner(config=PlannerConfig(enable_free_flight=True))
         self.planner = planner or LocalPlanner()
         self.config = config or AutonomousNavigatorConfig()
+        self.safety = safety or SafetyArbiter(SafetyConfig(require_fc=True, require_radar=True))
+        self.dry_run = bool(dry_run)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -80,12 +101,19 @@ class AutonomousNavigator:
             self._stop_event.wait(max(0.0, period - elapsed))
 
     def _send_command(self, command: VelocityCommand) -> None:
-        self.fc.send_realtime_control_data(
-            round(command.vx_cm_s),
-            round(command.vy_cm_s),
-            round(command.vz_cm_s),
-            round(command.yaw_rate_deg_s),
+        desired = Command(
+            command.vx_cm_s,
+            command.vy_cm_s,
+            command.vz_cm_s,
+            command.yaw_rate_deg_s,
+            command.reason,
         )
+        health = flight_health_from_sources(
+            fc=self.fc,
+            multi_radar=self.multi_radar,
+            radar_timeout_s=self.safety.config.radar_timeout_s,
+        )
+        send_command_safely(self.fc, desired, self.safety, health, dry_run=self.dry_run)
 
 
 __all__ = ["AutonomousNavigator", "AutonomousNavigatorConfig"]

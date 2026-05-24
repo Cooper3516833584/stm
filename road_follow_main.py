@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-yaw-rate-deg-s", type=float, default=25.0)
     parser.add_argument("--offset-comp-enable", action="store_true")
     parser.add_argument("--enable-offset-comp", action="store_true", help="Deprecated alias for --offset-comp-enable")
-    parser.add_argument("--cam-forward-offset-m", type=float, default=0.15)
+    parser.add_argument("--cam-forward-offset-m", type=float, default=0.10)
     parser.add_argument("--meters-per-pixel-x", type=float, default=None)
     parser.add_argument("--offset-correction-sign", type=float, default=1.0)
     parser.add_argument("--offset-max-correction-px", type=float, default=120.0)

@@ -274,7 +274,7 @@ class Map_Circle(object):
     confidence_threshold = 0  # 置信度阈值
     distance_threshold = 10  # 距离阈值
     timeout_clear = True  # 超时清除
-    timeout_time = 0.4  # 超时时间 s
+    timeout_time = 0.15  # 超时时间 s
 
     def __init__(self):
         ######### 状态 #########

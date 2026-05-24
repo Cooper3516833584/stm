@@ -30,7 +30,8 @@ MYD-LD25X (STM32MP257, Debian 12 aarch64)
   ├── UART4  (/dev/ttySTM4,  230400)  → 上雷达 D500 (正装)
   ├── UART9  (/dev/ttySTM9,  230400)  → 下雷达 D500 (倒装, Y镜像)
   ├── USB/ACM  (/dev/ttyACM0, 500000) → 凌霄飞控 (二进制协议)
-  ├── USB 摄像头  (V4L2, 640×480@30fps) → 视觉道路感知
+  ├── /dev/video7 (USB 摄像头, 640×480) → 道路路径识别 (间歇性偏蓝/偏青)
+  ├── /dev/video9 (USB 摄像头, 640×480) → 障碍物类型识别
   └── eMMC 6.9G (仅剩 930M) + 闪存卡 30G (代码+日志)
 ```
 
@@ -275,7 +276,9 @@ GoalNavMission.update(world)
 | **公共层** | | |
 | 统一速度指令 (autonomy_command) | ✅ | `VelocityCommand`, clamp, as_fc_tuple |
 | 传感器上下文 (autonomy_context) | ✅ | `SensorHealth`, `FlightStatus`, `Obstacle`, `AutonomyContext` |
+| USB 摄像头探活 | ✅ | 双摄像头 `/dev/video7` (路径) + `/dev/video9` (障碍物), 均 640×480 |
 | 硬件适配 (autonomy_hardware) | ✅ | `build_dual_radar`, `connect_fc`, `open_camera` |
+| 摄像头色彩诊断工具 | ✅ | `tools/diagnose_camera_color.py`, cam#7 间歇偏蓝/偏青 |
 | **入口程序** | | |
 | 道路循线入口 (road_follow_main) | ✅ | 双雷达+摄像头+FC 主循环, 20Hz |
 | 目标导航入口 (goal_nav_main) | ✅ | 双雷达+FC 主循环, 20Hz |
@@ -330,6 +333,7 @@ GoalNavMission.update(world)
 | **两套 VelocityCommand 并存** | 🟡 中 | 根目录 `autonomy_command.py` 和 `FlightController/Solutions/LocalPlanner.py` 各有定义; 字段相似但类型不兼容; 长期需统一 |
 | **雷达 fresh 用主循环时间替代** | 🟡 中 | 当前 `safety_arbiter.py` 中的 `radar_age_s` 来自 `LocalWorldModel.radar_age_s()` — 那是上次 update 的时间, 不是真实帧时间; 如果串口断流但主循环继续跑, 会误判为新鲜 |
 | **eMMC 仅剩 930M** | 🟢 低 | 不能追加大型 APT 包或 pip 包; ONNX 模型和额外 Python 依赖需控制大小 |
+| **摄像头色彩偏色** | 🟡 中 | cam#7 间歇偏蓝/偏青，怀疑自动白平衡不稳定; 暂时假定大部分时间正常，后续可用 `cv2.xphoto.createSimpleWB()` 修正 |
 | **摄像头偏移补偿符号未验证** | 🟡 中 | 补偿公式中的 `correction_sign` 需实机验证; 写反会导致纠偏方向错误 |
 | **RoadFollower yaw 方向未验证** | 🟡 中 | `centerline_angle=90°` 对应正前方的假设需实机验证; 角度符号与 `send_realtime_control_data()` 的 `-yaw` 打包的交互需确认 |
 | **ARM 100Hz 内核 sleep 精度** | 🟢 低 | 已知问题, 已用固定频率 `sleep(remaining)` 规避; 但视觉处理加入后 CPU 预算需重新评估 |

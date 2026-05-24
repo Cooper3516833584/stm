@@ -8,15 +8,15 @@ from .ObstacleUtils import select_forward_corridor
 
 @dataclass
 class PlannerConfig:
-    max_speed_cm_s: float = 35.0
+    max_speed_cm_s: float = 20.0
     approach_speed_cm_s: float = 20.0
     yaw_rate_limit_deg_s: float = 30.0
-    obstacle_stop_distance_cm: float = 45.0
-    obstacle_slow_distance_cm: float = 90.0
+    obstacle_stop_distance_cm: float = 80.0
+    obstacle_slow_distance_cm: float = 150.0
     target_center_deadband_px: float = 30.0
     camera_fov_deg: float = 70.0
     enable_free_flight: bool = False
-    free_flight_speed_cm_s: float = 20.0
+    free_flight_speed_cm_s: float = 15.0
     forward_corridor_half_width_cm: float = 35.0
     min_obstacle_distance_cm: float = 10.0
     debounce_frames: int = 3

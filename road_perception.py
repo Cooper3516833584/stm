@@ -60,11 +60,64 @@ class RoadPerceptionResult:
 @dataclass
 class CameraOffsetCompensationConfig:
     enabled: bool = False
-    cam_forward_offset_m: float = 0.15
+    cam_forward_offset_m: float = 0.10
     meters_per_pixel_x: float | None = None
     correction_sign: float = 1.0
     max_correction_px: float = 120.0
     pipeline_latency_s: float = 0.0
+
+
+@dataclass
+class CameraGeometry:
+    """摄像头几何标定参数。
+
+    可通过标尺法实测反推，无需厂商文档。
+    默认值来自路径识别摄像头 (cam#7) 在飞行高度 17cm 时的标定数据。
+    """
+
+    height_m: float = 0.17
+    """摄像头离地高度 (m)"""
+    alpha_deg: float = 30.27
+    """光轴倾角 (度), 水平=0°, 垂直向下=90°"""
+    beta_deg: float = 27.54
+    """半垂直视场角 VFOV/2 (度)"""
+    hfov_deg: float = 68.0
+    """水平视场角 (度)"""
+    img_w: int = 640
+    img_h: int = 480
+
+
+def compute_meters_per_pixel(
+    row_from_bottom: int,
+    geom: CameraGeometry | None = None,
+) -> float:
+    """逐行计算水平方向每像素对应的地面距离 (m/px)。
+
+    Args:
+        row_from_bottom: 像素行号, 0 = 画面最下行, img_h-1 = 画面最上行
+        geom: 摄像头几何标定参数, 默认使用实测值
+
+    Returns:
+        meters_per_pixel_x: 该行的水平 m/px 值
+
+    Reference:
+        HARDWARE_INTERFACE.md §5.4 — 摄像头几何标定
+
+        θ(row) = α + β × (1 − 2 × row / (H_px − 1))
+        D_ground = H / tan(θ)
+        m/px = 2 × D_ground × tan(HFOV/2) / img_w
+    """
+    if geom is None:
+        geom = CameraGeometry()
+    import math
+
+    alpha = math.radians(geom.alpha_deg)
+    beta = math.radians(geom.beta_deg)
+    hfov_half = math.radians(geom.hfov_deg / 2.0)
+    t = 1.0 - 2.0 * float(row_from_bottom) / float(geom.img_h - 1)
+    theta = alpha + beta * t
+    d_ground = geom.height_m / math.tan(theta)
+    return 2.0 * d_ground * math.tan(hfov_half) / float(geom.img_w)
 
 
 class BranchPreference(str, Enum):
@@ -1254,7 +1307,7 @@ def get_model_io_info() -> dict[str, Any]:
 def get_road_perception(
     frame: np.ndarray,
     yaw_rate_deg_s: float = 0.0,
-    cam_offset_m: float = 0.15,
+    cam_offset_m: float = 0.10,
     flight_height_m: float = 1.5,
     debug_save_path: str | None = None,
     offset_comp_config: CameraOffsetCompensationConfig | None = None,
@@ -1439,7 +1492,7 @@ def _parse_cli_args():
     parser.add_argument("--debug-out", default=None, help="Optional debug image output path")
     parser.add_argument("--branch-preference", choices=["auto", "straight", "left", "right"], default="auto")
     parser.add_argument("--enable-offset-comp", action="store_true")
-    parser.add_argument("--cam-forward-offset-m", type=float, default=0.15)
+    parser.add_argument("--cam-forward-offset-m", type=float, default=0.10)
     parser.add_argument("--meters-per-pixel-x", type=float, default=None)
     parser.add_argument("--offset-correction-sign", type=float, default=1.0)
     parser.add_argument("--offset-max-correction-px", type=float, default=120.0)
@@ -1506,6 +1559,7 @@ def _main_cli() -> int:
 
 __all__ = [
     "BranchPreference",
+    "CameraGeometry",
     "CameraOffsetCompensationConfig",
     "RoadBranch",
     "RoadInstance",
@@ -1513,6 +1567,7 @@ __all__ = [
     "apply_camera_offset_compensation",
     "choose_branch",
     "classify_branch_label",
+    "compute_meters_per_pixel",
     "get_model_io_info",
     "get_road_perception",
     "normalize_angle_deg",

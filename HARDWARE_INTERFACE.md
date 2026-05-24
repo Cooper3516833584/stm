@@ -149,7 +149,61 @@ VCC (5V)            →    Pin 4  (5V)
 
 ---
 
-## 5. 参考文档
+## 5. USB 摄像头
+
+### 5.1 物理连接
+
+两个 USB 摄像头通过 USB 下行接口连接至开发板，OpenCV V4L2 读取。
+
+```
+开发板 USB Host
+  ├── 1-1.1    → /dev/video7, /dev/video8    (前视摄像头)
+  └── 1-1.2.3  → /dev/video9, /dev/video10   (下视摄像头)
+```
+
+各摄像头对应两个 `/dev/videoN` 节点：主节点为图像流，次节点通常为元数据（忽略）。
+
+### 5.2 设备映射
+
+| 项目 | 前视摄像头 | 下视摄像头 |
+|------|-----------|-----------|
+| 设备路径 | `/dev/video7` | `/dev/video9` |
+| USB 物理位置 | `usb-1.1` | `usb-1.2.3` |
+| 型号标识 | `USB 2.0 Camera: USB Camera` | `USB Camera: USB Camera` |
+| 分辨率 | 640×480 | 640×480 |
+| 驱动 | V4L2 (cv2.CAP_V4L2) | V4L2 (cv2.CAP_V4L2) |
+| cv2 index | 7 | 9 |
+| **功能用途** | **障碍物类型识别** | **道路路径识别** |
+
+### 5.3 验证命令
+
+```bash
+# 基本连通性
+python3 -c "
+import cv2
+for idx, name in [(7, 'cam_front'), (9, 'cam_down')]:
+    cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+    ok, frame = cap.read()
+    cap.release()
+    print(f'{name} /dev/video{idx}: {\"OK\" if ok else \"FAILED\"} size={frame.shape[1]}x{frame.shape[0]}' if ok else f'{name}: FAILED')
+"
+
+# 拍摄测试照片
+python3 -c "
+import cv2
+for idx, name in [(7, 'cam_front'), (9, 'cam_down')]:
+    cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+    ok, frame = cap.read()
+    cap.release()
+    if ok:
+        cv2.imwrite(f'/media/sdcard/{name}.jpg', frame)
+        print(f'{name} -> /media/sdcard/{name}.jpg ({frame.shape[1]}x{frame.shape[0]})')
+"
+```
+
+---
+
+## 6. 参考文档
 
 - 米尔开发板硬件用户手册: `MYD-LD25X-硬件用户手册-V1.3.pdf`
 - 雷达驱动实现: `FlightController/Components/LDRadar_Driver.py`

@@ -170,6 +170,7 @@ CENTER_SMOOTH_ALPHA = 0.65
 _SESSION: Any | None = None
 _INPUT_NAME: str | None = None
 _MODEL_INPUT_SIZE: int | None = None
+_SESSION_PROVIDER: str = "unknown"
 
 
 CenterPoint = Tuple[float, int, float]  # center_x, y, width
@@ -296,20 +297,44 @@ def _resolve_model_path() -> str:
     return MODEL_PATH
 
 
+def _select_providers() -> list[str]:
+    import onnxruntime as ort
+
+    available = set(ort.get_available_providers())
+
+    for candidate in ("VsiNpuExecutionProvider",):
+        if candidate in available:
+            return [candidate, "CPUExecutionProvider"]
+
+    if "XnnpackExecutionProvider" in available:
+        return ["XnnpackExecutionProvider", "CPUExecutionProvider"]
+
+    return ["CPUExecutionProvider"]
+
+
+def _make_session(model_path: str):
+    import onnxruntime as ort
+
+    providers = _select_providers()
+    try:
+        sess = ort.InferenceSession(model_path, providers=providers)
+    except Exception:
+        sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        providers = ["CPUExecutionProvider"]
+
+    return sess, providers[0]
+
+
 def _get_session():
-    global _SESSION, _INPUT_NAME, _MODEL_INPUT_SIZE
+    global _SESSION, _INPUT_NAME, _MODEL_INPUT_SIZE, _SESSION_PROVIDER
 
     if _SESSION is None:
         model_path = _resolve_model_path()
         if not os.path.isfile(model_path):
             raise FileNotFoundError(f"ONNX model not found: {model_path}")
 
-        import onnxruntime as ort
-
-        _SESSION = ort.InferenceSession(
-            model_path,
-            providers=["CPUExecutionProvider"],
-        )
+        _SESSION, provider = _make_session(model_path)
+        _SESSION_PROVIDER = provider
         input_meta = _SESSION.get_inputs()[0]
         _INPUT_NAME = input_meta.name
         _MODEL_INPUT_SIZE = _input_size_from_meta(input_meta.shape)
@@ -1295,6 +1320,7 @@ def get_model_io_info() -> dict[str, Any]:
     """Optional helper for inspecting ONNX model input/output metadata."""
     session, _ = _get_session()
     return {
+        "provider": _SESSION_PROVIDER,
         "input_size": _MODEL_INPUT_SIZE or INP_SIZE,
         "inputs": [
             {"name": item.name, "shape": item.shape, "type": item.type}
@@ -1434,11 +1460,7 @@ def get_road_perception(
             enabled=False,
             cam_forward_offset_m=cam_offset_m,
         )
-        if cfg.meters_per_pixel_x is None:
-            cfg.meters_per_pixel_x = compute_meters_per_pixel(
-                row_from_bottom=120,
-                height_m=flight_height_m,
-            )
+        _ = flight_height_m
         control_pixel_error = (
             float(selected_branch.pixel_error)
             if selected_branch is not None

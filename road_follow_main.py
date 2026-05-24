@@ -19,7 +19,7 @@ from loguru import logger
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Road-following dry-run / flight entry")
-    parser.add_argument("--camera-index", type=int, default=0)
+    parser.add_argument("--camera-index", type=int, default=7)
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
     parser.add_argument("--camera-fps", type=int, default=30)
@@ -55,6 +55,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-yaw-rate-deg-s", type=float, default=25.0)
     parser.add_argument("--offset-comp-enable", action="store_true")
     parser.add_argument("--enable-offset-comp", action="store_true", help="Deprecated alias for --offset-comp-enable")
+    parser.add_argument("--flight-height-m", type=float, default=2.0,
+                        help="飞行高度 (m), 用于计算该高度的 meters-per-pixel")
     parser.add_argument("--cam-forward-offset-m", type=float, default=0.10)
     parser.add_argument("--meters-per-pixel-x", type=float, default=None)
     parser.add_argument("--offset-correction-sign", type=float, default=1.0)
@@ -176,6 +178,7 @@ def main() -> None:
                 try:
                     perception = road_perception.get_road_perception(
                         frame,
+                        flight_height_m=args.flight_height_m,
                         debug_save_path=debug_path,
                         offset_comp_config=offset_comp,
                         branch_preference=args.branch,

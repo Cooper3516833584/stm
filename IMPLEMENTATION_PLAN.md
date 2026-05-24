@@ -66,7 +66,7 @@ MYD-LD25X (STM32MP257, Debian 12 aarch64)
 │  road_perception.py            local_world_model.py           │
 │  (YOLO11-seg ONNX → 道路中线)   (雷达点云→过滤→聚类→分类)     │
 │       │                            │                          │
-│       │                        obstacle_classifier.py         │
+│       │                        obstacle_classifier.py [待实现] │
 │       │                        (欧氏聚类→wall/pole/block)     │
 └────────────┬─────────────────────────────────────────────────┘
              │
@@ -152,7 +152,7 @@ RoadFollower.update(perception, now_s)
 local_world_model.update_from_radar_points(points, now_s)
   │  _within_range:     距离过滤 (>300cm 丢弃)
   │  _remove_body_reflections: 机身屏蔽 (|x|<25 & |y|<25)
-  │  classifier.classify_points: 欧氏聚类→wall/pole/block
+  │  classifier.classify_points: 欧氏聚类→wall/pole/block [待实现]
   ▼
   LocalWorldSnapshot(filtered_points, obstacles)
 
@@ -263,7 +263,7 @@ GoalNavMission.update(world)
 | 雷达数据解析 (LDRadar_Resolver) | ✅ | CRC8 校验, Map_Circle 1080 bin |
 | 双雷达融合 (MultiRadar) | ✅ | vstack 点云, mount transform, Y mirror |
 | 机身自反射屏蔽 | ✅ | `_body_mask`, ±25cm |
-| 障碍物聚类分类 | ✅ | `obstacle_classifier.py`, 欧氏聚类→wall/pole/block |
+| 障碍物聚类分类 | ❌ | 接口曾定义为 `obstacle_classifier.py`，已删除（零引用死代码）。欧氏聚类→wall/pole/block 保留为开放任务 |
 | 世界模型 (local_world_model) | ✅ | 距离过滤 + 机身屏蔽 + 走廊/扇区查询 |
 | YOLO 道路感知 (road_perception) | ✅ | ONNX 推理, mask 生成, 中线提取, pixel_error, angle |
 | **规划层** | | |
@@ -321,6 +321,8 @@ GoalNavMission.update(world)
 | 9 | **道路感知离线测试脚本** (05) | 🟢 低 | ~50行 |
 | | CLI 模式: `road_perception.py --image xxx.jpg --model xxx.onnx --debug-out xxx.jpg` | | |
 | 10 | **分阶段联调验收** (07) | 🟢 低 | 文档 |
+| 11 | **障碍物类型识别** | 🔴 高 | ~100行 |
+| | 原 `obstacle_classifier.py` 为空桩已删除，需重新实现: 欧氏聚类→按 size/shape 分类 wall/pole/block，并接入 `local_world_model` | |
 
 ---
 

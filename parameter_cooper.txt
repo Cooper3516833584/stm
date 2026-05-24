@@ -1,0 +1,360 @@
+# 硬件与场景参数说明
+
+## 总体说明
+
+当前代码已经预设了一批“硬件默认值”和“场景/安全默认值”，用于地面 dry-run、拆桨测试和后续低风险联调。
+
+但实机前仍必须人工确认以下内容：
+
+- 飞控串口。
+- 雷达串口。
+- 上下雷达安装位置与方向。
+- 摄像头编号、分辨率、帧率。
+- ONNX 模型路径。
+- 机身屏蔽尺寸。
+- 避障距离阈值。
+- 真实发送时的速度限幅。
+- 摄像头前置偏移补偿标定参数。
+
+默认参数只能作为安全起点，不能代替实机标定。
+
+---
+
+# 1. 飞控相关参数
+
+| 参数 | 当前默认值 | 说明 | 是否需要确认 |
+|---|---:|---|---|
+| 飞控串口 | 自动探测 | 可通过 `--fc-port` 显式指定 | 建议实机显式填写 |
+| 飞控波特率 | `500000` | 匿名/凌霄飞控二进制串口协议 | 已按硬件设定 |
+| 飞控目标模式 | `mode=2` | 定点模式 / HOLD_POS | 必须确认飞控固件中 `mode=2` 确实是定点 |
+| 串口打开超时 | `10s` | `FCConnectConfig.open_timeout_s` | 默认可用 |
+| 连接状态等待超时 | `10s` | `FCConnectConfig.timeout_s` | 默认可用 |
+
+实机建议显式传入：
+
+```bash
+--fc-port /dev/ttyACM0
+注意事项：
+
+代码不会自动解锁。
+代码不会自动起飞。
+代码不会自动降落。
+默认不发送非零速度。
+只有显式传入 --enable-flight 才允许真实发送速度指令。
+2. 雷达相关参数
+2.1 串口与基础配置
+参数	当前默认值	说明	是否需要确认
+上雷达端口	/dev/ttySTM4	LDROBOT D500	必须确认
+下雷达端口	/dev/ttySTM9	LDROBOT D500	必须确认
+雷达波特率	230400	D500 默认串口速率	已按硬件设定
+雷达 freshness timeout	0.5s	超过 0.5s 无真实有效帧则 safety stop	可先保持默认
+最大障碍物距离	300cm	超出该距离不参与局部避障	可按场地调整
+实机建议显式传入：
+
+--upper-port /dev/ttySTM4
+--lower-port /dev/ttySTM9
+--radar-timeout-s 0.5
+--max-distance-cm 300
+2.2 雷达安装参数
+参数	当前默认值	说明	是否需要确认
+上雷达安装位置	(0.0cm, 0.0cm)	相对机体系原点	需要确认
+上雷达 yaw	0.0deg	雷达朝向	需要确认
+上雷达 mirror_y	False	不镜像 Y 轴	需要确认
+下雷达安装位置	(0.96cm, 0.15cm)	当前代码单位是 cm	强烈需要确认
+下雷达 yaw	0.0deg	雷达朝向	需要确认
+下雷达 mirror_y	True	当前假设下雷达倒装/镜像	需要确认
+重点确认：
+
+当前代码中的下雷达 mount_xy=(0.96cm, 0.15cm)
+如果硬件图纸本意是：
+
+0.96m, 0.15m
+则必须改成：
+
+--lower-mount-x-cm 96.0
+--lower-mount-y-cm 15.0
+不要混用 cm 和 m。
+
+3. 机身屏蔽与避障场景参数
+参数	当前默认值	说明
+机身 X 半宽	25cm	-25cm < x < 25cm 内点云视为机身自反射
+机身 Y 半宽	25cm	-25cm < y < 25cm 内点云视为机身自反射
+前方走廊半宽	50cm	判断正前方障碍的横向范围
+stop 距离	80cm	前方障碍小于该距离时急停
+slow 距离	150cm	前方障碍小于该距离时减速
+侧向阻挡距离	45cm	侧向速度安全限制用
+建议初始参数：
+
+--body-x-half-cm 25
+--body-y-half-cm 25
+--corridor-half-width-cm 50
+--radar-timeout-s 0.5
+需要现场确认：
+
+机身真实最大外廓。
+雷达是否会扫到脚架、电池、机臂。
+机身屏蔽是否误删真实近距离障碍。
+前方走廊宽度是否适合实际飞行通道。
+4. 摄像头与道路感知参数
+参数	当前默认值	说明	是否需要确认
+摄像头 index	0	OpenCV VideoCapture(0, CAP_V4L2)	必须确认
+摄像头宽度	640	--camera-width	需要确认
+摄像头高度	480	--camera-height	需要确认
+摄像头 FPS	30	--camera-fps	需要确认
+ONNX 模型路径	FlightController/Solutions/model/road_yolo11n_seg.onnx	权重不提交到仓库	必须提供
+debug 图目录	默认不保存	--debug-dir	建议调试时填写
+debug 保存间隔	30 帧	--debug-every-n	可按存储调整
+建议显式传入：
+
+--camera-index 0
+--camera-width 640
+--camera-height 480
+--camera-fps 30
+--model FlightController/Solutions/model/road_yolo11n_seg.onnx
+调试图建议写到 SD 卡：
+
+--debug-dir /media/sdcard/road_debug
+--debug-every-n 30
+不要把大量图像或视频写到 /tmp，因为目标板上 /tmp 可能是 tmpfs，会占用 RAM。
+
+5. 道路分支选择参数
+参数	当前默认值	可选值	说明
+分支选择	auto	auto/straight/left/right	岔路口选择策略
+命令：
+
+--branch auto
+或：
+
+--branch straight
+--branch left
+--branch right
+当前选择逻辑：
+
+auto 优先选择 straight。
+如果没有 straight，选择综合置信度和中心误差更好的分支。
+指定 left/right/straight 时，优先选择对应 label。
+如果上一帧选择过某个 label，当前仍存在该 label，会给一点滞回，减少岔路口抖动。
+需要现场验证：
+
+左岔是否被标为 left。
+右岔是否被标为 right。
+十字路口是否能检测出多个 branches。
+--branch left/right/straight 是否能改变 selected_branch。
+6. 摄像头前置偏移补偿参数
+默认状态：
+
+关闭
+也就是说，不传 --offset-comp-enable 时，不会启用摄像头偏移补偿。
+
+参数	当前默认值	说明
+是否启用	False	--offset-comp-enable
+摄像头前置距离	0.15m	--cam-forward-offset-m
+横向米/像素	None	--meters-per-pixel-x，不填则不补偿
+补偿符号	1.0	方向反了改成 -1.0
+最大补偿	120px	防止补偿过大
+pipeline latency	0.0s	图像处理延迟预测
+启用示例：
+
+--offset-comp-enable \
+--cam-forward-offset-m 0.15 \
+--meters-per-pixel-x 0.005 \
+--offset-correction-sign 1.0
+必须标定：
+
+meters_per_pixel_x
+未标定前不要把补偿作为强依赖。
+如果发现转向/补偿方向反了，优先调整：
+
+--offset-correction-sign -1.0
+而不是到处改公式。
+
+7. 道路循迹控制参数
+参数	当前默认值	说明
+最大前进速度	25cm/s	--max-vx-cm-s
+最大 yaw 角速度	25deg/s	--max-yaw-rate-deg-s
+pixel yaw Kp	0.08	代码内默认
+angle yaw Kp	0.4	代码内默认
+pixel deadband	20px	代码内默认
+lost timeout	5s	丢线搜索超过该时间后输出零速度
+search yaw rate	12deg/s	丢线短时间搜索
+拆桨/固定机体首次真实发送建议：
+
+--max-vx-cm-s 10
+--max-yaw-rate-deg-s 10
+如果实测转向反了，优先调整 RoadFollower 的 yaw_sign 配置，不要分散修改控制公式。
+
+8. 相对目标 demo 参数
+goal_nav_main.py 目前只是相对方向目标导航 demo，不是全局自主导航。
+
+参数	当前默认值	说明
+相对目标 X	200cm	机体系前方
+相对目标 Y	0cm	机体系左侧为正
+巡航速度	20cm/s	--cruise-speed-cm-s
+yaw 限幅	25deg/s	--yaw-rate-limit-deg-s
+yaw Kp	0.5	--yaw-kp
+到达距离	30cm	--arrive-distance-cm
+示例：
+
+PYTHONPATH=. python goal_nav_main.py \
+  --no-fc --no-radar --dry-run \
+  --goal-x-cm 200 \
+  --goal-y-cm 0
+注意：
+
+这个功能不能当作完整全局导航。
+原因是当前没有可靠全局位姿、里程计闭环或 SLAM 全局图。
+
+9. 安全参数
+参数	当前默认值	说明
+require_fc	根据是否 --no-fc 决定	飞控必需检查
+require_hold_pos_mode	根据是否 --no-fc 决定	要求 mode=2
+hold_pos_mode	2	定点模式
+require_radar	根据是否 --no-radar 决定	雷达必需检查
+radar_timeout_s	0.5s	雷达真实帧超时
+最大 roll	25deg	超过 safety stop
+最大 pitch	25deg	超过 safety stop
+最低电压	None	默认不检查电池
+最大 vx	road follow 默认 25cm/s	可通过 CLI 覆盖
+最大 vy	25cm/s	安全层默认
+最大 vz	20cm/s	安全层默认
+最大 yaw rate	road follow 默认 25deg/s	可通过 CLI 覆盖
+电池电压说明：
+
+默认 min_battery_v=None，不检查电压。
+这是为了避免 USB 供电联调时 bat=0.0V 被误判为故障。
+真飞前应按电池规格设置合理电压阈值。
+10. 必须由你填写/确认的参数清单
+10.1 飞控
+--fc-port /dev/ttyACM0
+需要确认：
+
+真实飞控串口是不是 /dev/ttyACM0。
+mode=2 是否确实是定点模式。
+飞控定点/高度保持本身是否稳定。
+10.2 雷达
+--upper-port /dev/ttySTM4
+--lower-port /dev/ttySTM9
+需要确认：
+
+上雷达是否真在 /dev/ttySTM4。
+下雷达是否真在 /dev/ttySTM9。
+下雷达是否需要 mirror_y=True。
+下雷达安装偏移到底是厘米还是米。
+如果是厘米级：
+
+--lower-mount-x-cm 0.96
+--lower-mount-y-cm 0.15
+如果是 0.96m / 0.15m：
+
+--lower-mount-x-cm 96.0
+--lower-mount-y-cm 15.0
+10.3 摄像头
+--camera-index 0
+--camera-width 640
+--camera-height 480
+--camera-fps 30
+需要确认：
+
+摄像头编号。
+实际分辨率。
+实际 FPS。
+画面方向是否正确。
+画面是否有明显畸变、遮挡、过曝。
+10.4 模型
+--model FlightController/Solutions/model/road_yolo11n_seg.onnx
+需要确认：
+
+模型文件真实存在。
+模型输入输出格式和当前 road_perception.py 解码逻辑匹配。
+单路、左岔、右岔、十字路口样本都能输出合理结果。
+10.5 机身屏蔽
+--body-x-half-cm 25
+--body-y-half-cm 25
+需要确认：
+
+机身、脚架、电池、机臂是否都被屏蔽。
+是否误屏蔽了真实近距离障碍。
+是否需要扩大或缩小屏蔽范围。
+10.6 前方走廊和避障距离
+--corridor-half-width-cm 50
+--radar-timeout-s 0.5
+需要确认：
+
+前方走廊宽度是否符合实际飞行空间。
+stop/slow 距离是否足够保守。
+拔掉任一雷达后是否 0.5s 左右 safety stop。
+10.7 初次真实发送速度
+拆桨/固定机体首次真实发送建议：
+
+--enable-flight \
+--max-vx-cm-s 10 \
+--max-yaw-rate-deg-s 10
+不要首次就使用较大速度。
+
+10.8 道路分支策略
+--branch auto
+或：
+
+--branch straight
+--branch left
+--branch right
+需要确认：
+
+场景中岔路标注是否符合预期。
+selected_branch 是否跟任务目标一致。
+不要把分支选择写死成永远中间那条。
+10.9 摄像头偏移补偿
+未标定前不要启用。
+
+启用前需要填写：
+
+--offset-comp-enable \
+--cam-forward-offset-m 0.15 \
+--meters-per-pixel-x <标定值> \
+--offset-correction-sign 1.0
+需要确认：
+
+摄像头前置距离。
+横向米/像素。
+补偿方向。
+图像处理延迟。
+11. 推荐的首次 road follow dry-run 命令
+无飞控、无雷达，仅视觉：
+
+PYTHONPATH=. python road_follow_main.py \
+  --no-fc --no-radar --dry-run \
+  --camera-index 0 \
+  --camera-width 640 \
+  --camera-height 480 \
+  --camera-fps 30 \
+  --model FlightController/Solutions/model/road_yolo11n_seg.onnx \
+  --branch auto \
+  --loop-hz 5
+有雷达、无飞控：
+
+PYTHONPATH=. python road_follow_main.py \
+  --no-fc --dry-run \
+  --camera-index 0 \
+  --model FlightController/Solutions/model/road_yolo11n_seg.onnx \
+  --upper-port /dev/ttySTM4 \
+  --lower-port /dev/ttySTM9 \
+  --radar-timeout-s 0.5 \
+  --loop-hz 5
+飞控只读：
+
+PYTHONPATH=. python road_follow_main.py \
+  --dry-run \
+  --fc-port /dev/ttyACM0 \
+  --camera-index 0 \
+  --model FlightController/Solutions/model/road_yolo11n_seg.onnx
+拆桨/固定机体真实发送：
+
+PYTHONPATH=. python road_follow_main.py \
+  --enable-flight \
+  --fc-port /dev/ttyACM0 \
+  --camera-index 0 \
+  --model FlightController/Solutions/model/road_yolo11n_seg.onnx \
+  --upper-port /dev/ttySTM4 \
+  --lower-port /dev/ttySTM9 \
+  --max-vx-cm-s 10 \
+  --max-yaw-rate-deg-s 10

@@ -90,12 +90,14 @@ class CameraGeometry:
 def compute_meters_per_pixel(
     row_from_bottom: int,
     geom: CameraGeometry | None = None,
+    height_m: float | None = None,
 ) -> float:
     """逐行计算水平方向每像素对应的地面距离 (m/px)。
 
     Args:
         row_from_bottom: 像素行号, 0 = 画面最下行, img_h-1 = 画面最上行
         geom: 摄像头几何标定参数, 默认使用实测值
+        height_m: 飞行高度 (m), 覆盖 geom.height_m。用于飞行时高度与标定高度不同时的自适应计算
 
     Returns:
         meters_per_pixel_x: 该行的水平 m/px 值
@@ -111,12 +113,13 @@ def compute_meters_per_pixel(
         geom = CameraGeometry()
     import math
 
+    h = height_m if height_m is not None else geom.height_m
     alpha = math.radians(geom.alpha_deg)
     beta = math.radians(geom.beta_deg)
     hfov_half = math.radians(geom.hfov_deg / 2.0)
     t = 1.0 - 2.0 * float(row_from_bottom) / float(geom.img_h - 1)
     theta = alpha + beta * t
-    d_ground = geom.height_m / math.tan(theta)
+    d_ground = h / math.tan(theta)
     return 2.0 * d_ground * math.tan(hfov_half) / float(geom.img_w)
 
 
@@ -1308,7 +1311,7 @@ def get_road_perception(
     frame: np.ndarray,
     yaw_rate_deg_s: float = 0.0,
     cam_offset_m: float = 0.10,
-    flight_height_m: float = 1.5,
+    flight_height_m: float = 2.0,
     debug_save_path: str | None = None,
     offset_comp_config: CameraOffsetCompensationConfig | None = None,
     branch_preference: str = "auto",
@@ -1431,7 +1434,11 @@ def get_road_perception(
             enabled=False,
             cam_forward_offset_m=cam_offset_m,
         )
-        _ = flight_height_m
+        if cfg.meters_per_pixel_x is None:
+            cfg.meters_per_pixel_x = compute_meters_per_pixel(
+                row_from_bottom=120,
+                height_m=flight_height_m,
+            )
         control_pixel_error = (
             float(selected_branch.pixel_error)
             if selected_branch is not None

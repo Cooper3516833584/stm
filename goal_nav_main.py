@@ -16,7 +16,8 @@ from loguru import logger
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Relative goal navigation demo")
-    parser.add_argument("--goal-x-cm", type=float, default=200.0)
+    parser.add_argument("--goal-x-cm", type=float, default=200.0,
+                        help="目标在机体前方距离 (cm)。默认 200 仅供 dry-run 测试，实飞须显式指定")
     parser.add_argument("--goal-y-cm", type=float, default=0.0)
     parser.add_argument("--fc-port", default=None)
     parser.add_argument("--upper-port", default="/dev/ttySTM4")

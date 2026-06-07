@@ -46,6 +46,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug-every-n", type=int, default=30)
     parser.add_argument("--debug-image-dir", default=None, help="Deprecated alias for --debug-dir")
     parser.add_argument("--debug-image-every", type=int, default=None, help="Deprecated alias for --debug-every-n")
+    parser.add_argument("--record-dir", default="/media/sdcard/stm_records",
+                        help="Directory on SD card for session recording")
+    parser.add_argument("--no-record", action="store_true",
+                        help="Disable camera/radar session recording")
+    parser.add_argument("--record-frame-every-n", type=int, default=10,
+                        help="Save one camera frame every N control loops")
+    parser.add_argument("--record-radar-every-n", type=int, default=1,
+                        help="Save one radar metadata/point snapshot every N control loops")
+    parser.add_argument("--record-jpeg-quality", type=int, default=85)
     parser.add_argument("--radar-timeout-s", type=float, default=0.5)
     parser.add_argument("--max-distance-cm", type=float, default=300.0)
     parser.add_argument("--body-x-half-cm", type=float, default=25.0)
@@ -76,6 +85,7 @@ def main() -> None:
     from FlightController.Components import MultiRadar, RadarConfig
     from FlightController.Components.FCConnector import FCConnectConfig, connect_fc
     from FlightController.Solutions.RoadFollower import RoadFollower, RoadFollowerConfig
+    from FlightController.Solutions.SessionRecorder import SessionRecorder, SessionRecorderConfig
     from FlightController.Solutions.Safety import (
         Command,
         RadarFieldConfig,
@@ -106,6 +116,16 @@ def main() -> None:
     fc = None
     multi_radar = None
     cap = None
+    recorder = SessionRecorder(
+        SessionRecorderConfig(
+            root_dir=args.record_dir,
+            enabled=not args.no_record,
+            mode="road_follow",
+            frame_every_n=args.record_frame_every_n,
+            radar_every_n=args.record_radar_every_n,
+            jpeg_quality=args.record_jpeg_quality,
+        )
+    )
     radar_field = RadarObstacleField(
         RadarFieldConfig(
             max_distance_cm=args.max_distance_cm,
@@ -169,6 +189,7 @@ def main() -> None:
         while True:
             loop_start = time.perf_counter()
             ok, frame = _read_camera(cap)
+            recorder.record_frame(loop_count=loop_count, now_s=loop_start, frame=frame, label="road")
             debug_path = _debug_image_path(args.debug_dir, args.debug_every_n, loop_count)
 
             if not ok or frame is None:
@@ -224,6 +245,26 @@ def main() -> None:
                 health,
                 dry_run=actual_dry_run,
             )
+            recorder.record_radar(
+                loop_count=loop_count,
+                now_s=loop_start,
+                radar_field=radar_field,
+                multi_radar=multi_radar,
+                radar_age_s=radar_age_s,
+                radar_connected=radar_connected,
+                desired=desired,
+                safe_command=safe.command,
+                decision_reason=decision.reason,
+                extra=_road_record_extra(perception, ok),
+            )
+            recorder.record_command(
+                loop_count=loop_count,
+                now_s=loop_start,
+                desired=desired,
+                safe_command=safe.command,
+                decision_reason=decision.reason,
+                extra={"camera_ok": bool(ok)},
+            )
 
             if loop_start - last_log_s >= 1.0:
                 last_log_s = loop_start
@@ -265,6 +306,7 @@ def main() -> None:
             cap.release()
         if multi_radar is not None:
             multi_radar.stop()
+        recorder.close()
         logger.info("[ROAD] stopped")
 
 
@@ -362,6 +404,30 @@ def _log_road_summary(
             fc_mode if fc_mode is not None else "no-fc",
         )
     )
+
+
+def _road_record_extra(perception, camera_ok: bool) -> dict[str, object]:
+    selected = getattr(perception, "selected_branch", None)
+    branch = getattr(selected, "label", "none")
+    return {
+        "camera_ok": bool(camera_ok),
+        "road_state": getattr(perception, "road_state", "lost") if perception is not None else "lost",
+        "branch": branch,
+        "pixel_error": _float_or_none(getattr(perception, "pixel_error", None)),
+        "corrected_pixel_error": _float_or_none(getattr(perception, "corrected_pixel_error", None)),
+        "centerline_angle": _float_or_none(getattr(perception, "centerline_angle", None)),
+        "confidence": _float_or_none(getattr(perception, "confidence", None)),
+        "is_road_found": bool(getattr(perception, "is_road_found", False)) if perception is not None else False,
+    }
+
+
+def _float_or_none(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _setup_logging(log_file: str | None) -> None:

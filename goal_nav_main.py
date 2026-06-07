@@ -10,6 +10,7 @@ import argparse
 from pathlib import Path
 import time
 
+import cv2
 import numpy as np
 from loguru import logger
 
@@ -60,6 +61,22 @@ def parse_args() -> argparse.Namespace:
                         help="Minimum yaw rate while turning in place")
     parser.add_argument("--min-forward-speed-cm-s", type=float, default=8.0,
                         help="Minimum forward speed between clearance and avoidance distances")
+    parser.add_argument("--record-dir", default="/media/sdcard/stm_records",
+                        help="Directory on SD card for session recording")
+    parser.add_argument("--no-record", action="store_true",
+                        help="Disable camera/radar session recording")
+    parser.add_argument("--record-frame-every-n", type=int, default=10,
+                        help="Save one camera frame every N control loops")
+    parser.add_argument("--record-radar-every-n", type=int, default=1,
+                        help="Save one radar metadata/point snapshot every N control loops")
+    parser.add_argument("--record-jpeg-quality", type=int, default=85)
+    parser.add_argument("--record-camera-index", type=int, default=9,
+                        help="Camera index used only for goal-nav recording")
+    parser.add_argument("--record-camera-width", type=int, default=640)
+    parser.add_argument("--record-camera-height", type=int, default=480)
+    parser.add_argument("--record-camera-fps", type=int, default=30)
+    parser.add_argument("--no-record-camera", action="store_true",
+                        help="Record radar only; do not open a camera in goal_nav_main")
     parser.add_argument("--log-file", default=None)
     return parser.parse_args()
 
@@ -74,6 +91,7 @@ def main() -> None:
         RelativeGoalConfig,
         RelativeGoalNavigator,
     )
+    from FlightController.Solutions.SessionRecorder import SessionRecorder, SessionRecorderConfig
     from FlightController.Solutions.Safety import (
         Command,
         RadarFieldConfig,
@@ -100,6 +118,17 @@ def main() -> None:
 
     fc = None
     multi_radar = None
+    record_cap = None
+    recorder = SessionRecorder(
+        SessionRecorderConfig(
+            root_dir=args.record_dir,
+            enabled=not args.no_record,
+            mode="goal_nav",
+            frame_every_n=args.record_frame_every_n,
+            radar_every_n=args.record_radar_every_n,
+            jpeg_quality=args.record_jpeg_quality,
+        )
+    )
     radar_field = RadarObstacleField(
         RadarFieldConfig(
             max_distance_cm=args.max_distance_cm,
@@ -160,6 +189,11 @@ def main() -> None:
             multi_radar = MultiRadar(_radar_configs(args.upper_port, args.lower_port))
             multi_radar.start()
 
+        if not args.no_record and not args.no_record_camera:
+            record_cap = _open_record_camera(args)
+            if record_cap is None:
+                logger.warning("[GOAL-DEMO] record camera open failed; radar metadata will still be recorded")
+
         logger.info(
             "[GOAL-DEMO] started dry_run={} relative_goal=({:.0f},{:.0f}) "
             "no_radar={} clearance={:.0f}cm fov={:.0f}deg lookahead={:.0f}cm".format(
@@ -173,8 +207,11 @@ def main() -> None:
             )
         )
         last_log_s = 0.0
+        loop_count = 0
         while True:
             loop_start = time.perf_counter()
+            camera_ok, frame = _read_record_camera(record_cap)
+            recorder.record_frame(loop_count=loop_count, now_s=loop_start, frame=frame, label="goal")
 
             if multi_radar is not None:
                 points = multi_radar.get_obstacle_points_body_cm(max_distance_cm=args.max_distance_cm)
@@ -207,6 +244,30 @@ def main() -> None:
                 health,
                 dry_run=actual_dry_run,
             )
+            recorder.record_radar(
+                loop_count=loop_count,
+                now_s=loop_start,
+                radar_field=radar_field,
+                multi_radar=multi_radar,
+                radar_age_s=radar_age_s,
+                radar_connected=radar_connected,
+                desired=desired,
+                safe_command=safe.command,
+                decision_reason=decision.reason,
+                extra={
+                    "camera_ok": bool(camera_ok),
+                    "goal_x_cm": float(args.goal_x_cm),
+                    "goal_y_cm": float(args.goal_y_cm),
+                },
+            )
+            recorder.record_command(
+                loop_count=loop_count,
+                now_s=loop_start,
+                desired=desired,
+                safe_command=safe.command,
+                decision_reason=decision.reason,
+                extra={"camera_ok": bool(camera_ok)},
+            )
 
             if loop_start - last_log_s >= 1.0:
                 last_log_s = loop_start
@@ -228,6 +289,7 @@ def main() -> None:
                     )
                 )
 
+            loop_count += 1
             _sleep_to_rate(loop_start, period_s)
     except KeyboardInterrupt:
         logger.info("[GOAL-DEMO] interrupted")
@@ -251,6 +313,9 @@ def main() -> None:
                 fc.close()
         if multi_radar is not None:
             multi_radar.stop()
+        if record_cap is not None:
+            record_cap.release()
+        recorder.close()
         logger.info("[GOAL-DEMO] stopped")
 
 
@@ -270,6 +335,26 @@ def _is_actual_dry_run(args: argparse.Namespace) -> bool:
         or args.no_radar
         or not args.enable_flight
     )
+
+
+def _open_record_camera(args: argparse.Namespace):
+    cap = cv2.VideoCapture(args.record_camera_index, cv2.CAP_V4L2)
+    if not cap.isOpened():
+        cap.release()
+        return None
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.record_camera_width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.record_camera_height)
+    cap.set(cv2.CAP_PROP_FPS, args.record_camera_fps)
+    return cap
+
+
+def _read_record_camera(cap) -> tuple[bool, np.ndarray | None]:
+    if cap is None or not cap.isOpened():
+        return False, None
+    ok, frame = cap.read()
+    if not ok:
+        return False, None
+    return True, frame
 
 
 def _setup_logging(log_file: str | None) -> None:

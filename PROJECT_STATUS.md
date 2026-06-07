@@ -1,8 +1,8 @@
 # 🚁 Cooper_drone 伴随计算机系统配置与开发进度纪要
 
 **项目名称**: Cooper_drone (基于 MYiR 开发板的无人机机载/伴随计算机开发)
-**当前阶段**: M5 阶段 — 飞控联调完成 + 双雷达融合链路验证完成 + 双 USB 摄像头探活完成
-**最后更新**: 2026年5月17日 (双摄像头接入验证，路径识别 cam#7 + 障碍物识别 cam#9，前视有间歇性偏蓝/偏青)
+**当前阶段**: M6 阶段 — 视觉管线就绪 + NPU 适配诊断完成 + OS 迁移准备中 (计划切换至 OpenSTLinux v6.2)
+**最后更新**: 2026年6月7日 (N5 回话: NPU适配, 摄像头几何标定, 视觉FPS基准, 偏移补偿联通, 默认参数审计, OS迁移决策. 旧: 2026-05-17 双摄像头接入验证，路径识别 cam#7 + 障碍物识别 cam#9，前视有间歇性偏蓝/偏青)
 
 ---
 
@@ -312,6 +312,7 @@ tail -f /media/sdcard/latency_verify.log | grep LATENCY
 - `/usr/share/locale` 去除非英文 locale（~200M）
 - `/home/stm/.cache/*` 清空（144M）
 - `.dotnet` 目录删除（252K）
+- `~/npu_runtime` 15MB (OpenSTLinux .so, 待OS迁移后清理)
 
 **⚠️ 硬性约束与风险**:
 - eMMC 仅剩 **930M**，禁止执行 `apt upgrade`（会拉取大量 deb 包导致爆盘）
@@ -604,3 +605,75 @@ PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py --no-fc --loop-
 | `try/except KeyError` → `dict.setdefault()` | 消除冷键路径的 KeyError 异常对象创建，dict_build 从 0.523ms 降至 0.147ms，max 尖峰从 14.5ms 降至 1.6ms |
 | `timeout_clear` 每 12 帧执行 | 1080 元素全量扫描由 300 次/秒降至 25 次/秒。效果微小（仅占 1%）但无代价 |
 | 日志文件异步写入 (`enqueue=True`) | 消除 eMMC I/O 阻塞主线程导致的 GIL 争用，避免周期性点云覆盖率骤降。日志写入闪存卡 vfat，`tail -f` 约 1 分钟延迟为 cosmetic 问题 |
+
+
+---
+
+## 10. M6 阶段：NPU 适配 & 视觉管线就绪 (2026-06-07)
+
+### 10.1 视觉推理性能基线
+
+**`bench_vision_fps.py`** 在 Debian 12 + STM32MP257 上的实测结果：
+
+| 指标 | 实测值 | 说明 |
+|------|--------|------|
+| 单帧感知耗时 | **~1800ms** | 瓶颈: `onnxruntime` CPU 推理 YOLO11-seg |
+| 实际 FPS | **0.6** | 纯 CPU (Cortex-A35 x2), 无硬件加速 |
+| ONNX 推理 | `session.run()` 1800ms | 占单帧 99% 耗时 |
+| 捕获 | 3-8ms | V4L2 摄像头抓帧 |
+| 后处理 | 1-3ms | mask 解码/中线提取/偏移补偿 |
+
+**视觉管道当前无法实时使用。** 0.6 FPS 意味着每秒仅判断一次道路方向。
+
+### 10.2 NPU 硬件栈验证
+
+| 层 | 状态 | 说明 |
+|------|:--:|------|
+| `/dev/galcore` | Yes | NPU 内核驱动已加载 (galcore 6.4.15.6) |
+| `libGAL.so`, `libVSC.so` | Yes | 从 vendorfs 提取，已安装到 /usr/lib/aarch64-linux-gnu/ |
+| `libOpenCL_VSI.so` | Yes | NPU OpenCL 后端就绪 |
+| `libovxlib.so`, `libOpenVX.so`, `libtim-vx.so` | Yes | 从 OpenSTLinux rootfs 提取 |
+| `libArchModelSw.so` | No | 不存在于 Debian 镜像，是 gcnano 驱动栈组件 |
+| `libopenvx-gcnano` | No | 仅 OpenSTLinux 提供 |
+
+### 10.3 NPU ONNX Runtime 确认存在
+
+从 ST APT 仓库下载的 `onnxruntime_1.19.2_arm64.deb`：
+```bash
+strings /usr/lib/libonnxruntime.so.1.19.2 | grep -i vsinpu
+# -> VSINPUExecutionProvider
+# -> OrtSessionOptionsAppendExecutionProvider_VSINPU
+```
+**VsiNpuExecutionProvider 已编译在 ST 的 ONNX Runtime 版本中。** 但无法在 Debian 12 上加载——缺少 glibc 2.38 和 libArchModelSw.so。
+
+### 10.4 尝试过的不兼容路径
+
+| 方案 | 结果 | 失败原因 |
+|------|:--:|------|
+| `pip install onnxruntime` (标准版) | No | 只含 CPUExecutionProvider |
+| 从 SDK 提取 onnxruntime (CPU variant) | No | AISDK-Y-MP2 不含 NPU variant |
+| `dpkg -i` ST 的 NPU deb 包 | No | 依赖 libc6>=2.39, libopenvx-gcnano |
+| `LD_LIBRARY_PATH` 加载 OpenSTLinux glibc | No | libc.so.6: undefined symbol |
+| `LD_PRELOAD` 加载 libovxlib.so | No | libArchModelSw.so 缺失 |
+
+### 10.5 代码侧更新汇总 (2026-06-07)
+
+| 文件 | 改动 |
+|------|------|
+| `road_perception.py` | `_select_providers()` NPU>XNNPACK>CPU, `compute_meters_per_pixel()` height_m 覆盖, `get_road_perception()` flight_height_m 接入 |
+| `road_follow_main.py` | --camera-index 0->7, --flight-height-m, --cam-forward-offset-m 0.15->0.10 |
+| `goal_nav_main.py` | --goal-x-cm 加 help 标注, 新增安全参数 |
+| `obstacle_classifier.py` | 删除 (零引用死代码) |
+| `HARDWARE_INTERFACE.md` | 新增 section 5.4 (摄像头几何标定: alpha=30.27, VFOV=55.08, HFOV=68) |
+| `PARAMETER_AUDIT.md` | 新增 — 全代码默认参数审计报告 |
+| `NPU_REQUIREMENTS.md` | 新增 — NPU 软件需求分析 |
+| `OS_MIGRATION_PLAN.md` | 新增 — Debian->OpenSTLinux 迁移方案 |
+| tools: `diagnose_npu.py` | NPU 诊断工具 |
+| tools: `bench_vision_fps.py` | 视觉 FPS 基准测试 |
+| tools: `visualize_correction_boundary.py` | 偏移补偿边界可视化 |
+
+### 10.6 决策: 切换至 OpenSTLinux v6.2
+
+**原因**: ST NPU 软件栈深度绑定 OpenSTLinux BSP。Debian 12 (glibc 2.36) 与 ST 目标 (glibc 2.39) 不兼容。
+
+**迁移方案**: 详见 `OS_MIGRATION_PLAN.md` — SD 卡烧录, Python 3.12 venv 重建, NPU->雷达->FC->摄像头 全链路验证, ~4h, Debian eMMC 保留为回退。

@@ -1,8 +1,9 @@
 # 默认参数审计报告
 
 **项目**: Cooper_drone  
-**审计日期**: 2026-05-24  
-**范围**: 全部 .py 文件 (~55 个)，对照 `HARDWARE_INTERFACE.md` / `PROJECT_STATUS.md` / `IMPLEMENTATION_PLAN.md` / `FC_INTEGRATION_TEST_PLAN.md`
+**审计日期**: 2026-06-07  
+**范围**: 全部 .py 文件 (~55 个)，对照 `HARDWARE_INTERFACE.md` / `PROJECT_STATUS.md` / `IMPLEMENTATION_PLAN.md` / `FC_INTEGRATION_TEST_PLAN.md`  
+**最新进展**: 所有 4 个占位值已修复; NPU 适配因 Debian/OpenSTLinux 不兼容，决策切换 OS
 
 ---
 

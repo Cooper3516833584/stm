@@ -2,7 +2,8 @@
 
 **基于**: Codex 实现方案包 (00/02/05/06 号文档) + 当前仓库状态  
 **硬件**: MYD-LD25X (STM32MP257) + 凌霄飞控 + 双 D500 雷达 + USB 摄像头  
-**最后更新**: 2026-05-17 (整合 Codex 方案与当前代码状态)
+**最后更新**: 2026-06-07 (新增 NPU 适配 & OS 迁移决策)
+**平台变更**: 计划从 Debian 12 迁移至 OpenSTLinux v6.2 以获得 NPU 硬件加速
 
 ---
 
@@ -265,7 +266,13 @@ GoalNavMission.update(world)
 | 机身自反射屏蔽 | ✅ | `_body_mask`, ±25cm |
 | 障碍物聚类分类 | ❌ | 接口曾定义为 `obstacle_classifier.py`，已删除（零引用死代码）。欧氏聚类→wall/pole/block 保留为开放任务 |
 | 世界模型 (local_world_model) | ✅ | 距离过滤 + 机身屏蔽 + 走廊/扇区查询 |
-| YOLO 道路感知 (road_perception) | ✅ | ONNX 推理, mask 生成, 中线提取, pixel_error, angle |
+| YOLO 道路感知 (road_perception) | ✅ | ONNX 推理, mask 生成, 中线提取, pixel_error, angle。**NPU 加速待 OS 迁移后验证** |
+| **平台** | | |
+| 当前 OS | ✅ | Debian 12 Bookworm, aarch64, glibc 2.36 |
+| NPU 硬件 | ✅ | `/dev/galcore` 已加载, galcore 6.4.15.6 |
+| NPU 用户态库 | ✅ | libGAL, libVSC, libOpenCL_VSI 等 12 个已安装 |
+| NPU ONNX Runtime | ❌ | ST 的 `onnxruntime` NPU 变体依赖 OpenSTLinux BSP, 无法在 Debian 12 上运行 |
+| **迁移计划** | 🔴 | **切换至 OpenSTLinux v6.2** — 详见 `OS_MIGRATION_PLAN.md` |
 | **规划层** | | |
 | 反应式避障 (LocalPlanner) | ✅ | 三段式: stop/slow/cruise, 去抖 3 帧 |
 | 候选方向搜索 (DirectionPlanner) | ✅ | -90°~+90°, 10°步长, 扇区间隙评估 |
@@ -323,6 +330,8 @@ GoalNavMission.update(world)
 | 10 | **分阶段联调验收** (07) | 🟢 低 | 文档 |
 | 11 | **障碍物类型识别** | 🔴 高 | ~100行 |
 | | 原 `obstacle_classifier.py` 为空桩已删除，需重新实现: 欧氏聚类→按 size/shape 分类 wall/pole/block，并接入 `local_world_model` | |
+| 12 | **操作系统迁移: Debian 12 → OpenSTLinux v6.2** | 🔴 高 | ~4h |
+| | 详见 `OS_MIGRATION_PLAN.md` — 烧录镜像 → 重建 Python 环境 → NPU 验证 → 雷达/FC/摄像头全链路验证 | |
 
 ---
 
@@ -331,6 +340,7 @@ GoalNavMission.update(world)
 | 风险 | 严重度 | 说明 |
 |------|:---:|------|
 | **ONNX 模型文件缺失** | 🔴 高 | `FlightController/Solutions/model/road_yolo11n_seg.onnx` 是否存在未确认; 不存在则视觉链路完全无法测试 |
+| **Debian 12 不支持 NPU** | 🔴 高 | 经过 2026-06-07 全天诊断, ST NPU 软件栈依赖 OpenSTLinux BSP (glibc 2.39, gcnano-driver, libArchModelSw), 无法通过替换 .so 解决; **决策: 切换至 OpenSTLinux v6.2** |
 | **无测试图片集** | 🟡 中 | 无法离线验证岔路分类和偏移补偿的正确性 |
 | **两套 VelocityCommand 并存** | 🟡 中 | 根目录 `autonomy_command.py` 和 `FlightController/Solutions/LocalPlanner.py` 各有定义; 字段相似但类型不兼容; 长期需统一 |
 | **雷达 fresh 用主循环时间替代** | 🟡 中 | 当前 `safety_arbiter.py` 中的 `radar_age_s` 来自 `LocalWorldModel.radar_age_s()` — 那是上次 update 的时间, 不是真实帧时间; 如果串口断流但主循环继续跑, 会误判为新鲜 |

@@ -302,7 +302,7 @@ def _select_providers() -> list[str]:
 
     available = set(ort.get_available_providers())
 
-    for candidate in ("VsiNpuExecutionProvider",):
+    for candidate in ("VSINPUExecutionProvider",):
         if candidate in available:
             return [candidate, "CPUExecutionProvider"]
 

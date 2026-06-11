@@ -45,14 +45,32 @@
 
 ## 2. 可用镜像文件
 
-位于 `E:\files\嵌赛\stm32mp257\02-Images\8E2D\myir-image-full\`：
+位于 `E:\files\嵌赛\stm32mp257\02-Images\8E2D\`：
+
+### 2.1 预构建 SD 卡镜像（直接烧录用）
+
+| 文件 | 路径 | 大小 | 说明 |
+|------|------|------|------|
+| **`FlashLayout_sdcard_myb-ld25x-8e2d-myir-image-burn.raw`** | `FlashLayout_sdcard_myb-ld25x-8e2d-myir-image-burn/` | **5.7 GB** | **SD 卡完整镜像，含所有分区（bootfs + vendorfs + rootfs + userfs）** |
+
+> 这是预构建好的完整 SD 卡镜像，包含 GPT 分区表 + 所有固件，可直接用 balenaEtcher / Win32DiskImager / `dd` 写入 SD 卡。**大多数用户只需这一个文件。**
+
+### 2.2 独立分区镜像（按需烧录/高级用）
+
+位于 `myir-image-full/` 子目录：
 
 | 文件 | 大小 | 说明 |
 |------|------|------|
 | `myir-image-full-openstlinux-weston-myd-ld25x.rootfs.ext4` | 4.0G | 根文件系统 (ext4) |
-| `st-image-bootfs-openstlinux-weston-myd-ld25x.bootfs.ext4` | 64M | 启动分区 |
+| `st-image-bootfs-openstlinux-weston-myd-ld25x.bootfs.ext4` | 64M | 启动分区 (kernel + device tree) |
 | `st-image-vendorfs-openstlinux-weston-myd-ld25x.vendorfs.ext4` | 48M | Vendor 分区 (含 gcnano NPU 驱动) |
-| `FlashLayout_sdcard_myb-ld25x-8e2d-myir-image-full/*.raw` | — | SD 卡烧录镜像 (可直接 `dd` 到 eMMC 或 SD) |
+| `st-image-userfs-openstlinux-weston-myd-ld25x.userfs.ext4` | 128M | 用户数据分区 |
+| `flashlayout_myir-image-full/optee/FlashLayout_sdcard_myb-stm32mp257x-2GB-ca35tdcid-ostl-optee.tsv` | — | 分区布局描述文件 (STM32CubeProgrammer 用) |
+| `scripts/create_sdcard_from_flashlayout.sh` | — | 从 TSV 生成 .raw 的脚本 (Linux 用) |
+| `arm-trusted-firmware/` | — | TF-A 固件 (fsbl) |
+| `fip/` | — | FIP 固件 (U-Boot + OP-TEE) |
+| `kernel/` | — | Linux kernel |
+| `u-boot/` | — | U-Boot bootloader |
 
 **建议使用 SD 卡烧录方式** — 保留当前 Debian eMMC 作为回退。
 
@@ -92,31 +110,288 @@ sudo cp /etc/ssh/ssh_host_* /media/sdcard/backup_ssh/
 
 ---
 
-## 4. 烧录步骤
+## 4. SD 卡烧录详细步骤
 
-### 4.1 方案 A：SD 卡烧录（推荐 — 保留 eMMC Debian）
+### 4.1 准备工作
 
-```bash
-# 1. 在 Windows 上用 Win32 DiskImager 或 balenaEtcher
-#    将 FlashLayout_sdcard_myb-ld25x-8e2d-myir-image-full.raw
-#    写入一张 ≥8GB 的 microSD 卡
+#### 硬件清单
 
-# 2. 将 SD 卡插入开发板 SD 卡槽
+| 物品 | 要求 | 说明 |
+|------|------|------|
+| **microSD 卡** | **≥ 8 GB**, Class 10 / U1 或更高 | 镜像文件 5.7 GB，建议用 **16GB** 以上留余量 |
+| **USB 读卡器** | 支持 microSD | PC 上写卡用 |
+| **MYD-LD25X 开发板** | 断电状态 | 烧录时不要插 SD 卡 |
+| **5V DC 电源适配器** | 开发板供电 | 烧录完成后上电启动 |
 
-# 3. 设置拨码开关从 SD 卡启动
-#    (参考 MYD-LD25X Quick Start Guide)
+#### 软件准备
+
+选择以下任一工具（Windows）：
+
+| 工具 | 推荐度 | 下载 | 说明 |
+|------|:---:|------|------|
+| **balenaEtcher** | ⭐⭐⭐ | https://www.balena.io/etcher/ | 开源、UI 简洁、自动校验 |
+| **Win32 Disk Imager** | ⭐⭐ | https://sourceforge.net/projects/win32diskimager/ | 经典工具 |
+| **Rufus** | ⭐⭐ | https://rufus.ie/ | 更灵活，但需选 "DD 镜像" 模式 |
+
+> Linux 用户可直接用 `dd`，见 [§4.3](#43-linux--wsl-用户-dd-方式)。
+
+#### 镜像文件位置
+
+```
+E:\files\嵌赛\stm32mp257\02-Images\8E2D\FlashLayout_sdcard_myb-ld25x-8e2d-myir-image-burn\
+  └── FlashLayout_sdcard_myb-ld25x-8e2d-myir-image-burn.raw  (5.7 GB)
 ```
 
-### 4.2 方案 B：直接烧录 eMMC（无回退）
+---
+
+### 4.2 方案 A：SD 卡烧录（推荐 ⭐ — 保留 eMMC Debian 作为回退）
+
+这是最安全的方式。OpenSTLinux 烧在 SD 卡上，**不碰 eMMC 中的 Debian 系统**。
+如果 SD 卡启动失败或 NPU 不工作，拔卡即可回到 Debian。
+
+#### Step 1: 写入镜像到 SD 卡
+
+**使用 balenaEtcher（推荐）：**
+
+```
+1. 打开 balenaEtcher
+2. 点击 "Flash from file" → 选择：
+   E:\files\嵌赛\stm32mp257\02-Images\8E2D\FlashLayout_sdcard_myb-ld25x-8e2d-myir-image-burn\
+     FlashLayout_sdcard_myb-ld25x-8e2d-myir-image-burn.raw
+
+3. 点击 "Select target" → 选择你的 SD 卡（注意：不要选错盘符！）
+4. 点击 "Flash!" → 等待写入完成（约 10-20 分钟，取决于读卡器速度）
+5. 等待 "Flash Complete!" 提示，balenaEtcher 会自动校验
+```
+
+**使用 Win32 Disk Imager：**
+
+```
+1. 打开 Win32DiskImager（以管理员身份运行）
+2. Image File: 选择 .raw 文件（文件类型过滤选 *.* 才能看到 .raw）
+3. Device: 选择 SD 卡盘符（如 E:\, F:\）
+4. 点击 "Write"
+5. 等待写入完成，点击 "Exit"
+```
+
+> ⚠️ **写入前确认**：选中的设备是 SD 卡，不是你的硬盘/U盘！写错设备会导致数据永久丢失。
+>
+> 如果不确定盘符，打开 Windows 磁盘管理（`diskmgmt.msc`），根据磁盘大小（~8GB/16GB/32GB）确认哪个是 SD 卡。
+
+#### Step 2: 设置开发板从 SD 卡启动
+
+MYD-LD25X 通过 **BOOT 拨码开关** 选择启动介质。
+
+**MYD-LD25X 拨码开关设置（SD 卡启动）：**
+
+```
+           BOOT1    BOOT2
+           ┌───┐    ┌───┐
+           │ ON│    │OFF│
+           │   │    │   │
+           └───┘    └───┘
+           ┌───┐    ┌───┐
+           │OFF│    │OFF│
+           └───┘    └───┘
+```
+
+> ⚠️ **拨码开关具体位置和编号可能因硬件版本而异，请以 MYD-LD25X Quick Start Guide 或开发板丝印为准。**
+>
+> 通常规律：
+> - **eMMC 启动**（当前 Debian）：BOOT1=OFF, BOOT2=ON
+> - **SD 卡启动**（OpenSTLinux）：BOOT1=ON, BOOT2=OFF
+> - **USB/UART 烧录模式**：BOOT1=OFF, BOOT2=OFF
+
+**操作步骤：**
+
+```
+1. 断开开发板电源（拔掉 DC 电源线）
+2. 将写好的 microSD 卡插入开发板 SD 卡槽（J4 或标记为 "SD Card" 的槽位）
+3. 调整 BOOT 拨码开关为 SD 卡启动模式
+4. 重新接通电源
+```
+
+#### Step 3: 首次启动观察
+
+**连接调试串口（可选但强烈推荐）：**
+
+MYD-LD25X 通常有 USB-to-UART 调试接口，通过 microUSB 连接到 PC 可观察启动日志：
+
+```
+1. 用 microUSB 线连接开发板 J-Link/调试口 到 PC
+2. Windows 设备管理器查看新增的 COM 端口
+3. 打开串口终端（PuTTY / MobaXterm / Tera Term）：
+   - 波特率: 115200
+   - 数据位: 8
+   - 停止位: 1
+   - 无校验
+   - 无流控
+4. 给开发板上电，观察启动日志
+```
+
+**正常启动过程（约 30-60 秒）：**
+
+```
+1. TF-A (FSBL) 启动        ← "NOTICE:  Model: STMicroelectronics STM32MP257F-EV1..."
+2. OP-TEE 初始化            ← "I/TC: ..."
+3. U-Boot SPL → U-Boot     ← "U-Boot 2024..."
+4. Linux kernel 加载        ← "Starting kernel ..."
+5. 各分区挂载               ← bootfs, vendorfs, rootfs
+6. systemd 服务启动         ← systemd 初始化
+7. Weston (图形) 启动       ← 如果连接了 HDMI 显示器会看到桌面
+8. 登录提示                ← "myd-ld25x login:"
+```
+
+**正常启动的可见信号：**
+
+- 开发板电源 LED 常亮
+- 约 10s 后 U-Boot 启动 LED 闪烁
+- 约 30-60s 后系统就绪
+- HDMI 显示器显示 Weston 桌面（如果接了）
+- 以太网口 LED 闪烁（如果接了网线）
+
+#### Step 4: 首次登录
+
+**方式 1：调试串口（无需网络）**
+
+```
+串口终端中直接看到登录提示：
+myd-ld25x login: root
+（默认无密码，或见 Quick Start Guide）
+```
+
+**方式 2：SSH（需先配网络，见 §5.1）**
+
+```
+ssh root@<board_ip>
+```
+
+**方式 3：HDMI + USB 键鼠**
+
+直接操作本地桌面终端。
+
+---
+
+### 4.3 Linux / WSL 用户：`dd` 方式
+
+如果你有 Linux 环境（或 WSL2 挂载了物理磁盘），可以直接用 `dd`：
 
 ```bash
-# 1. 将 raw 镜像复制到开发板 SD 卡
-# 在 PC 上解压 FlashLayout zip → 复制 .raw 文件到 SD 卡
+# 1. 确认 SD 卡设备名（插入前后对比 lsblk）
+lsblk
+# 假设 SD 卡是 /dev/sdb（根据大小确认，16GB/32GB 的设备）
 
-# 2. 在开发板上通过 U-Boot 或 Linux 烧录
-#    (需参考 MYD-LD25X Linux Software Development Guide)
+# 2. 卸载 SD 卡所有已挂载分区（如有）
+sudo umount /dev/sdb* 2>/dev/null
 
-# 或使用 STM32CubeProgrammer 通过 USB OTG 烧录
+# 3. 写入镜像
+sudo dd if="E:/files/嵌赛/stm32mp257/02-Images/8E2D/FlashLayout_sdcard_myb-ld25x-8e2d-myir-image-burn/FlashLayout_sdcard_myb-ld25x-8e2d-myir-image-burn.raw" \
+        of=/dev/sdb bs=8M conv=fdatasync status=progress
+
+# 注意：of=/dev/sdb（整个磁盘），不是 /dev/sdb1（分区）！
+
+# 4. 同步并校验
+sync
+sudo sgdisk /dev/sdb -v   # 验证 GPT 分区表完整性
+```
+
+> ⚠️ **`of=` 参数必须写对整个磁盘设备（如 /dev/sdb），写错会导致数据永久丢失！**
+>
+> 可以用 `lsblk -o NAME,SIZE,TYPE,MOUNTPOINT` 在插卡前后各执行一次来确认新增的设备名。
+
+---
+
+### 4.4 方案 B：直接烧录 eMMC（无回退，仅高级用户）
+
+此方案把 OpenSTLinux 直接写入 eMMC，**覆盖 Debian 系统**。仅在确定不回头时使用。
+
+#### 方式 1：通过 SD 卡中转（推荐）
+
+```
+1. 先在 SD 卡上启动 OpenSTLinux（方案 A）
+2. 在 OpenSTLinux 系统内，把 .raw 文件复制到 SD 卡或 tmpfs
+3. 用 dd 写入 eMMC：
+   dd if=FlashLayout_*.raw of=/dev/mmcblk1 bs=8M conv=fdatasync status=progress
+   # mmcblk1 是 eMMC, mmcblk0 是 SD 卡
+4. 关机，拔出 SD 卡，切换拨码回 eMMC 启动
+```
+
+#### 方式 2：STM32CubeProgrammer（USB OTG 烧录）
+
+```
+1. 安装 STM32CubeProgrammer (Windows/Linux)
+   https://www.st.com/en/development-tools/stm32cubeprog.html
+
+2. 设置拨码开关为 USB/UART 烧录模式 (BOOT1=OFF, BOOT2=OFF)
+
+3. 用 USB Type-C 线连接开发板 USB OTG 口到 PC
+
+4. 打开 STM32CubeProgrammer，选择：
+   - Port: USB
+   - Flash layout: myir-image-full/flashlayout_myir-image-full/optee/
+                    FlashLayout_sdcard_myb-stm32mp257x-2GB-ca35tdcid-ostl-optee.tsv
+   - 修改 TSV 中的 IP 列为 mmc1（eMMC）或用 emmc 版本的 TSV
+
+5. 点击 "Download" 开始烧录
+```
+
+---
+
+### 4.5 常见问题排查
+
+#### Q1: balenaEtcher 报 "Something went wrong" 写入失败
+
+```
+- 换一个 USB 读卡器（部分廉价读卡器对大文件不稳定）
+- 换一张 SD 卡（卡可能损坏）
+- 尝试 Win32 Disk Imager 或 Rufus
+- Windows 上确保以管理员身份运行
+```
+
+#### Q2: 写入后 SD 卡在 Windows 上显示 "需要格式化"
+
+```
+这是正常现象！SD 卡上写入了 Linux ext4 文件系统，Windows 无法识别。
+点击 "取消"，不要把卡格式化。
+```
+
+#### Q3: 插入 SD 卡后开发板不启动（无任何输出）
+
+```
+- 确认拨码开关设置为 SD 卡启动
+- 确认 SD 卡完全插入卡槽（卡入到位，有 "咔嗒" 声）
+- 检查电源适配器（5V, ≥2A）
+- 连接调试串口观察有无 TF-A/U-Boot 输出
+  如果完全没有输出 → 拨码开关或硬件问题
+  如果有 TF-A 输出但卡住 → 固件不匹配
+```
+
+#### Q4: U-Boot 启动但 Kernel 加载失败
+
+```
+调试串口通常会打印错误原因：
+- "MMC: no card present" → SD 卡未识别，换卡或清洁触点
+- "Bad Linux ARM64 Image magic" → 镜像损坏，重新写入
+- "Unable to mount root fs" → rootfs 分区损坏，重新写入
+```
+
+#### Q5: 启动成功但根文件系统是只读的
+
+```
+# ext4 可能因 unclean unmount 自动进入只读模式
+mount -o remount,rw /
+
+# 如果报 I/O error，SD 卡可能正在损坏
+dmesg | grep -i "mmc\|error"
+```
+
+#### Q6: 烧录后如何回到 Debian？
+
+```
+1. 断开电源
+2. 拔出 SD 卡
+3. 将 BOOT 拨码开关切回 eMMC 启动模式
+4. 上电启动 → 回到原来的 Debian 12 系统
 ```
 
 **推荐方案 A** — 如果 SD 卡启动有问题可以随时拔卡回到 Debian eMMC。

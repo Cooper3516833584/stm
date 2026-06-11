@@ -19,7 +19,7 @@ from loguru import logger
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Road-following dry-run / flight entry")
-    parser.add_argument("--camera-index", type=int, default=7)
+    parser.add_argument("--camera-index", type=int, default=9)
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
     parser.add_argument("--camera-fps", type=int, default=30)
@@ -42,6 +42,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--branch", choices=["auto", "straight", "left", "right"], default="auto")
     parser.add_argument("--branch-preference", choices=["auto", "straight", "left", "right"], default=None)
     parser.add_argument("--branch-policy", choices=["center", "left", "right"], default=None, help="Deprecated alias")
+    parser.add_argument("--wb-enable", action="store_true",
+                        help="Enable software white balance correction for camera color cast")
+    parser.add_argument("--wb-r", type=float, default=2.78,
+                        help="White balance R channel gain (default: 2.78 for cam#9 cyan cast)")
+    parser.add_argument("--wb-g", type=float, default=1.00,
+                        help="White balance G channel gain (default: 1.00)")
+    parser.add_argument("--wb-b", type=float, default=1.26,
+                        help="White balance B channel gain (default: 1.26 for cam#9 cyan cast)")
     parser.add_argument("--debug-dir", default=None)
     parser.add_argument("--debug-every-n", type=int, default=30)
     parser.add_argument("--debug-image-dir", default=None, help="Deprecated alias for --debug-dir")
@@ -81,7 +89,7 @@ def main() -> None:
     _setup_logging(args.log_file)
 
     import road_perception
-    from road_perception import CameraOffsetCompensationConfig
+    from road_perception import CameraOffsetCompensationConfig, CameraWhiteBalanceConfig
     from FlightController.Components import MultiRadar, RadarConfig
     from FlightController.Components.FCConnector import FCConnectConfig, connect_fc
     from FlightController.Solutions.RoadFollower import RoadFollower, RoadFollowerConfig
@@ -152,6 +160,12 @@ def main() -> None:
             max_yaw_rate_deg_s=args.max_yaw_rate_deg_s,
         )
     )
+    wb_config = CameraWhiteBalanceConfig(
+        enabled=bool(args.wb_enable),
+        r_gain=args.wb_r,
+        g_gain=args.wb_g,
+        b_gain=args.wb_b,
+    )
     offset_comp = CameraOffsetCompensationConfig(
         enabled=bool(args.offset_comp_enable or args.enable_offset_comp),
         cam_forward_offset_m=args.cam_forward_offset_m,
@@ -204,6 +218,7 @@ def main() -> None:
                         offset_comp_config=offset_comp,
                         branch_preference=args.branch,
                         previous_branch_label=follower.previous_branch_label(),
+                        wb_config=wb_config,
                     )
                     if not model_missing_logged and "ONNX model not found" in getattr(perception, "debug_msg", ""):
                         logger.warning(f"[ROAD] model missing, perception lost: {args.model}")

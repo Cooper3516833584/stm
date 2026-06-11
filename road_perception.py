@@ -87,6 +87,36 @@ class CameraGeometry:
     img_h: int = 480
 
 
+@dataclass
+class CameraWhiteBalanceConfig:
+    """软件白平衡修正配置。
+
+    BGR 三通道系数，均以 G 通道为基准。
+    例如 cam#9 实测偏青 (R/G=0.36, B/G=0.79)，系数为 R×2.78 B×1.26 G×1.00。
+    """
+
+    enabled: bool = False
+    r_gain: float = 1.0
+    """红色通道增益 (乘性)，>1 增强红光"""
+    g_gain: float = 1.0
+    """绿色通道增益 (乘性)，通常保持 1.0"""
+    b_gain: float = 1.0
+    """蓝色通道增益 (乘性)，<1 减弱蓝光"""
+
+
+def _apply_white_balance(
+    frame: np.ndarray, cfg: CameraWhiteBalanceConfig
+) -> np.ndarray:
+    """对 BGR 帧逐通道应用增益系数。"""
+    if not cfg.enabled:
+        return frame
+    corrected = frame.astype(np.float32, copy=True)
+    corrected[:, :, 0] = np.clip(corrected[:, :, 0] * cfg.b_gain, 0.0, 255.0)
+    corrected[:, :, 1] = np.clip(corrected[:, :, 1] * cfg.g_gain, 0.0, 255.0)
+    corrected[:, :, 2] = np.clip(corrected[:, :, 2] * cfg.r_gain, 0.0, 255.0)
+    return corrected.astype(np.uint8)
+
+
 def compute_meters_per_pixel(
     row_from_bottom: int,
     geom: CameraGeometry | None = None,
@@ -1342,6 +1372,7 @@ def get_road_perception(
     offset_comp_config: CameraOffsetCompensationConfig | None = None,
     branch_preference: str = "auto",
     previous_branch_label: str | None = None,
+    wb_config: CameraWhiteBalanceConfig | None = None,
 ) -> RoadPerceptionResult:
     """Run one-frame visual road perception on an OpenCV BGR frame."""
     frame_error = _validate_frame(frame)
@@ -1349,6 +1380,8 @@ def get_road_perception(
         return _lost_result(frame_error)
 
     frame_bgr = _normalize_frame(frame)
+    if wb_config is not None:
+        frame_bgr = _apply_white_balance(frame_bgr, wb_config)
     debug_mask: np.ndarray | None = None
 
     try:

@@ -52,7 +52,118 @@ VIP9000 不支持（来自 ST 文档 + 实测）：
 
 ---
 
-## 2. 当前模型规格
+## 2. 转换后模型硬性要求（验收 Checklist）
+
+以下所有条目转换后**必须满足**，否则 `road_perception.py` 无法正常工作。
+
+### 2.1 算子兼容性
+
+**转换后模型不能含有**以下 VIP9000 不支持的算子（含这些算子会导致 segfault）：
+
+| 禁止的算子 | YOLO11-seg 用途 | 等效替代方案 |
+|------|------|------|
+| `ConvTranspose` | 分割头 decoder 上采样 | **`Resize` + 标准 `Conv`**：先用 `Resize` 上采样，再标准卷积 |
+| `NonMaxPool` (dilation ≠ 1) | 边界框 NMS-like pooling | **`MaxPool` (dilation=1)** + 等效 padding |
+| `Split` (uneven) | 非均匀通道切分 | 多个等大小的 **`Slice`** 或等效 `Split` (even) |
+
+**验收命令**（在开发板上执行）：
+```bash
+# 模型加载时不应出现 "Fallback unsupported op" 警告或 segfault
+python3 -c "
+import onnxruntime as ort
+m = ort.InferenceSession('road_yolo11n_seg_npu.onnx', providers=['VSINPUExecutionProvider'])
+print('Provider:', m.get_providers()[0])
+print('OK — no crash, no fallback')
+"
+```
+
+### 2.2 输入格式不变
+
+转换后的模型必须接受与原模型完全相同的输入：
+
+| 属性 | 值 | 不可变 |
+|------|-----|:--:|
+| 名称 | `images` | ✅ |
+| shape | `[1, 3, 320, 320]` | ✅ |
+| dtype | `float32` | ✅ |
+| 布局 | NCHW | ✅ |
+| 值域 | `0.0 ~ 1.0`（`_preprocess()` 做 `/255.0` 归一化） | ✅ |
+| 预处理 | `_letterbox()` 等比缩放 + 居中 pad → `_preprocess()` 归一化 + transpose | ✅ |
+
+**验收命令**：
+```bash
+python3 -c "
+import onnxruntime as ort
+m = ort.InferenceSession('road_yolo11n_seg_npu.onnx', providers=['VSINPUExecutionProvider'])
+inp = m.get_inputs()[0]
+assert inp.name == 'images', f'input name mismatch: {inp.name}'
+assert inp.shape == [1, 3, 320, 320], f'input shape mismatch: {inp.shape}'
+print(f'Input OK: {inp.name} {inp.shape} {inp.type}')
+"
+```
+
+### 2.3 输出格式不变
+
+转换后的模型必须保持两份输出，格式与原模型一致。`_decode_yolo_segmentation()` 依赖此结构，格式变了会直接炸：
+
+```
+output[0]: [1, C, N]  检测头 — 每列含义: [cx, cy, w, h, cls_score(1), mask_coeffs(M)]
+output[1]: [1, M, H, W]  分割头 — mask prototypes
+```
+
+其中：
+- `C = 4 + 1 + M`（bbox 位置 + 置信度 + mask 系数）
+- `N` = 检测候选数（动态，取决于输入）
+- `M` = mask prototype 通道数（YOLO11n-seg 为 32）
+- `H × W` = mask prototype 空间尺寸（通常 160×160）
+
+**操作指引**：在 ST Cloud 中必须选择 **"ONNX Runtime (X-LINUX-AI)"** 运行时。不要选 "ST AI Runtime"——后者可能重构输出格式导致解码代码失败。
+
+**验收命令**：
+```bash
+python3 -c "
+import onnxruntime as ort
+m = ort.InferenceSession('road_yolo11n_seg_npu.onnx', providers=['VSINPUExecutionProvider'])
+outs = m.get_outputs()
+assert len(outs) == 2, f'output count mismatch: {len(outs)}'
+o0, o1 = outs[0], outs[1]
+assert len(o0.shape) == 3 and o0.shape[0] == 1, f'output0 shape mismatch: {o0.shape}'
+assert len(o1.shape) == 3 and o1.shape[0] == 1, f'output1 shape mismatch: {o1.shape}'
+print(f'Output0 OK: {o0.name} {o0.shape}')
+print(f'Output1 OK: {o1.name} {o1.shape}')
+"
+```
+
+### 2.4 预处理管线不变
+
+`_preprocess()` 的调用链固定为：
+
+```
+原始 BGR frame (uint8, H×W×3)
+  → _normalize_frame()          确认 uint8 contiguous
+  → _preprocess(frame, 320)
+       → _letterbox()           等比缩放 + pad 到 320×320, 保留 scale/pad 参数
+       → img / 255.0            float32 归一化到 0-1
+       → transpose(2,0,1)       HWC → CHW
+       → expand_dims(0)         → NCHW [1,3,320,320]
+  → session.run(None, {input_name: blob})
+  → _decode_yolo_segmentation()  解码 bbox + mask → 道路中线
+```
+
+不需要预归一化（mean/std）、不需要 BGR→RGB 转换。**如果转换工具提示需要归一化参数，全部设为单位值**（mean=[0,0,0], std=[1,1,1]）。
+
+### 2.5 量化建议
+
+| 参数 | 推荐值 | 说明 |
+|------|------|------|
+| 精度 | 先 **FP32** 验证推理正确，再试 INT8 | FP32 可用于全链路 dry-run |
+| INT8 量化方式 | **per-tensor**（非 per-channel） | 勾选 "Disable per channel quantization" |
+| 校准数据 | 道路场景图片 ≥50 张 | 不提供则用随机数据，量化后实测精度会大幅下降 |
+| 校准图片是否需要标签 | **存疑，待验证** | 待确认 ST Cloud 是否需要标注后的图片，或仅需原始帧 |
+
+---
+
+## 3. 当前模型规格（转换前）
 
 | 属性 | 值 |
 |------|-----|
@@ -68,9 +179,9 @@ VIP9000 不支持（来自 ST 文档 + 实测）：
 
 ---
 
-## 3. 转换方案
+## 4. 转换方案
 
-### 3.1 ST Edge AI Developer Cloud（推荐 ⭐）
+### 4.1 ST Edge AI Developer Cloud（推荐 ⭐）
 
 ST 官方云端工具，自动分析和修复 NPU 兼容性问题并生成硬件可执行文件。
 
@@ -93,13 +204,17 @@ ST 官方云端工具，自动分析和修复 NPU 兼容性问题并生成硬件
 1. 页面将自动引导至 **Model quantization** 面板。
 2. **配置量化参数**：勾选 **"Disable per channel quantization"** 下方的复选框（禁用逐通道量化，采用 per-tensor 量化以获得更适合 VIP9000 NPU 的加速性能）。
 3. **准备校准数据集**：
-   - 必须使用包含了代表性道路场景原始图片的 `.npz` (NumPy 压缩包) 文件。若不提供，系统将使用随机数据校准，这会导致量化后的模型在实际运行时精度大幅下降。
+   - 必须使用包含了代表性道路场景图片的 `.npz` (NumPy 压缩包) 文件。若不提供，系统将使用随机数据校准，这会导致量化后的模型在实际运行时精度大幅下降。
+   - **校准图片是否需要标签暂存疑**——待实际使用 ST Cloud 后确认。
    - 在 **"Load file (.npz)"** 处点击回形针图标，上传按照说明打包好的 `calibration_data.npz` 文件。
 4. 点击右下角的 **"Launch quantization"** 启动量化。
 
 #### Step 4: 分析兼容性与优化替换 (Optimize)
 1. 量化完成后进入 **Optimize** 阶段，工具链会执行专门针对 STM32 MPUs 的优化器，将不支持的算子（如 `ConvTranspose`、带 Dilation 的 `NonMaxPool`）自动尝试替换为等效的兼容算子组（例如将 `ConvTranspose` 转换为 `Resize + Conv`），并生成专用于 STM32MP2x 硬件加速的网络二进制图（.nb）。
-2. 查看分析报告，确认不兼容算子已被成功修复。
+2. 对照 **[§2 验收 Checklist](#2-转换后模型硬性要求验收-checklist)** 逐项检查分析报告，确认：
+   - 不兼容算子已被成功替换
+   - 输入 shape/dtype 不变
+   - 输出数量、shape、顺序不变
 
 #### Step 5: 性能评估与导出 (Benchmark & Generate)
 1. 在 **Benchmark** 步骤中，选择量化优化后的网络模型，在 ST 托管的云端开发板集群上远程运行基准测试，获取准确的推理时间和内存占用。
@@ -108,7 +223,7 @@ ST 官方云端工具，自动分析和修复 NPU 兼容性问题并生成硬件
 
 ---
 
-### 3.2 Ultralytics 导出兼容 ONNX（备选）
+### 4.2 Ultralytics 导出兼容 ONNX（备选）
 
 如果 ST Cloud 无法自动修复，在 PC 上用 Ultralytics 重新导出，排除不兼容算子：
 
@@ -138,24 +253,11 @@ model.export(
 "
 ```
 
-导出后再回到 ST Cloud 做分析和 INT8 量化。
+导出后再回到 ST Cloud 做分析和 INT8 量化。转换后仍需对照 **[§2 验收 Checklist](#2-转换后模型硬性要求验收-checklist)** 逐项验证。
 
 ---
 
-### 3.3 关键约束：输出格式不变
-
-转换后的模型**必须**保持与原模型相同的输出格式，否则 `_decode_yolo_segmentation()` 会失败：
-
-```
-output[0]: [1, C, N]  — 检测头 (bbox + cls + mask_coeffs)
-output[1]: [1, M, H, W] — mask prototypes
-```
-
-如果转换后输出格式变了（如 ST Cloud 的 "ST AI Runtime" 模式可能重构输出），需要对应修改 `_decode_yolo_segmentation()`，或者在 ST Cloud 中选择 **"ONNX Runtime (X-LINUX-AI)"** 运行时保持标准 ONNX 输出。
-
----
-
-## 4. 代码侧修改
+## 5. 代码侧修改
 
 ### 4.1 模型路径配置
 
@@ -187,11 +289,11 @@ parser.add_argument("--model-npu", default=MODEL_PATH_NPU,
 
 ---
 
-## 5. 校准数据集准备（INT8 量化用）
+## 6. 校准数据集准备（INT8 量化用）
 
 INT8 量化需要 50-200 张代表性输入图片。从道路场景采集：
 
-### 5.1 采集方式
+### 6.1 采集方式
 
 在开发板上用摄像头拍一批道路图片：
 
@@ -217,13 +319,13 @@ cap.release()
 
 然后把 `/usr/local/calibration_images/` 下载到 PC，上传到 ST Cloud 作为校准数据集。
 
-### 5.2 备选：用 benchmark 脚本的 camera 帧
+### 6.2 备选：用 benchmark 脚本的 camera 帧
 
 如果摄像头已就绪，`bench_vision_fps.py` 已经能读取摄像头帧，稍加修改即可保存。
 
 ---
 
-## 6. 验证序列
+## 7. 验证序列
 
 转换完成后，在开发板上逐级验证：
 
@@ -280,7 +382,7 @@ PYTHONPATH=. python road_follow_main.py --no-fc --dry-run --loop-hz 10 --camera-
 
 ---
 
-## 7. 回退方案
+## 8. 回退方案
 
 如果 ST Cloud 转换仍无法让 NPU 支持 YOLO11-seg：
 
@@ -292,7 +394,7 @@ PYTHONPATH=. python road_follow_main.py --no-fc --dry-run --loop-hz 10 --camera-
 
 ---
 
-## 8. 时间线预估
+## 9. 时间线预估
 
 | 阶段 | 耗时 | 说明 |
 |------|:--:|------|

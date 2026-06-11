@@ -1,8 +1,8 @@
 # 🚁 Cooper_drone 伴随计算机系统配置与开发进度纪要
 
 **项目名称**: Cooper_drone (基于 MYiR 开发板的无人机机载/伴随计算机开发)
-**当前阶段**: M6 阶段 — 视觉管线就绪 + NPU 适配诊断完成 + OS 迁移准备中 (计划切换至 OpenSTLinux v6.2)
-**最后更新**: 2026年6月7日 (N5 回话: NPU适配, 摄像头几何标定, 视觉FPS基准, 偏移补偿联通, 默认参数审计, OS迁移决策. 旧: 2026-05-17 双摄像头接入验证，路径识别 cam#7 + 障碍物识别 cam#9，前视有间歇性偏蓝/偏青)
+**当前阶段**: M7 阶段 — OS 迁移完成 (OpenSTLinux v6.0) + 全子系统验证通过 + NPU 等待模型转换
+**最后更新**: 2026年6月11日 (M7 回话: OS迁移完成, 双雷达/飞控/摄像头全链路验证, 白平衡修正, NPU模型转换方案. 旧: 2026-06-07 NPU适配诊断, 摄像头几何标定, OS迁移决策)
 
 ---
 
@@ -10,22 +10,21 @@
 本项目旨在配置和开发一套适配于无人机的机载计算机系统，负责上层逻辑处理、激光雷达避障算法以及与底层匿名飞控（灵霄）的二进制串口协议通信（非 MAVLink）。
 
 * **核心板**: MYiR MYD-LD25X (STM32MP257, Cortex-A35 双核架构)。
-* **操作系统**: Debian 12 (Bookworm) aarch64, Linux 内核 (CONFIG_HZ=100)。
+* **操作系统**: ~~Debian 12 (Bookworm)~~ → **OpenSTLinux v6.0** (Yocto Scarthgap) aarch64, Linux 内核 6.6.48, gcnano 6.4.19.4。
 * **飞控通信**: 匿名飞控（灵霄）二进制协议，UART 串口 500000 baud。协议栈位于 `FlightController/Base.py` → `Protocal.py` → `Application.py`。
-* **存储与内存极限管控 (Survival Mode)**:
-  * 板载 RAM 仅 **2GB**，严禁将日志或大文件写入 `/tmp`（tmpfs 占用 RAM），否则触发 OOM 系统卡死。
-  * 已彻底斩杀图形桌面系统，进入纯 Headless (无头) 命令行模式以释放极其有限的 RAM。
-  * 物理抹除 1GB Swap 分区，清空 APT 缓存，为 eMMC 腾出极限空间保障大型 C++ 库的安装。
-  * 代码仓库已迁移至 30G 外置闪存卡（vfat, `/media/sdcard`），eMMC 仅保留系统与虚拟环境，详见 [§7.2](#72-%E2%9A%A0%EF%B8%8F-emmc-存储空间危机-critical)。
-  * 强制切断 Wi-Fi 休眠机制 (`wifi.powersave = 2`)，配合物理冷启动，防止 SDIO 总线假死。
+* **存储与内存**:
+  * 板载 RAM **2GB**，严禁将日志或大文件写入 `/tmp`（tmpfs 占用 RAM），否则触发 OOM 系统卡死。
+  * SD 卡 (30G) 现为系统盘 (rootfs + userfs)，eMMC (7.3G) 已同步烧录可独立启动。
+  * 代码仓库位于 `/usr/local/ObstacleAvoidanceDrone` (userfs 分区, 1.3G)，虚拟环境位于 `/usr/local/UFC_venv`。
+  * WiFi 已配置开机自启 (`wpa_supplicant@wlan0.service`)，IP 固定 192.168.31.199。
 
 ## 2. 混合架构 Python 隔离舱 (UFC_venv) 状态
 为了在羸弱的 ARM64 算力下规避现场编译导致的 OOM (内存爆满) 宕机，本项目采用**"APT底层预编译 + PIP上层轻量包"的半透膜沙盒架构**。
 
-* **隔离舱机制**: 使用 `virtualenv --system-site-packages ~/UFC_venv` 建立，允许虚拟环境向下继承操作系统的底层 C++ 依赖。
+* **隔离舱机制**: 使用 `virtualenv --system-site-packages /usr/local/UFC_venv` 建立，允许虚拟环境向下继承操作系统的底层 C++ 依赖。所有终端自动激活 (`.bashrc` + `.bash_profile`)。
 * **已就绪的核心生态 (100% 探活通过)**:
-  * **[APT 注入层]** `scipy` (1.17.1), `matplotlib` (3.6.3), `opencv-python-headless` (4.13.0) - *注：必须为 Headless 无头版本以防 cv2.imshow 崩溃*。
-  * **[PIP 注入层]** `numpy` (1.26.4), `loguru` (0.7.3), `pyserial` (3.5), `simple-pid` (2.0.1), `onnxruntime` (1.25.1 纯 CPU 推理模式)。
+  * **[APT 注入层]** `numpy` (1.26.4), `opencv` (4.9.0), `matplotlib` (3.7.2), `onnxruntime` (1.19.2 含 VSINPUExecutionProvider)
+  * **[PIP 注入层]** `scipy` (1.17.1), `loguru` (0.7.3), `pyserial` (3.5), `simple-pid` (2.0.1), `attrs` (26.1.0)
 
 ## 3. 史诗级避坑指南 (Troubleshooting Archive)
 1. **GitHub SNI 阻断与 SSH 降维打击**: 强制将 Git 全局配置由 `https://` 篡改为 `git@github.com:`，穿透 GnuTLS -110 超时阻断。
@@ -64,14 +63,16 @@
 
 两个 USB 摄像头通过 USB Host 接入，OpenCV V4L2 读取，均 640×480 分辨率。
 
-| 项目 | 路径识别摄像头 | 障碍物识别摄像头 |
+| 项目 | 路径识别摄像头 (上/道路) | 障碍物识别摄像头 (下/障碍物) |
 |------|--------------|-----------------|
-| 设备路径 | `/dev/video7` | `/dev/video9` |
+| 设备路径 | `/dev/video9` | `/dev/video7` |
 | USB 位置 | `usb-1.1` | `usb-1.2.3` |
-| cv2 index | 7 | 9 |
+| cv2 index | **9** (OpenSTLinux) / 7 (Debian) | **7** (OpenSTLinux) / 9 (Debian) |
 | 型号 | `USB 2.0 Camera` | `USB Camera` |
 
-**已知问题**: 路径识别摄像头 (cam#7) 存在间歇性偏蓝/偏青色彩问题，可能由自动白平衡不稳定引起。已决定假定其大部分时间正常，后续通过 `cv2.xphoto.createSimpleWB()` 或手动白平衡系数修正。诊断工具: `FlightController/tools/diagnose_camera_color.py --index 7`。
+> ⚠️ **摄像头 index 在 OpenSTLinux 上互换了**。Debian 12 上道路摄像头为 cam#7，OpenSTLinux 上为 cam#9。`road_follow_main.py` 默认值已改为 9。
+
+**已知问题**: 路径识别摄像头 (cam#9) 存在偏青色彩问题 (R/G=0.36, B/G=0.79)，V4L2 手动白平衡控制力有限。已实现软件白平衡修正 (`road_perception.py` `_apply_white_balance()`)，默认系数 R×2.78 / G×1.00 / B×1.26，通过 `road_follow_main.py --wb-enable` 启用。
 
 ## 5. M3 阶段：雷达点火与离线算法验证 (Milestone Reached)
 底层物理链路与上层 SLAM 算法已成功打通，完成两级探活：
@@ -677,3 +678,63 @@ strings /usr/lib/libonnxruntime.so.1.19.2 | grep -i vsinpu
 **原因**: ST NPU 软件栈深度绑定 OpenSTLinux BSP。Debian 12 (glibc 2.36) 与 ST 目标 (glibc 2.39) 不兼容。
 
 **迁移方案**: 详见 `OS_MIGRATION_PLAN.md` — SD 卡烧录, Python 3.12 venv 重建, NPU->雷达->FC->摄像头 全链路验证, ~4h, Debian eMMC 保留为回退。
+
+---
+
+## 11. M7 阶段：OS 迁移 & 全子系统验证 (2026-06-11)
+
+### 11.1 迁移执行摘要
+
+**实际安装**: OpenSTLinux **v6.0** (Yocto Scarthgap)，v6.2 镜像未找到。使用 `myir-image-full` 预构建 `.raw` 镜像 (5.7GB) 通过 balenaEtcher 写入 SD 卡，首次启动自动同步至 eMMC。
+
+| 对比维度 | Debian 12 (旧) | OpenSTLinux v6.0 (新) |
+|------|------|------|
+| Kernel | 6.1.x (CONFIG_HZ=100) | 6.6.48 |
+| glibc | 2.36 | 2.39 |
+| gcnano driver | 6.4.15.6 (手工安装) | **6.4.19.4** (预装) |
+| Python | 3.11 | 3.12 |
+| onnxruntime | 1.25.1 (CPU) | 1.19.2 (NPU) |
+| 串口设备映射 | `/dev/ttySTM4`, `/dev/ttySTM9` | 完全一致 ✅ |
+| 飞控 | `/dev/ttyACM0` | `/dev/ttyACM0` ✅ |
+| 摄像头 | cam#7(道路), cam#9(障碍) | **cam#9(道路), cam#7(障碍)** ⚠️ 互换 |
+
+### 11.2 NPU 状态
+
+| 组件 | 状态 | 详情 |
+|------|:--:|------|
+| `/dev/galcore` | ✅ | VIP9000, model=0x8000, 800MHz |
+| gcnano-userland (6.4.19) | ✅ | APT 预装 |
+| libopenvx-gcnano + libovxkernels | ✅ | APT 预装 |
+| onnxruntime 1.19.2 + VSINPU EP | ✅ | APT 安装 (AINPU 6.0 仓库) |
+| `_select_providers()` 大小写修复 | ✅ | `VsiNpu` → `VSINPU` |
+| **YOLO11n-seg NPU 推理** | 🔴 | VSINPU EP 注册成功 (348/353 nodes)，但 `ConvTranspose` 回退 CPU 时 segfault |
+| **解决方案** | 🔄 | ST Edge AI Cloud 模型转换 — 详见 `NPU_MODEL_CONVERSION_PLAN.md` |
+
+### 11.3 全子系统验证结果
+
+| 子系统 | 工具 | 结果 |
+|------|------|:--:|
+| 双雷达 (上+下) | `smoke_dual_radar.py` | ✅ 2150点, 零CRC |
+| 飞控 Phase A (连通性) | `test_fc_connect.py` | ✅ 16字段正常, bat=0V(USB供电) |
+| 飞控 Phase B (模式切换) | `test_fc_command.py --target-mode 2` | ✅ mode=1→2 ACK |
+| 摄像头探活 | OpenCV V4L2 | ✅ cam7/cam9 640×480 OK |
+| 白平衡修正 | `road_follow_main.py --wb-enable` | ✅ 已编码, 待道路场景验证 |
+
+### 11.4 代码更新 (2026-06-11)
+
+| 文件 | 改动 |
+|------|------|
+| `road_perception.py` | `_select_providers()` 大小写修正 `VsiNpu`→`VSINPU`; 新增 `CameraWhiteBalanceConfig` + `_apply_white_balance()` |
+| `road_follow_main.py` | `--camera-index` 默认值 7→9; 新增 `--wb-enable/--wb-r/--wb-g/--wb-b` 参数; 注入 `wb_config` |
+| `OS_MIGRATION_PLAN.md` | 补充 SD 卡烧录详细步骤 (§4)、硬件清单、balenaEtcher 教程、常见问题排查 |
+| `NPU_MODEL_CONVERSION_PLAN.md` | 新增 — ST Edge AI Cloud 转换方案 + 验收 Checklist |
+
+### 11.5 待办
+
+| 项目 | 优先级 | 说明 |
+|------|:---:|------|
+| ST Edge AI Cloud 模型转换 | 🔴 | 将 YOLO11n-seg 转为 NPU 兼容 ONNX |
+| 道路场景实测 | 🟡 | 白平衡效果 + 视觉推理正确性 |
+| 校准图片采集 | 🟡 | 用于 INT8 量化 (需道路场景) |
+| Weston 桌面管理 | 🟢 | 当前未关闭, ~100MB RAM; 可 `systemctl disable weston` |
+| eMMC 空间利用 | 🟢 | 7.3G eMMC 空闲, 可作备份/数据盘 |

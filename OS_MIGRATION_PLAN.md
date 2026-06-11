@@ -1,8 +1,14 @@
-# 操作系统迁移方案：Debian 12 → OpenSTLinux v6.2
+# 操作系统迁移方案：Debian 12 → OpenSTLinux v6.0 ✅ 已完成
 
-**日期**: 2026-06-07  
-**决策**: 将 MYD-LD25X 操作系统从 Debian 12 Bookworm 切换至 OpenSTLinux v6.2 (Yocto Scarthgap)，以获得 NPU 硬件加速支持
-**预计耗时**: 4-6 小时（含烧录 + 环境重建 + 全链路验证）
+**日期**: 2026-06-07 (计划) / 2026-06-11 (执行完成)
+**实际执行**: 迁移至 OpenSTLinux **v6.0** (Yocto Scarthgap)，v6.2 镜像未找到，但 v6.0 已含完整 NPU 驱动栈。
+**结果**: 系统烧录成功，WiFi/SSH/双雷达/飞控/摄像头全部验证通过。NPU 驱动就绪但 YOLO11n-seg 需模型转换。
+**耗时**: ~6h（含烧录 + NPU 诊断 + 全链路验证 + 白平衡修正）
+**关键偏差**: 
+- 实际安装 v6.0 (非 v6.2)，gcnano 6.4.19 而非 6.4.21
+- `myir-image-full` 镜像首次启动自动烧录 eMMC（Debian 系统被覆盖）
+- 摄像头 index 互换 (cam 9↔7)
+- VSINPU EP 就绪但 YOLO11-seg 因算子不兼容 sigfault，需 ST Cloud 转换
 
 ---
 

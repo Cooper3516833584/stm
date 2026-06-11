@@ -157,25 +157,29 @@ VCC (5V)            →    Pin 4  (5V)
 
 ```
 开发板 USB Host
-  ├── 1-1.1    → /dev/video7, /dev/video8    (路径识别摄像头)
-  └── 1-1.2.3  → /dev/video9, /dev/video10   (障碍物识别摄像头)
+  ├── 1-1.1    → /dev/video7, /dev/video8    (障碍物识别摄像头)
+  └── 1-1.2.3  → /dev/video9, /dev/video10   (路径识别摄像头)
 ```
 
 各摄像头对应两个 `/dev/videoN` 节点：主节点为图像流，次节点通常为元数据（忽略）。
 
+> ⚠️ **摄像头 index 在 OpenSTLinux 上与 Debian 12 互换了**。USB 枚举顺序因内核版本差异导致。`road_follow_main.py` 默认值已改为 `--camera-index 9`。
+
 ### 5.2 设备映射
 
-| 项目 | 路径识别摄像头 | 障碍物识别摄像头 |
+| 项目 | 路径识别摄像头 (上/前视) | 障碍物识别摄像头 (下/前下视) |
 |------|-----------|-----------|
-| 设备路径 | `/dev/video7` | `/dev/video9` |
+| 设备路径 | `/dev/video9` | `/dev/video7` |
 | USB 物理位置 | `usb-1.1` | `usb-1.2.3` |
 | 型号标识 | `USB 2.0 Camera: USB Camera` | `USB Camera: USB Camera` |
 | 分辨率 | 640×480 | 640×480 |
 | 驱动 | V4L2 (cv2.CAP_V4L2) | V4L2 (cv2.CAP_V4L2) |
-| cv2 index | 7 | 9 |
+| cv2 index (OpenSTLinux) | **9** | **7** |
+| cv2 index (Debian 旧) | 7 | 9 |
 | **功能用途** | **道路路径识别** | **障碍物类型识别** |
-| **色彩问题** | 间歇性偏蓝/偏青 | 未测试 |
-| **色彩诊断工具** | `FlightController/tools/diagnose_camera_color.py --index 7` | — |
+| **色彩问题** | 偏青 (R/G=0.36, B/G=0.79) | 正常 |
+| **白平衡** | 软件修正: `--wb-enable --wb-r 2.78 --wb-g 1.0 --wb-b 1.26` | 不需要 |
+| **色彩诊断工具** | `FlightController/tools/diagnose_camera_color.py --index 9` | — |
 
 ### 5.3 验证命令
 

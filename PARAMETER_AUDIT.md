@@ -3,7 +3,7 @@
 **项目**: Cooper_drone  
 **审计日期**: 2026-06-07  
 **范围**: 全部 .py 文件 (~55 个)，对照 `HARDWARE_INTERFACE.md` / `PROJECT_STATUS.md` / `IMPLEMENTATION_PLAN.md` / `FC_INTEGRATION_TEST_PLAN.md`  
-**最新进展**: 所有 4 个占位值已修复; NPU 适配因 Debian/OpenSTLinux 不兼容，决策切换 OS
+**最新进展**: OS 迁移至 OpenSTLinux v6.0 完成 (2026-06-11); NPU 驱动就绪但模型需转换; 摄像头 index 互换已修正; 白平衡系数已编码
 
 ---
 
@@ -43,17 +43,17 @@ class ObstacleClassifierConfig:
 
 ---
 
-### 2.2 `road_follow_main.py:22` — 摄像头 index 默认值错误 ✅ 已修复
+### 2.2 `road_follow_main.py:22` — 摄像头 index 默认值 ✅ 已修复 (2026-06-11 再次修正)
 
 **文件**: [road_follow_main.py:22](road_follow_main.py#L22)
 
 ```python
-parser.add_argument("--camera-index", type=int, default=7)  # 原 default=0
+parser.add_argument("--camera-index", type=int, default=9)  # OpenSTLinux: 原 Debian=7
 ```
 
-**实际硬件**: 路径识别摄像头 = `/dev/video7` (cv2 index 7)，障碍物摄像头 = `/dev/video9` (cv2 index 9)。
+**OpenSTLinux 实际硬件**: 路径识别摄像头 = `/dev/video9` (cv2 index 9)，障碍物摄像头 = `/dev/video7` (cv2 index 7)。USB 枚举顺序与 Debian 12 互换。
 
-**处理**: 已将默认值从 `0` 改为 `7`。
+**处理**: 默认值从 `7` 改为 `9`。
 
 ---
 

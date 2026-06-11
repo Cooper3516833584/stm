@@ -2,8 +2,8 @@
 
 **基于**: Codex 实现方案包 (00/02/05/06 号文档) + 当前仓库状态  
 **硬件**: MYD-LD25X (STM32MP257) + 凌霄飞控 + 双 D500 雷达 + USB 摄像头  
-**最后更新**: 2026-06-07 (新增 NPU 适配 & OS 迁移决策)
-**平台变更**: 计划从 Debian 12 迁移至 OpenSTLinux v6.2 以获得 NPU 硬件加速
+**最后更新**: 2026-06-11 (OS 迁移完成; 更新 NPU 状态、摄像头 index)
+**平台变更**: ~~计划~~从 Debian 12 迁移至 OpenSTLinux **v6.0** — 已完成
 
 ---
 
@@ -27,13 +27,13 @@
 ### 硬件拓扑
 
 ```
-MYD-LD25X (STM32MP257, Debian 12 aarch64)
+MYD-LD25X (STM32MP257, OpenSTLinux v6.0 aarch64)
   ├── UART4  (/dev/ttySTM4,  230400)  → 上雷达 D500 (正装)
   ├── UART9  (/dev/ttySTM9,  230400)  → 下雷达 D500 (倒装, Y镜像)
   ├── USB/ACM  (/dev/ttyACM0, 500000) → 凌霄飞控 (二进制协议)
-  ├── /dev/video7 (USB 摄像头, 640×480) → 道路路径识别 (间歇性偏蓝/偏青)
-  ├── /dev/video9 (USB 摄像头, 640×480) → 障碍物类型识别
-  └── eMMC 6.9G (仅剩 930M) + 闪存卡 30G (代码+日志)
+  ├── /dev/video9 (USB 摄像头, 640×480) → 道路路径识别 (偏青, 已加软件白平衡)
+  ├── /dev/video7 (USB 摄像头, 640×480) → 障碍物类型识别
+  └── 存储: SD 卡 30G (系统盘) + eMMC 7.3G (备用系统盘)
 ```
 
 ---
@@ -268,11 +268,12 @@ GoalNavMission.update(world)
 | 世界模型 (local_world_model) | ✅ | 距离过滤 + 机身屏蔽 + 走廊/扇区查询 |
 | YOLO 道路感知 (road_perception) | ✅ | ONNX 推理, mask 生成, 中线提取, pixel_error, angle。**NPU 加速待 OS 迁移后验证** |
 | **平台** | | |
-| 当前 OS | ✅ | Debian 12 Bookworm, aarch64, glibc 2.36 |
-| NPU 硬件 | ✅ | `/dev/galcore` 已加载, galcore 6.4.15.6 |
-| NPU 用户态库 | ✅ | libGAL, libVSC, libOpenCL_VSI 等 12 个已安装 |
-| NPU ONNX Runtime | ❌ | ST 的 `onnxruntime` NPU 变体依赖 OpenSTLinux BSP, 无法在 Debian 12 上运行 |
-| **迁移计划** | 🔴 | **切换至 OpenSTLinux v6.2** — 详见 `OS_MIGRATION_PLAN.md` |
+| 当前 OS | ✅ | OpenSTLinux v6.0 (Yocto Scarthgap), aarch64, glibc 2.39 |
+| NPU 硬件 | ✅ | `/dev/galcore` 已加载, galcore 6.4.19.4 |
+| NPU 用户态库 | ✅ | gcnano-userland 6.4.19, libopenvx-gcnano, libovxkernels-gcnano (APT 预装) |
+| NPU ONNX Runtime | ✅ | onnxruntime 1.19.2 + VSINPUExecutionProvider (APT 预装) |
+| NPU 模型 | 🔴 | YOLO11n-seg 含不兼容算子 (`ConvTranspose`), 需 ST Cloud 转换 — 详见 `NPU_MODEL_CONVERSION_PLAN.md` |
+| **迁移状态** | ✅ | **OpenSTLinux v6.0 已部署** — SD+eMMC 双系统, 详见 `OS_MIGRATION_PLAN.md` |
 | **规划层** | | |
 | 反应式避障 (LocalPlanner) | ✅ | 三段式: stop/slow/cruise, 去抖 3 帧 |
 | 候选方向搜索 (DirectionPlanner) | ✅ | -90°~+90°, 10°步长, 扇区间隙评估 |
@@ -283,9 +284,9 @@ GoalNavMission.update(world)
 | **公共层** | | |
 | 统一速度指令 (autonomy_command) | ✅ | `VelocityCommand`, clamp, as_fc_tuple |
 | 传感器上下文 (autonomy_context) | ✅ | `SensorHealth`, `FlightStatus`, `Obstacle`, `AutonomyContext` |
-| USB 摄像头探活 | ✅ | 双摄像头 `/dev/video7` (路径) + `/dev/video9` (障碍物), 均 640×480 |
+| USB 摄像头探活 | ✅ | 双摄像头 `/dev/video9` (路径) + `/dev/video7` (障碍物), 均 640×480; **index 在 OpenSTLinux 上互换** |
 | 硬件适配 (autonomy_hardware) | ✅ | `build_dual_radar`, `connect_fc`, `open_camera` |
-| 摄像头色彩诊断工具 | ✅ | `tools/diagnose_camera_color.py`, cam#7 间歇偏蓝/偏青 |
+| 摄像头色彩诊断/修正 | ✅ | `tools/diagnose_camera_color.py`, cam#9 偏青 R/G=0.36, 已加软件白平衡 (`--wb-enable`) |
 | **入口程序** | | |
 | 道路循线入口 (road_follow_main) | ✅ | 双雷达+摄像头+FC 主循环, 20Hz |
 | 目标导航入口 (goal_nav_main) | ✅ | 双雷达+FC 主循环, 20Hz |
@@ -330,8 +331,8 @@ GoalNavMission.update(world)
 | 10 | **分阶段联调验收** (07) | 🟢 低 | 文档 |
 | 11 | **障碍物类型识别** | 🔴 高 | ~100行 |
 | | 原 `obstacle_classifier.py` 为空桩已删除，需重新实现: 欧氏聚类→按 size/shape 分类 wall/pole/block，并接入 `local_world_model` | |
-| 12 | **操作系统迁移: Debian 12 → OpenSTLinux v6.2** | 🔴 高 | ~4h |
-| | 详见 `OS_MIGRATION_PLAN.md` — 烧录镜像 → 重建 Python 环境 → NPU 验证 → 雷达/FC/摄像头全链路验证 | |
+| 12 | **操作系统迁移: Debian 12 → OpenSTLinux v6.0** | ✅ | **已完成** (2026-06-11). 详见 `OS_MIGRATION_PLAN.md` |
+| 13 | **NPU 模型转换 (YOLO11-seg → VIP9000)** | 🔴 高 | ~1h. 详见 `NPU_MODEL_CONVERSION_PLAN.md` — ST Edge AI Cloud 转换 |
 
 ---
 
@@ -339,8 +340,9 @@ GoalNavMission.update(world)
 
 | 风险 | 严重度 | 说明 |
 |------|:---:|------|
-| **ONNX 模型文件缺失** | 🔴 高 | `FlightController/Solutions/model/road_yolo11n_seg.onnx` 是否存在未确认; 不存在则视觉链路完全无法测试 |
-| **Debian 12 不支持 NPU** | 🔴 高 | 经过 2026-06-07 全天诊断, ST NPU 软件栈依赖 OpenSTLinux BSP (glibc 2.39, gcnano-driver, libArchModelSw), 无法通过替换 .so 解决; **决策: 切换至 OpenSTLinux v6.2** |
+| ~~**ONNX 模型文件缺失**~~ | 🟢 | `road_yolo11n_seg.onnx` (11.5MB) 确认存在于仓库中 |
+| ~~**Debian 12 不支持 NPU**~~ | 🟢 | **已解决**: 已迁移至 OpenSTLinux v6.0, NPU 驱动栈完整就绪 |
+| **YOLO11-seg 不兼容 NPU** | 🔴 高 | `ConvTranspose` + `NonMaxPool(dilation)` 不被 VIP9000 支持, 推理 segfault; **解决方案**: ST Edge AI Cloud 模型转换 — 详见 `NPU_MODEL_CONVERSION_PLAN.md` |
 | **无测试图片集** | 🟡 中 | 无法离线验证岔路分类和偏移补偿的正确性 |
 | **两套 VelocityCommand 并存** | 🟡 中 | 根目录 `autonomy_command.py` 和 `FlightController/Solutions/LocalPlanner.py` 各有定义; 字段相似但类型不兼容; 长期需统一 |
 | **雷达 fresh 用主循环时间替代** | 🟡 中 | 当前 `safety_arbiter.py` 中的 `radar_age_s` 来自 `LocalWorldModel.radar_age_s()` — 那是上次 update 的时间, 不是真实帧时间; 如果串口断流但主循环继续跑, 会误判为新鲜 |

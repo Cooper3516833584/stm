@@ -1,0 +1,9 @@
+{
+  "input": "C:\\Users\\TZDEZACR\\Desktop\\stm\\FlightController\\Solutions\\model\\road_yolo11n_seg.onnx",
+  "output": "C:\\Users\\TZDEZACR\\Desktop\\stm\\FlightController\\Solutions\\model\\npu_quantization\\road_yolo11n_seg_vsinpu_fp32.onnx",
+  "maxpool_dilations_removed": 3,
+  "split_to_slice": 10,
+  "convtranspose_to_subpixel": 1,
+  "unsupported_convtranspose": [],
+  "unsupported_split": []
+}

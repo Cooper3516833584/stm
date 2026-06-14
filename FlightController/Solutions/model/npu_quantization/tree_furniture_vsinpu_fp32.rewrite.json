@@ -1,0 +1,9 @@
+{
+  "input": "C:\\Users\\TZDEZACR\\Desktop\\stm\\FlightController\\Solutions\\model\\tree_furniture.onnx",
+  "output": "C:\\Users\\TZDEZACR\\Desktop\\stm\\FlightController\\Solutions\\model\\npu_quantization\\tree_furniture_vsinpu_fp32.onnx",
+  "maxpool_dilations_removed": 3,
+  "split_to_slice": 10,
+  "convtranspose_to_subpixel": 0,
+  "unsupported_convtranspose": [],
+  "unsupported_split": []
+}

@@ -73,6 +73,23 @@ def parse_args() -> argparse.Namespace:
         help="Use at most this many evenly sampled calibration images per model.",
     )
     parser.add_argument(
+        "--road-model",
+        type=Path,
+        default=MODEL_DIR / "road_yolo11n_seg.onnx",
+        help="Road YOLO ONNX model to quantize.",
+    )
+    parser.add_argument(
+        "--tree-model",
+        type=Path,
+        default=MODEL_DIR / "tree_furniture.onnx",
+        help="Tree/furniture YOLO ONNX model to quantize.",
+    )
+    parser.add_argument(
+        "--name-suffix",
+        default="",
+        help="Suffix inserted before output file roles, for example '_vsinpu'.",
+    )
+    parser.add_argument(
         "--skip-npz",
         action="store_true",
         help="Skip writing compressed ST Cloud calibration .npz files.",
@@ -88,6 +105,35 @@ def parse_args() -> argparse.Namespace:
         help="Keep ONNX shape-inference intermediates next to output models.",
     )
     return parser.parse_args()
+
+
+def build_jobs(args: argparse.Namespace) -> tuple[QuantJob, ...]:
+    return (
+        QuantJob(
+            name=f"road_yolo11n_seg{args.name_suffix}",
+            model_path=args.road_model,
+            image_dir=ADJUSTMENT_DIR / "roads",
+        ),
+        QuantJob(
+            name=f"tree_furniture{args.name_suffix}",
+            model_path=args.tree_model,
+            image_dir=ADJUSTMENT_DIR / "trees",
+        ),
+    )
+
+
+def manifest_path_for(output_dir: Path, name_suffix: str) -> Path:
+    if name_suffix:
+        return output_dir / f"calibration_manifest{name_suffix}.json"
+    return output_dir / "calibration_manifest.json"
+
+
+def workspace_path(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(ROOT))
+    except ValueError:
+        return str(resolved)
 
 
 def get_model_io(model_path: Path) -> tuple[str, int, list[dict[str, object]], list[dict[str, object]]]:
@@ -261,7 +307,7 @@ def main() -> int:
         "jobs": [],
     }
 
-    for job in JOBS:
+    for job in build_jobs(args):
         print(f"[{job.name}] reading model metadata", flush=True)
         input_name, input_size, inputs, outputs = get_model_io(job.model_path)
         all_images = list_images(job.image_dir)
@@ -296,8 +342,8 @@ def main() -> int:
         manifest["jobs"].append(
             {
                 "name": job.name,
-                "model": str(job.model_path.relative_to(ROOT)),
-                "image_dir": str(job.image_dir.relative_to(ROOT)),
+                "model": workspace_path(job.model_path),
+                "image_dir": workspace_path(job.image_dir),
                 "source_image_count": len(all_images),
                 "selected_image_count": len(selected_images),
                 "max_images": args.max_images,
@@ -305,19 +351,19 @@ def main() -> int:
                 "input_size": input_size,
                 "inputs": inputs,
                 "outputs": outputs,
-                "calibration_npz": str(npz_path.relative_to(ROOT)) if not args.skip_npz else None,
+                "calibration_npz": workspace_path(npz_path) if not args.skip_npz else None,
                 "calibration_npz_key": input_name if not args.skip_npz else None,
-                "quantized_model": str(quantized_path.relative_to(ROOT))
+                "quantized_model": workspace_path(quantized_path)
                 if not args.skip_quantize
                 else None,
                 "quantized_cpu_verification": verification,
                 "selected_images": [
-                    str(path.relative_to(ROOT)) for path in selected_images
+                    workspace_path(path) for path in selected_images
                 ],
             }
         )
 
-    manifest_path = output_dir / "calibration_manifest.json"
+    manifest_path = manifest_path_for(output_dir, args.name_suffix)
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(f"Wrote manifest: {manifest_path}", flush=True)
     return 0

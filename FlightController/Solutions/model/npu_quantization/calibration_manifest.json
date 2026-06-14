@@ -1,5 +1,5 @@
 {
-  "created_at_epoch": 1781405879,
+  "created_at_epoch": 1781410817,
   "preprocess": {
     "layout": "NCHW",
     "letterbox_pad": 114,
@@ -13,7 +13,7 @@
   "jobs": [
     {
       "name": "road_yolo11n_seg",
-      "model": "FlightController\\Solutions\\model\\road_yolo11n_seg.onnx",
+      "model": "FlightController\\Solutions\\model\\npu_quantization\\road_yolo11n_seg_vsinpu_fp32.onnx",
       "image_dir": "adjustment\\roads",
       "source_image_count": 291,
       "selected_image_count": 200,
@@ -282,7 +282,7 @@
     },
     {
       "name": "tree_furniture",
-      "model": "FlightController\\Solutions\\model\\tree_furniture.onnx",
+      "model": "FlightController\\Solutions\\model\\npu_quantization\\tree_furniture_vsinpu_fp32.onnx",
       "image_dir": "adjustment\\trees",
       "source_image_count": 133,
       "selected_image_count": 133,

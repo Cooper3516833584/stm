@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--body-x-half-cm", type=float, default=25.0)
     parser.add_argument("--body-y-half-cm", type=float, default=25.0)
     parser.add_argument("--corridor-half-width-cm", type=float, default=50.0)
-    parser.add_argument("--cruise-speed-cm-s", type=float, default=20.0)
+    parser.add_argument("--cruise-speed-cm-s", type=float, default=10.0)
     parser.add_argument("--yaw-rate-limit-deg-s", type=float, default=25.0)
     parser.add_argument("--yaw-kp", type=float, default=0.5)
     parser.add_argument("--arrive-distance-cm", type=float, default=30.0)
@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
                         help="Continue turn-in-place until error is below this threshold")
     parser.add_argument("--min-turn-yaw-rate-deg-s", type=float, default=6.0,
                         help="Minimum yaw rate while turning in place")
-    parser.add_argument("--min-forward-speed-cm-s", type=float, default=8.0,
+    parser.add_argument("--min-forward-speed-cm-s", type=float, default=5.0,
                         help="Minimum forward speed between clearance and avoidance distances")
     parser.add_argument("--forward-step-cm", type=float, default=40.0,
                         help="Approximate forward distance for each execute-then-stop step")
@@ -218,7 +218,7 @@ def main() -> None:
             max_yaw_rate_deg_s=args.yaw_rate_limit_deg_s,
             obstacle_stop_distance_cm=args.obstacle_clearance_cm,
             obstacle_slow_distance_cm=args.avoid_begin_distance_cm,
-            slow_speed_limit_cm_s=min(args.cruise_speed_cm_s, 12.0),
+            slow_speed_limit_cm_s=min(args.cruise_speed_cm_s, args.min_forward_speed_cm_s),
             side_stop_distance_cm=args.obstacle_clearance_cm,
         )
     )

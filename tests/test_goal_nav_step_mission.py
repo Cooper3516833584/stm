@@ -41,6 +41,8 @@ def test_goal_nav_defaults_for_forward_avoidance(monkeypatch):
     assert args.candidate_step_deg == 2.0
     assert args.candidate_edge_margin_deg == 0.0
     assert args.forward_step_cm == 40.0
+    assert args.cruise_speed_cm_s == 10.0
+    assert args.min_forward_speed_cm_s == 5.0
     assert not goal_nav_main._is_actual_dry_run(args)
 
 

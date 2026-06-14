@@ -1,7 +1,7 @@
 """Front-only relative body-frame obstacle avoidance navigator.
 
 This module is used by goal_nav_main.py only. It intentionally implements a
-local radar-only avoidance demo, not a global navigator. Motion policy:
+local radar-only forward-intent avoidance demo, not a global navigator. Motion policy:
 
 1. scan only the front 150 degrees by software filtering the fused radar cloud;
 2. choose a safe direction inside the scan FOV, with a margin at each edge;
@@ -25,6 +25,8 @@ class RelativeGoalConfig:
     goal_x_cm: float = 200.0
     goal_y_cm: float = 0.0
     forward_test: bool = False
+    continuous_forward: bool = True
+    stop_when_no_path: bool = True
 
     cruise_speed_cm_s: float = 20.0
     yaw_rate_limit_deg_s: float = 25.0
@@ -34,7 +36,7 @@ class RelativeGoalConfig:
     # Front-only radar planning window.
     scan_fov_deg: float = 150.0
     candidate_edge_margin_deg: float = 10.0
-    candidate_step_deg: float = 5.0
+    candidate_step_deg: float = 2.0
     min_obstacle_distance_cm: float = 10.0
 
     # Safety and lookahead distances.
@@ -91,12 +93,16 @@ class RelativeGoalNavigator:
             return Command(speed, 0.0, 0.0, 0.0, f"forward_test_clear_{front.tube_clearance_cm:.0f}")
 
         goal_distance = math.hypot(cfg.goal_x_cm, cfg.goal_y_cm)
-        if goal_distance <= cfg.arrive_distance_cm:
+        if not cfg.continuous_forward and goal_distance <= cfg.arrive_distance_cm:
             self._turning = False
             return Command.zero("relative_goal_reached")
 
         half_fov = self._scan_half_fov_deg()
-        raw_goal_angle = math.degrees(math.atan2(cfg.goal_y_cm, cfg.goal_x_cm))
+        raw_goal_angle = (
+            0.0
+            if goal_distance <= 1e-6
+            else math.degrees(math.atan2(cfg.goal_y_cm, cfg.goal_x_cm))
+        )
         goal_angle = _clip(_wrap_deg(raw_goal_angle), -half_fov, half_fov)
 
         front_release = self._evaluate_direction(0.0, goal_angle, radar_field)
@@ -120,15 +126,21 @@ class RelativeGoalNavigator:
         self._last_selected_angle_deg = selected.angle_deg
 
         if not selected.allowed:
-            self._turning = True
             self._blocked = True
-            yaw_rate = self._yaw_command(selected.angle_deg)
+            if cfg.stop_when_no_path:
+                self._turning = False
+                return Command.zero(
+                    f"blocked_no_path_dir_{selected.angle_deg:.0f}_clear_{selected.tube_clearance_cm:.0f}"
+                )
+            self._turning = True
+            search_angle = self._no_path_search_angle(selected.angle_deg)
+            yaw_rate = self._yaw_command(search_angle)
             return Command(
                 0.0,
                 0.0,
                 0.0,
                 yaw_rate,
-                f"blocked_turn_dir_{selected.angle_deg:.0f}_clear_{selected.tube_clearance_cm:.0f}",
+                f"blocked_turn_dir_{search_angle:.0f}_clear_{selected.tube_clearance_cm:.0f}",
             )
 
         if self._should_turn(selected.angle_deg):
@@ -317,6 +329,25 @@ class RelativeGoalNavigator:
         if 0.0 < abs(yaw) < cfg.min_turn_yaw_rate_deg_s:
             yaw = math.copysign(cfg.min_turn_yaw_rate_deg_s, yaw)
         return yaw
+
+    def _no_path_search_angle(self, selected_angle_deg: float) -> float:
+        cfg = self.config
+        if abs(selected_angle_deg) > cfg.align_stop_deg:
+            return selected_angle_deg
+
+        half_fov = self._candidate_half_fov_deg()
+        if half_fov <= cfg.align_stop_deg:
+            return selected_angle_deg
+
+        if (
+            self._last_selected_angle_deg is not None
+            and abs(self._last_selected_angle_deg) > cfg.align_stop_deg
+        ):
+            sign = math.copysign(1.0, self._last_selected_angle_deg)
+        else:
+            sign = 1.0 if cfg.default_avoid_sign >= 0.0 else -1.0
+        search_mag = min(half_fov, max(cfg.align_start_deg, 30.0))
+        return sign * search_mag
 
     def _candidate_angles_deg(self) -> list[float]:
         cfg = self.config

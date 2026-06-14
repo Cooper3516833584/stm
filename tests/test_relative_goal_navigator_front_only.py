@@ -32,7 +32,7 @@ def _nav(**kwargs):
         "clearance_release_cm": 90.0,
         "scan_fov_deg": 150.0,
         "candidate_edge_margin_deg": 10.0,
-        "candidate_step_deg": 5.0,
+        "candidate_step_deg": 2.0,
         "lookahead_cm": 220.0,
         "avoid_begin_distance_cm": 150.0,
         "align_start_deg": 10.0,
@@ -67,7 +67,7 @@ def test_front_obstacle_inside_80_never_moves_forward():
     assert cmd.vx_cm_s == 0
     assert cmd.vy_cm_s == 0
     assert cmd.vz_cm_s == 0
-    assert "blocked" in cmd.reason or "turn" in cmd.reason
+    assert "blocked_no_path" in cmd.reason
 
 
 def test_front_obstacle_at_120_triggers_turn_before_forward():
@@ -102,9 +102,24 @@ def test_never_outputs_sideways_velocity_across_cases():
         assert cmd.vy_cm_s == 0
 
 
-def test_no_radar_forces_dry_run_even_with_enable_flight():
-    args = Namespace(dry_run=False, no_fc=False, no_radar=True, enable_flight=True)
+def test_no_radar_forces_dry_run():
+    args = Namespace(dry_run=False, no_fc=False, no_radar=True)
     assert goal_nav_main._is_actual_dry_run(args)
+
+
+def test_continuous_forward_does_not_stop_at_static_goal():
+    cmd = _nav(goal_x_cm=0.0, goal_y_cm=0.0).update(_field([]))
+    assert cmd.vx_cm_s > 0
+    assert cmd.vy_cm_s == 0
+    assert "forward_clear" in cmd.reason
+
+
+def test_stop_at_relative_goal_can_be_enabled():
+    cmd = _nav(goal_x_cm=0.0, goal_y_cm=0.0, continuous_forward=False).update(_field([]))
+    assert cmd.vx_cm_s == 0
+    assert cmd.vy_cm_s == 0
+    assert cmd.yaw_rate_deg_s == 0
+    assert cmd.reason == "relative_goal_reached"
 
 
 def test_candidate_directions_keep_margin_inside_scan_edges():
@@ -146,3 +161,22 @@ def test_blocked_clearance_requires_release_before_forward():
     assert released.vy_cm_s == 0
     assert released.yaw_rate_deg_s == 0
     assert "forward_release" in released.reason
+
+
+def test_no_path_holds_zero_when_every_candidate_is_blocked():
+    nav = _nav()
+    cmd = nav.update(_field([[60.0, 0.0]]))
+    assert cmd.vx_cm_s == 0
+    assert cmd.vy_cm_s == 0
+    assert cmd.vz_cm_s == 0
+    assert cmd.yaw_rate_deg_s == 0
+    assert "blocked_no_path" in cmd.reason
+
+
+def test_yaw_search_mode_can_keep_turning_when_no_path():
+    nav = _nav(stop_when_no_path=False)
+    cmd = nav.update(_field([[60.0, 0.0]]))
+    assert cmd.vx_cm_s == 0
+    assert cmd.vy_cm_s == 0
+    assert abs(cmd.yaw_rate_deg_s) > 0
+    assert "blocked_turn" in cmd.reason

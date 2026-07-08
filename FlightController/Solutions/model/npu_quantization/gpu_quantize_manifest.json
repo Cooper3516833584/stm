@@ -1,0 +1,48 @@
+{
+  "created_at_epoch": 1783513061,
+  "gpu_provider": "DmlExecutionProvider",
+  "quant_config": {
+    "format": "QDQ",
+    "per_channel": false,
+    "activation_type": "QInt8",
+    "weight_type": "QInt8",
+    "symmetric": true,
+    "reduce_range": false,
+    "method": "MinMax"
+  },
+  "results": [
+    {
+      "model": "D:\\drone2\\ObstacleAvoidanceDrone\\FlightController\\Solutions\\model\\tree_furniture.onnx",
+      "output": "D:\\drone2\\ObstacleAvoidanceDrone\\FlightController\\Solutions\\model\\npu_quantization\\tree_furniture_int8_qdq.onnx",
+      "status": "OK",
+      "input_name": "images",
+      "input_size": 416,
+      "inputs": [
+        {
+          "name": "images",
+          "shape": [
+            1,
+            3,
+            416,
+            416
+          ],
+          "type": "tensor(float)"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output0",
+          "shape": [
+            1,
+            7,
+            3549
+          ],
+          "type": "tensor(float)"
+        }
+      ],
+      "calibration_samples": 133,
+      "quantize_time_s": 4.33031420000043,
+      "verify_time_s": 0.311708200002613
+    }
+  ]
+}

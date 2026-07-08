@@ -100,6 +100,7 @@ def test_never_outputs_sideways_velocity_across_cases():
     for points in cases:
         cmd = nav.update(_field(points))
         assert cmd.vy_cm_s == 0
+        assert cmd.vz_cm_s == 0
 
 
 def test_no_radar_forces_dry_run():
@@ -180,3 +181,32 @@ def test_yaw_search_mode_can_keep_turning_when_no_path():
     assert cmd.vy_cm_s == 0
     assert abs(cmd.yaw_rate_deg_s) > 0
     assert "blocked_turn" in cmd.reason
+
+
+def test_gap_planner_turns_toward_wider_opening_when_front_blocked():
+    nav = _nav()
+    points = [
+        [120.0, 0.0],
+        [130.0, 50.0],
+        [150.0, 70.0],
+        [160.0, 90.0],
+    ]
+
+    cmd = nav.update(_field(points))
+
+    assert cmd.vx_cm_s == 0
+    assert cmd.vy_cm_s == 0
+    assert cmd.vz_cm_s == 0
+    assert cmd.yaw_rate_deg_s < 0
+    assert "turn_to_dir" in cmd.reason or "front_blocked_turn" in cmd.reason
+
+
+def test_single_isolated_noise_point_is_ignored_for_planning():
+    nav = _nav(min_cluster_points=2)
+
+    cmd = nav.update(_field([[120.0, 0.0]]), now_s=0.0)
+
+    assert cmd.vx_cm_s > 0
+    assert cmd.vy_cm_s == 0
+    assert cmd.vz_cm_s == 0
+    assert cmd.yaw_rate_deg_s == 0

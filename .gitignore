@@ -13,6 +13,7 @@ dist/
 # Local road perception videos
 /road2.mp4
 /road2_*.mp4
+/temp/
 
 # Local calibration images
 /adjustment/

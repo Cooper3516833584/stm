@@ -78,8 +78,8 @@ def parse_args() -> argparse.Namespace:
                         help="Clearance required to resume forward motion after blocking, default 90cm")
     parser.add_argument("--scan-fov-deg", type=float, default=150.0,
                         help="Goal-avoidance scan FOV in degrees, default front 150deg")
-    parser.add_argument("--candidate-edge-margin-deg", type=float, default=0.0,
-                        help="Margin removed from scan FOV edges for candidate directions, default 0deg")
+    parser.add_argument("--candidate-edge-margin-deg", type=float, default=10.0,
+                        help="Margin removed from scan FOV edges for candidate directions, default 10deg")
     parser.add_argument("--lookahead-cm", type=float, default=220.0,
                         help="Candidate direction lookahead distance, default 220cm")
     parser.add_argument("--avoid-begin-distance-cm", type=float, default=150.0,
@@ -431,7 +431,8 @@ def _next_step_command(*, runtime: StepRuntime, navigator, radar_field, now_s: f
             runtime.active_command = Command.zero(f"step_interrupt:{live_plan.reason}")
             return runtime.active_command
         if now_s < runtime.phase_until_s:
-            return runtime.active_command
+            runtime.active_command = live_plan
+            return live_plan
 
         completed = runtime.active_command
         runtime.phase = "hold"

@@ -55,6 +55,7 @@ class RoadPerceptionResult:
     branch_decision: str = "none"
 
     debug_msg: str = ""
+    debug_mask: np.ndarray | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -332,7 +333,7 @@ def _select_providers() -> list[str]:
 
     available = set(ort.get_available_providers())
 
-    for candidate in ("VSINPUExecutionProvider",):
+    for candidate in ("VSINPUExecutionProvider", "CUDAExecutionProvider"):
         if candidate in available:
             return [candidate, "CPUExecutionProvider"]
 
@@ -1403,6 +1404,7 @@ def get_road_perception(
         debug_mask = merged_mask
         if merged_mask is None or not instances or np.count_nonzero(merged_mask) == 0:
             result = _lost_result(decode_msg)
+            result.debug_mask = merged_mask
             if debug_save_path:
                 _save_debug_image(frame_bgr, merged_mask, result, debug_save_path)
             return result
@@ -1424,6 +1426,7 @@ def get_road_perception(
 
         if not valid_instances:
             result = _lost_result("no valid road instances after cleanup")
+            result.debug_mask = merged_mask
             if debug_save_path:
                 _save_debug_image(frame_bgr, merged_mask, result, debug_save_path)
             return result
@@ -1431,6 +1434,7 @@ def get_road_perception(
         current = _select_current_instance(valid_instances, orig_w, orig_h)
         if current is None:
             result = _lost_result("no current road instance selected")
+            result.debug_mask = merged_mask
             if debug_save_path:
                 _save_debug_image(frame_bgr, merged_mask, result, debug_save_path)
             return result
@@ -1532,6 +1536,7 @@ def get_road_perception(
                 f"corrected_error={corrected_pixel_error:.1f}"
                 f"{fallback_msg}"
             ),
+            debug_mask=merged_mask,
         )
 
         if debug_save_path:
@@ -1540,6 +1545,7 @@ def get_road_perception(
         return result
     except Exception as exc:
         result = _lost_result(f"{type(exc).__name__}: {exc}")
+        result.debug_mask = debug_mask
         if debug_save_path:
             _save_debug_image(frame_bgr, debug_mask, result, debug_save_path)
         return result

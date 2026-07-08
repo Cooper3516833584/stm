@@ -28,6 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=None, help="Deprecated alias for --camera-height")
     parser.add_argument("--fps", type=int, default=None, help="Deprecated alias for --camera-fps")
     parser.add_argument("--model", default="FlightController/Solutions/model/road_yolo11n_seg.onnx")
+    parser.add_argument("--model-npu", default=None,
+                        help=".nb NPU compiled model path (overrides --model)")
     parser.add_argument("--model-path", default=None, help="Deprecated alias for --model")
     parser.add_argument("--require-model", action="store_true")
     parser.add_argument("--fc-port", default=None)
@@ -129,6 +131,10 @@ def main() -> None:
     )
 
     road_perception.MODEL_PATH = args.model
+    if args.model_npu:
+        road_perception.MODEL_PATH_NPU = args.model_npu
+        road_perception._AUTO_USE_NPU = True
+        logger.info("NPU .nb model configured: {}", args.model_npu)
     model_missing_logged = False
     if not os.path.isfile(args.model):
         msg = f"[ROAD] model missing, perception lost: {args.model}"

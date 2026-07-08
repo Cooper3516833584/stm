@@ -26,6 +26,8 @@ def main() -> int:
                         help="cv2 camera index (default: 7)")
     parser.add_argument("--model", default=None,
                         help="ONNX model path (default: auto)")
+    parser.add_argument("--model-npu", default=None,
+                        help=".nb NPU compiled model path")
     parser.add_argument("--flight-height-m", type=float, default=2.0,
                         help="flight height for m/px calc (default: 2.0)")
     parser.add_argument("--no-offset-comp", action="store_true",
@@ -47,7 +49,15 @@ def main() -> int:
     for _ in range(5):
         cap.read()
 
-    # --- import road perception (triggers ONNX session load) ---
+    # --- import road perception (triggers model session load) ---
+    import road_perception
+    if args.model:
+        road_perception.MODEL_PATH = args.model
+        road_perception._AUTO_USE_NPU = False
+    if args.model_npu:
+        road_perception.MODEL_PATH_NPU = args.model_npu
+        road_perception._AUTO_USE_NPU = True
+
     t0 = time.perf_counter()
     from road_perception import (
         CameraOffsetCompensationConfig,

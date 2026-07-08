@@ -1,0 +1,224 @@
+% !TEX program = xelatex
+\documentclass[border=8pt]{standalone}
+\usepackage{fontspec}
+\setmainfont{Microsoft YaHei}
+\usepackage{tikz}
+\usetikzlibrary{positioning, shapes.geometric, arrows.meta, fit, backgrounds, calc}
+
+%=============================================================================
+%  Cooper_drone 系统架构框架图
+%  黑白简洁风格 — 分层架构 + 数据流双视图
+%=============================================================================
+
+\begin{document}
+
+% ---- 颜色定义 (灰度) ----
+\definecolor{bg}{gray}{1.0}
+\definecolor{boxfill}{gray}{0.97}
+\definecolor{boxline}{gray}{0.4}
+\definecolor{textcol}{gray}{0.0}
+\definecolor{arrcol}{gray}{0.35}
+\definecolor{groupline}{gray}{0.55}
+\definecolor{accent}{gray}{0.25}
+
+\tikzset{
+  % 普通模块块
+  mod/.style={
+    rectangle, draw=boxline, fill=boxfill, text=textcol,
+    minimum width=22mm, minimum height=6.5mm,
+    align=center, font=\footnotesize, inner sep=2pt,
+    rounded corners=1pt, line width=0.5pt
+  },
+  % 宽模块
+  modw/.style={
+    rectangle, draw=boxline, fill=boxfill, text=textcol,
+    minimum width=30mm, minimum height=6.5mm,
+    align=center, font=\footnotesize, inner sep=2pt,
+    rounded corners=1pt, line width=0.5pt
+  },
+  % 关键模块 (加粗边框)
+  modk/.style={
+    rectangle, draw=accent, fill=boxfill, text=textcol,
+    minimum width=24mm, minimum height=7mm,
+    align=center, font=\footnotesize\bfseries, inner sep=2pt,
+    rounded corners=1pt, line width=0.9pt
+  },
+  % 分组框
+  grp/.style={
+    rectangle, draw=groupline, fill=boxfill,
+    rounded corners=3pt, line width=0.6pt,
+    inner sep=6pt, font=\footnotesize\itshape
+  },
+  % 箭头
+  arr/.style={->, >=Stealth, line width=0.55pt, draw=arrcol},
+  arrb/.style={->, >=Stealth, line width=0.8pt, draw=accent},
+  % 层标签
+  layer/.style={
+    rectangle, draw=none, fill=none, text=accent,
+    font=\small\bfseries, align=center, inner sep=0pt
+  },
+}
+
+% =============================================================================
+%  图一：分层架构图 (自上而下)
+% =============================================================================
+\begin{tikzpicture}[node distance=3.5mm and 6mm]
+
+% ---- 入口层 ----
+\node[modk] (entry1) at (0,0) {goal\_nav\_main};
+\node[modk, right=of entry1] (entry2) {road\_follow\_main};
+\node[mod,  right=of entry2] (entry3) {record\_data};
+
+% ---- 安全层 ----
+\node[modk, below=8mm of entry1] (safety) {SafetyArbiter\\[-1pt]\tiny 硬故障 $\mid$ 障碍急停 $\mid$ 限速};
+
+% ---- 规划层 ----
+\node[mod, below=8mm of safety, xshift=-28mm] (nav) {RelativeGoal\\[-1pt]Navigator};
+\node[mod, below=2mm of nav] (lp) {LocalPlanner};
+\node[mod, right=6mm of nav] (rf) {RoadFollower};
+\node[mod, right=6mm of rf] (pp) {PathPlanner\\[-1pt]\tiny 五次多项式 $\mid$ 势场法};
+
+% ---- 感知层 ----
+\node[modw, below=8mm of lp, xshift=14mm] (roadp) {road\_perception\\[-1pt]\tiny YOLO11-seg 分割 $\rightarrow$ 道路中线};
+\node[mod, left=6mm of roadp] (obs) {ObstacleField\\[-1pt]\tiny 机体反射过滤 $\mid$ 走廊裁剪};
+\node[mod, right=6mm of roadp] (slam) {Radar\_SLAM\\[-1pt]\tiny 霍夫直线 $\mid$ ICPM};
+\node[modw, below=2mm of roadp] (visnet) {Vision\_Net / TargetDetector\\[-1pt]\tiny FastestDet $\mid$ DAMO-YOLO $\mid$ ONNX 推理};
+
+% ---- 组件 / 驱动层 ----
+\node[mod, below=8mm of obs] (multi) {MultiRadar\\[-1pt]\tiny 双雷达融合};
+\node[modw, right=6mm of multi] (ldd) {LDRadar\_Driver\\[-1pt]\tiny 串口线程 $\mid$ Map\_Circle $\mid$ CRC};
+\node[mod, right=6mm of ldd] (cam) {CameraSource\\[-1pt]\tiny V4L2 $\mid$ 软件白平衡};
+\node[mod, right=6mm of cam] (fcctrl) {FC\_Controller\\[-1pt]\tiny 飞控顶层接口};
+
+% ---- 协议栈 ----
+\node[mod, below=3.5mm of fcctrl, xshift=-18mm] (app) {FC\_Application\\[-1pt]\tiny set\_height $\mid$ 实时控制线程};
+\node[mod, left=2mm of app] (proto) {FC\_Protocol\\[-1pt]\tiny LED $\mid$ 电机 $\mid$ 模式切换};
+\node[mod, left=2mm of proto] (base) {FC\_Base\\[-1pt]\tiny Byte\_Var $\mid$ 状态机};
+\node[mod, left=2mm of base] (ser) {SerialReader\\[-1pt]\tiny 起始位 $\mid$ 校验和};
+
+% ---- 硬件层 ----
+\node[mod, below=8mm of ldd, xshift=-3mm] (d500) {D500 雷达 ×2\\[-1pt]\tiny UART4/9 \ 230400 baud};
+\node[mod, right=5mm of d500] (camhw) {USB 摄像头 ×2\\[-1pt]\tiny /dev/video7,9};
+\node[mod, right=5mm of camhw] (fchw) {凌霄飞控\\[-1pt]\tiny UART ACM0 \ 500k baud};
+
+% ---- 层标签 (左侧) ----
+\node[layer, left=8mm of entry1.west, xshift=-2mm] (L0) {入口层};
+\node[layer, left=8mm of safety.west, xshift=-2mm] (L1) {安全层};
+\node[layer, left=8mm of nav.west, xshift=-2mm] (L2) {规划层};
+\node[layer, left=8mm of roadp.west, xshift=-2mm] (L3) {感知层};
+\node[layer, left=8mm of ldd.west, xshift=-2mm] (L4) {组件层};
+\node[layer, left=8mm of base.west, xshift=-2mm] (L5) {协议栈};
+\node[layer, left=8mm of d500.west, xshift=-2mm] (L6) {硬件层};
+
+% ---- 层间分组虚线框 ----
+\begin{scope}[on background layer]
+  % 入口层
+  \node[grp, fit=(entry1)(entry2)(entry3)(L0), inner xsep=3mm] (G0) {};
+  % 安全层
+  \node[grp, fit=(safety)(L1), inner xsep=3mm] (G1) {};
+  % 规划层
+  \node[grp, fit=(nav)(lp)(rf)(pp)(L2), inner xsep=3mm] (G2) {};
+  % 感知层
+  \node[grp, fit=(roadp)(obs)(slam)(visnet)(L3), inner xsep=3mm] (G3) {};
+  % 组件层
+  \node[grp, fit=(multi)(ldd)(cam)(fcctrl)(app)(proto)(base)(ser)(L4)(L5), inner xsep=3mm] (G4) {};
+  % 硬件层
+  \node[grp, fit=(d500)(camhw)(fchw)(L6), inner xsep=3mm] (G5) {};
+\end{scope}
+
+% ---- 主数据流箭头 ----
+% 入口 → 安全
+\draw[arrb] (entry1.south) |- ($(safety.north)+(-8mm,0)$) -- (safety.north);
+\draw[arr]  (entry2.south) |- ($(safety.north)+(0mm,0)$) -- (safety.north);
+% 安全 ↔ 规划
+\draw[arrb] (safety.south) -- ($(nav.north)+(8mm,0)$) -- (nav.north);
+\draw[arrb] (safety.south) -- (rf.north);
+% 规划 → 感知 (数据请求)
+\draw[arr] (nav.south) -- (obs.north);
+\draw[arr] (rf.south)  -- (roadp.north);
+% 感知 → 组件
+\draw[arr] (roadp.south) -- (visnet.north);
+\draw[arr] (roadp.south) |- (cam.north);
+\draw[arr] (obs.south)   -- (multi.north);
+\draw[arr] (obs.south)   |- (ldd.north);
+% 组件 → 协议 / 硬件
+\draw[arr] (fcctrl.south) -- (app.north);
+\draw[arr] (ldd.south)    -- (d500.north);
+\draw[arr] (cam.south)    -- (camhw.north);
+\draw[arr] (ser.south)   |- (fchw.north);
+% 协议栈链
+\draw[arr] (app.west)  -- (proto.east);
+\draw[arr] (proto.west) -- (base.east);
+\draw[arr] (base.west)  -- (ser.east);
+
+% ---- 兼容包装层 (右侧标注) ----
+\node[mod, right=14mm of entry3, draw=boxline!60, minimum width=26mm] (wrap) {兼容包装层\\[-1pt]\tiny autonomy\_*.py $\mid$ direction\_planner.py\\[-1pt]\tiny goal\_nav\_mission.py $\mid$ road\_follow\_mission.py};
+\draw[arr, draw=boxline!50] (entry3.east) -- (wrap.west);
+\draw[arr, draw=boxline!50] (entry2.east) |- (wrap.west);
+
+\end{tikzpicture}
+
+% =============================================================================
+%  图二：数据流管道图 (两条并行感知-控制通路)
+% =============================================================================
+
+\vspace{12pt}
+
+\begin{tikzpicture}[node distance=4mm and 5mm]
+
+% ---- 雷达通路 (上方) ----
+\node[font=\small\bfseries, text=accent] (rlabel) at (-1.0, 0) {雷达通路};
+\node[mod, right=5mm of rlabel] (r1) {D500\\[-1pt]\tiny 双雷达};
+\node[mod, right=of r1] (r2) {LDRadar\\[-1pt]Driver};
+\node[mod, right=of r2] (r3) {MultiRadar\\[-1pt]\tiny 融合点云};
+\node[mod, right=of r3] (r4) {Obstacle\\[-1pt]Field\\[-1pt]\tiny 过滤};
+\node[modk, right=of r4] (r5) {RelativeGoal\\[-1pt]Navigator\\[-1pt]\tiny 75方向管状检测};
+\node[modk, right=of r5] (r6) {Safety\\[-1pt]Arbiter};
+\node[mod, right=of r6] (r7) {凌霄\\[-1pt]飞控};
+
+\draw[arr] (r1.east) -- (r2.west);
+\draw[arr] (r2.east) -- (r3.west);
+\draw[arr] (r3.east) -- (r4.west);
+\draw[arr] (r4.east) -- (r5.west);
+\draw[arr] (r5.east) -- (r6.west);
+\draw[arr] (r6.east) -- (r7.west);
+
+% 标注
+\node[font=\tiny, text=boxline, below=0.5mm of r2] {10Hz 298--332 pkt/s};
+\node[font=\tiny, text=boxline, below=0.5mm of r5] {0.35--2.0s 步进};
+\node[font=\tiny, text=boxline, below=0.5mm of r6] {障碍<80cm急停};
+
+% ---- 视觉通路 (下方) ----
+\node[font=\small\bfseries, text=accent] (vlabel) at (-1.0, -3.5) {视觉通路};
+\node[mod, right=5mm of vlabel] (v1) {USB\\[-1pt]Camera};
+\node[mod, right=of v1] (v2) {YOLO11-seg\\[-1pt]\tiny ONNX推理};
+\node[mod, right=of v2] (v3) {road\_\\[-1pt]perception\\[-1pt]\tiny 中线提取};
+\node[modk, right=of v3] (v4) {Road\\[-1pt]Follower\\[-1pt]\tiny P控制律};
+\node[modk, right=2cm of v4] (v5) {Safety\\[-1pt]Arbiter};
+\node[mod, right=of v5] (v6) {凌霄\\[-1pt]飞控};
+
+\draw[arr] (v1.east) -- (v2.west);
+\draw[arr] (v2.east) -- (v3.west);
+\draw[arr] (v3.east) -- (v4.west);
+\draw[arr] (v4.east) -- (v5.west);
+\draw[arr] (v5.east) -- (v6.west);
+
+% 标注
+\node[font=\tiny, text=boxline, below=0.5mm of v2] {NPU目标5--15ms};
+\node[font=\tiny, text=boxline, below=0.5mm of v4] {pixel\_kp + angle\_kp};
+
+% 安全汇聚
+\node[font=\footnotesize\bfseries, text=accent, above=1mm of v5] {$\uparrow$ 统一安全闸};
+
+% ---- 数据记录旁路 ----
+\node[mod, below=8mm of v3, draw=boxline!50] (rec) {SessionRecorder / record\_data\\[-1pt]\tiny 异步写入 SD 卡 $\mid$ jsonl+npz+jpeg};
+\draw[arr, draw=boxline!40, dashed] (r3.south) |- (rec.west);
+\draw[arr, draw=boxline!40, dashed] (v1.south) |- (rec.east);
+
+% ---- 协议栈旁路 ----
+\node[mod, above=of r7, draw=boxline!50, minimum width=32mm] (fcstack) {飞控协议栈\\[-1pt]\tiny Base $\rightarrow$ Protocal $\rightarrow$ Application $\rightarrow$ FC\_Controller};
+\draw[arr, draw=boxline!40] (fcstack.west) -| (r2.north);
+
+\end{tikzpicture}
+
+\end{document}

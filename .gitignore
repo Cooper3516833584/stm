@@ -17,3 +17,5 @@ dist/
 
 # Local calibration images
 /adjustment/
+
+/venv_activate.txt

@@ -118,17 +118,15 @@ def run_continuous_monitor(upper_port="/dev/ttySTM4", lower_port="/dev/ttySTM9")
     print(f"Starting upper radar on {upper_port}...")
     upper = LD_Radar(name="upper", index=0, mount_xy_cm=(0.0, 0.0),
                      mount_yaw_deg=0.0, mount_mirror_y=False)
-    upper.port_override = upper_port
-    upper.start()
+    upper.start(com=upper_port)
     time.sleep(1)
 
     lower = None
-    if os.path.exists(lower_port):
+    if lower_port is not None and os.path.exists(lower_port):
         print(f"Starting lower radar on {lower_port}...")
         lower = LD_Radar(name="lower", index=1, mount_xy_cm=(0.96, 0.15),
                          mount_yaw_deg=0.0, mount_mirror_y=True)
-        lower.port_override = lower_port
-        lower.start()
+        lower.start(com=lower_port)
         time.sleep(1)
 
     print()
@@ -221,8 +219,7 @@ def run_single_snapshot(upper_port="/dev/ttySTM4", lower_port="/dev/ttySTM9"):
     print("Taking radar snapshot (2s warmup)...")
     upper = LD_Radar(name="upper", index=0, mount_xy_cm=(0.0, 0.0),
                      mount_yaw_deg=0.0, mount_mirror_y=False)
-    upper.port_override = upper_port
-    upper.start()
+    upper.start(com=upper_port)
     time.sleep(2)
 
     pts_u = upper.get_points_body_cm(max_distance_cm=300)
@@ -230,11 +227,10 @@ def run_single_snapshot(upper_port="/dev/ttySTM4", lower_port="/dev/ttySTM9"):
 
     print_direction_report(pts_u, "UPPER RADAR")
 
-    if os.path.exists(lower_port):
+    if lower_port is not None and os.path.exists(lower_port):
         lower = LD_Radar(name="lower", index=1, mount_xy_cm=(0.96, 0.15),
                          mount_yaw_deg=0.0, mount_mirror_y=True)
-        lower.port_override = lower_port
-        lower.start()
+        lower.start(com=lower_port)
         time.sleep(2)
         pts_l = lower.get_points_body_cm(max_distance_cm=300)
         lower.stop()

@@ -1,144 +1,146 @@
 """NPU Network Binary Graph (.nb) loader for STM32MP2 VIP9000.
 
-Wraps ST's ``stai_mpu.Network`` API with an interface that mirrors
-``onnxruntime.InferenceSession`` so that the existing preprocessing /
+Wraps ST's ``stai_mpu.stai_mpu_network`` API with an interface that
+mirrors ``onnxruntime.InferenceSession`` so that the existing preprocessing /
 postprocessing pipeline in ``road_perception.py`` works with minimal changes.
 
-Usage (manual)::
+Usage::
 
     from nb_graph import NBGraphSession
 
-    sess = NBGraphSession("FlightController/Solutions/model/road_yolo11n_seg_1.nb")
+    sess = NBGraphSession("model.nb")
     print(sess.get_inputs()[0].name, sess.get_inputs()[0].shape)
     outputs = sess.run(None, {"images": input_blob})
 
-Backends (tried in order):
-1. ``stai_mpu.Network`` — ST's official Python API (requires ``python3-stai-mpu``)
-2. *Future*: OpenVX ctypes fallback for boards without stai_mpu installed
+Requires: ``apt install python3-libstai-mpu``  (imports as ``stai_mpu``)
 """
 
 from __future__ import annotations
 
 import os
-import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 
-# ── sentinel objects for float32 fallback ──────────────────────────
-_FLOAT32_MAX_INT8 = 127  # symmetric int8 max
-_FLOAT32_SCALE_1_255 = np.float32(1.0 / 255.0)
-_INT8_ZERO_POINT = np.int8(-128)
 
+# ── sentinel constants ────────────────────────────────────────────
+_FLOAT32_SCALE_1_255 = np.float32(1.0 / 255.0)
+
+
+# ── metadata mirrors of onnxruntime.NodeArg ──────────────────────
 
 class _InputMeta:
-    """Minimal mirror of ``onnxruntime.NodeArg`` for input metadata."""
+    __slots__ = ("name", "shape", "type")
 
-    def __init__(self, name: str, shape: list, dtype: str = "tensor(float)"):
+    def __init__(self, name: str, shape: List[int], dtype: str = "tensor(float)"):
         self.name = name
         self.shape = shape
         self.type = dtype
+
+    def __repr__(self) -> str:
+        return f"_InputMeta(name={self.name!r}, shape={self.shape}, type={self.type!r})"
 
 
 class _OutputMeta:
-    """Minimal mirror of ``onnxruntime.NodeArg`` for output metadata."""
+    __slots__ = ("name", "shape", "type")
 
-    def __init__(self, name: str, shape: list, dtype: str = "tensor(float)"):
+    def __init__(self, name: str, shape: List[int], dtype: str = "tensor(float)"):
         self.name = name
         self.shape = shape
         self.type = dtype
 
+    def __repr__(self) -> str:
+        return f"_OutputMeta(name={self.name!r}, shape={self.shape}, type={self.type!r})"
 
-# ────────────────────────────────────────────────────────────────────
-# stai_mpu backend
-# ────────────────────────────────────────────────────────────────────
 
-def _load_via_stai_mpu(model_path: str) -> tuple[Any, list[_InputMeta], list[_OutputMeta]]:
-    """Try to load the .nb file through ST's ``stai_mpu`` package.
+# ──────────────────────────────────────────────────────────────────
+# stai_mpu backend  (real API: stai_mpu.stai_mpu_network)
+# ──────────────────────────────────────────────────────────────────
 
-    Returns ``(network, inputs_meta, outputs_meta)``.
-    The returned *network* object must respond to:
+def _load_via_stai_mpu(model_path: str) -> tuple[Any, List[_InputMeta], List[_OutputMeta], dict]:
+    """Load .nb via ``stai_mpu.stai_mpu_network``.
 
-    * ``network.run()`` — execute one inference
-    * ``network.inputs[name].data = ndarray`` — feed input
-    * ``network.outputs[name].data`` — read output
+    Returns ``(network, inputs_meta, outputs_meta, quant_info)`` where
+    *quant_info* maps input/output names to ``(scale, zero_point)`` for
+    staticAffine quantized tensors, or ``None`` for float tensors.
     """
     try:
-        import stai_mpu  # type: ignore[import-untyped]
+        from stai_mpu import stai_mpu_network  # type: ignore[import-untyped]
     except ImportError:
         raise RuntimeError(
-            "stai_mpu is not installed on this board.\n"
-            "Install it via APT:  apt install python3-stai-mpu\n"
-            "Or use an ONNX model with VSINPUExecutionProvider instead of a .nb file."
+            "stai_mpu is not installed.\n"
+            "  Install:  apt install python3-libstai-mpu\n"
+            "  Verify:   python3 -c \"from stai_mpu import stai_mpu_network; print('OK')\""
         )
 
-    if not hasattr(stai_mpu, "Network"):
-        raise RuntimeError(
-            "stai_mpu imported but stai_mpu.Network is missing.\n"
-            "Please update stai_mpu to a newer version."
-        )
+    network = stai_mpu_network(model_path=model_path, use_hw_acceleration=True)
 
-    network = stai_mpu.Network(model_path)
+    inputs_meta: List[_InputMeta] = []
+    outputs_meta: List[_OutputMeta] = []
+    quant_info: dict[str, tuple[float, int] | None] = {}
 
-    # ── discover inputs ──
-    inputs_meta: list[_InputMeta] = []
-    input_names: list[str] = []
-    if hasattr(network, "inputs") and network.inputs is not None:
-        # stai_mpu v1.x: network.inputs is dict-like
-        for name in network.inputs:
-            tensor = network.inputs[name]
-            shape = list(tensor.shape) if hasattr(tensor, "shape") else []
-            dtype = _stai_dtype_to_ort(tensor)
-            inputs_meta.append(_InputMeta(name=name, shape=shape, dtype=dtype))
-            input_names.append(name)
-    elif hasattr(network, "input_names"):
-        # stai_mpu v0.x fallback
-        for name in network.input_names:
-            inputs_meta.append(_InputMeta(name=name, shape=[], dtype="tensor(float)"))
-            input_names.append(name)
-    else:
-        raise RuntimeError("Cannot introspect .nb model inputs via stai_mpu.")
+    # ── inputs ──
+    num_in = network.get_num_inputs()
+    for i in range(num_in):
+        info = network.get_input_infos()[i]
+        shape = list(info.get_shape())
+        name = info.get_name() or f"input_{i}"
+        np_dtype = info.get_dtype()
+        ort_dtype = _np_dtype_to_ort_type(np_dtype)
+        inputs_meta.append(_InputMeta(name=name, shape=shape, dtype=ort_dtype))
 
-    # ── discover outputs ──
-    outputs_meta: list[_OutputMeta] = []
-    if hasattr(network, "outputs") and network.outputs is not None:
-        for name in network.outputs:
-            tensor = network.outputs[name]
-            shape = list(tensor.shape) if hasattr(tensor, "shape") else []
-            dtype = _stai_dtype_to_ort(tensor)
-            outputs_meta.append(_OutputMeta(name=name, shape=shape, dtype=dtype))
-    elif hasattr(network, "output_names"):
-        for name in network.output_names:
-            outputs_meta.append(_OutputMeta(name=name, shape=[], dtype="tensor(float)"))
+        qtype = info.get_qtype()
+        if qtype == "staticAffine":
+            quant_info[name] = (float(info.get_scale()), int(info.get_zero_point()))
+        else:
+            quant_info[name] = None
 
-    return network, inputs_meta, outputs_meta
+    # ── outputs ──
+    num_out = network.get_num_outputs()
+    for i in range(num_out):
+        info = network.get_output_infos()[i]
+        shape = list(info.get_shape())
+        name = info.get_name() or f"output_{i}"
+        np_dtype = info.get_dtype()
+        ort_dtype = _np_dtype_to_ort_type(np_dtype)
+        outputs_meta.append(_OutputMeta(name=name, shape=shape, dtype=ort_dtype))
+
+        qtype = info.get_qtype()
+        if qtype == "staticAffine":
+            quant_info[name] = (float(info.get_scale()), int(info.get_zero_point()))
+        else:
+            quant_info[name] = None
+
+    return network, inputs_meta, outputs_meta, quant_info
 
 
-def _stai_dtype_to_ort(tensor: Any) -> str:
-    """Best-effort dtype label from a stai_mpu tensor object."""
-    try:
-        dt = tensor.dtype
-    except AttributeError:
+def _np_dtype_to_ort_type(np_dtype) -> str:
+    """Map numpy dtype to onnxruntime-style type string."""
+    if np_dtype is None:
         return "tensor(float)"
-    dt_str = str(dt).lower()
-    if "float32" in dt_str or "float" in dt_str:
+    name = str(np_dtype).lower()
+    if "float32" in name:
         return "tensor(float)"
-    if "int8" in dt_str:
+    if "float16" in name:
+        return "tensor(float16)"
+    if "int8" in name:
         return "tensor(int8)"
-    if "uint8" in dt_str:
+    if "uint8" in name:
         return "tensor(uint8)"
+    if "int32" in name:
+        return "tensor(int32)"
     return "tensor(float)"
 
 
-# ────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
 # Public session class
-# ────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
 
 class NBGraphSession:
-    """Load a compiled .nb network graph and expose an ONNX-Runtime-like API.
+    """Load a compiled .nb network and expose an ONNX-Runtime-like API.
 
-    ``providers`` is accepted for compatibility with the ``road_perception.py``
-    call-site but is ignored — the .nb format is already compiled for the NPU.
+    ``providers`` is accepted for call-site compatibility but is
+    ignored — the .nb format is already compiled for the NPU.
     """
 
     def __init__(self, model_path: str, providers: Optional[List[str]] = None):
@@ -146,158 +148,159 @@ class NBGraphSession:
             raise FileNotFoundError(f"NB graph file not found: {model_path}")
 
         self._model_path = model_path
-        self._backend = "unknown"
-        self._internal: Any = None
-        self._inputs_meta: list[_InputMeta] = []
-        self._outputs_meta: list[_OutputMeta] = []
-        self._input_name: str = ""
-        self._output_names: list[str] = []
+        self._internal: Any
+        self._inputs_meta: List[_InputMeta]
+        self._outputs_meta: List[_OutputMeta]
+        self._quant: dict[str, tuple[float, int] | None]
 
-        # ── try backends ──
-        last_err: Exception | None = None
+        (
+            self._internal,
+            self._inputs_meta,
+            self._outputs_meta,
+            self._quant,
+        ) = _load_via_stai_mpu(model_path)
 
-        # 1. stai_mpu (preferred)
-        try:
-            self._internal, self._inputs_meta, self._outputs_meta = _load_via_stai_mpu(model_path)
-            self._backend = "stai_mpu"
-        except Exception as exc:
-            last_err = exc
+        self._backend = "stai_mpu"
+        self._input_index: dict[str, int] = {
+            meta.name: idx for idx, meta in enumerate(self._inputs_meta)
+        }
+        self._output_index: dict[str, int] = {
+            meta.name: idx for idx, meta in enumerate(self._outputs_meta)
+        }
 
-        if self._internal is None:
-            msg = f"Failed to load .nb model '{model_path}' with any backend."
-            if last_err is not None:
-                msg += f"\n  stai_mpu: {last_err}"
-            raise RuntimeError(msg)
-
-        self._input_name = self._inputs_meta[0].name if self._inputs_meta else ""
-        self._output_names = [o.name for o in self._outputs_meta]
-
-    # ── public properties ────────────────────────────────────────
+    # ── properties ────────────────────────────────────────────────
 
     @property
     def backend(self) -> str:
         return self._backend
 
-    def get_providers(self) -> list[str]:
-        return ["NPU_NBGraph"]  # custom label for logging
+    def get_providers(self) -> List[str]:
+        return ["NPU_NBGraph"]
 
-    def get_inputs(self) -> list[_InputMeta]:
-        return self._inputs_meta  # type: ignore[return-value]
+    def get_inputs(self) -> List[_InputMeta]:
+        return list(self._inputs_meta)
 
-    def get_outputs(self) -> list[_OutputMeta]:
-        return self._outputs_meta  # type: ignore[return-value]
+    def get_outputs(self) -> List[_OutputMeta]:
+        return list(self._outputs_meta)
 
     # ── inference ─────────────────────────────────────────────────
 
-    def run(self, output_names: Optional[List[str]], feed_dict: Dict[str, np.ndarray]) -> list[np.ndarray]:
-        """Execute one inference pass.
+    def run(
+        self,
+        output_names: Optional[List[str]],
+        feed_dict: dict[str, np.ndarray],
+    ) -> List[np.ndarray]:
+        """Execute one inference.
 
         Args:
             output_names: Pass ``None`` to retrieve all outputs.
             feed_dict: ``{input_name: numpy_blob}``.
-
-        Returns:
-            List of output numpy arrays in the same order as *output_names*
-            (or in model-defined order when *output_names* is ``None``).
         """
-        if self._backend == "stai_mpu":
-            return self._run_stai_mpu(output_names, feed_dict)
-        raise RuntimeError(f"Unknown backend: {self._backend}")
-
-    def _run_stai_mpu(self, output_names: Optional[List[str]], feed_dict: Dict[str, np.ndarray]) -> list[np.ndarray]:
         network = self._internal
 
-        # Feed inputs — handle dtype conversion if model expects int8
         for feed_name, blob in feed_dict.items():
-            tensor = network.inputs[feed_name]
-            expected_dtype = _stai_numpy_dtype(tensor)
+            idx = self._input_index[feed_name]
+            target_dtype = self._infer_target_dtype(feed_name, blob)
+            blob = _convert_input_blob(blob, target_dtype, feed_name, self._quant)
+            network.set_input(idx, blob)
 
-            if expected_dtype is not None and blob.dtype != expected_dtype:
-                blob = _convert_blob_dtype(blob, expected_dtype)
-
-            tensor.data = blob
-
-        # Run
         network.run()
 
-        # Collect outputs
-        names = output_names if output_names is not None else self._output_names
-        results: list[np.ndarray] = []
+        names = output_names if output_names is not None else [o.name for o in self._outputs_meta]
+        results: List[np.ndarray] = []
         for name in names:
-            out = network.outputs[name].data
-            # Ensure float32 for downstream postprocessing
-            results.append(_ensure_float32(np.asarray(out)))
+            idx = self._output_index[name]
+            raw = np.asarray(network.get_output(idx))
+            results.append(_dequantize_output(raw, name, self._quant))
 
         return results
 
-
-# ────────────────────────────────────────────────────────────────────
-# dtype utilities
-# ────────────────────────────────────────────────────────────────────
-
-def _stai_numpy_dtype(tensor: Any):
-    """Map stai_mpu tensor dtype to numpy dtype, or None if unknown."""
-    try:
-        dt = str(tensor.dtype).lower()
-    except AttributeError:
-        return None
-    if "float32" in dt:
-        return np.float32
-    if "int8" in dt:
-        return np.int8
-    if "uint8" in dt:
-        return np.uint8
-    if "float" in dt:
-        return np.float32
-    return None
+    def _infer_target_dtype(self, name: str, blob: np.ndarray) -> np.dtype:
+        """Guess the dtype the NPU expects for *name*."""
+        qi = self._quant.get(name)
+        if qi is not None:
+            # staticAffine quantization → NPU expects int8/uint8
+            for meta in self._inputs_meta:
+                if meta.name == name:
+                    if "int8" in meta.type:
+                        return np.dtype(np.int8)
+                    if "uint8" in meta.type:
+                        return np.dtype(np.uint8)
+            return np.dtype(np.int8)
+        return blob.dtype
 
 
-def _convert_blob_dtype(blob: np.ndarray, target_dtype: np.dtype) -> np.ndarray:
-    """Convert a float32 [0,1] NCHW blob to the dtype expected by the NPU."""
+# ──────────────────────────────────────────────────────────────────
+# dtype / quantization utilities
+# ──────────────────────────────────────────────────────────────────
+
+def _convert_input_blob(
+    blob: np.ndarray,
+    target_dtype: np.dtype,
+    name: str,
+    quant: dict[str, tuple[float, int] | None],
+) -> np.ndarray:
+    """Convert float32 [0,1] NCHW blob to the NPU's expected dtype.
+
+    Uses the model's own quantization parameters when available so that
+    the conversion matches what the ONNX calibration pipeline expects.
+    """
+    qi = quant.get(name)
+    if qi is not None:
+        scale, zp = qi
+    else:
+        # Fallback: treat as float32
+        return blob.astype(np.float32, copy=False)
+
     if blob.dtype == target_dtype:
         return blob
 
-    # float32 [0, 1] → int8 (symmetric quantization)
-    if target_dtype == np.int8:
-        # scale = 1/255 ≈ 0.00392157, zero_point = -128
-        # value = (float_val / scale) + zero_point
-        #       = float_val * 255 + (-128)
-        # Since float_val ∈ [0, 1], result ∈ [-128, 127]
-        scaled = (blob * 255.0).round().astype(np.int32)
-        scaled += np.int32(-128)
-        return scaled.astype(np.int8)
+    if target_dtype in (np.int8, np.uint8):
+        # int_val = round(float_val / scale) + zero_point
+        # For typical scale=1/255, zp=-128: int_val = round(f*255) - 128
+        scaled = np.round(blob.astype(np.float64) / float(scale)).astype(np.int32)
+        scaled += np.int32(zp)
+        info = np.iinfo(target_dtype)
+        return np.clip(scaled, info.min, info.max).astype(target_dtype)
 
-    # float32 → uint8
-    if target_dtype == np.uint8:
-        return (blob * 255.0).round().clip(0, 255).astype(np.uint8)
-
-    # Generic fallback
     return blob.astype(target_dtype)
 
 
-def _ensure_float32(arr: np.ndarray) -> np.ndarray:
-    """Convert int8/uint8 output back to float32 if needed."""
-    if arr.dtype == np.float32 or arr.dtype == np.float64:
+def _dequantize_output(
+    arr: np.ndarray,
+    name: str,
+    quant: dict[str, tuple[float, int] | None],
+) -> np.ndarray:
+    """Convert NPU output (int8/uint8/float16) back to float32."""
+    if arr.dtype == np.float32:
         return arr.astype(np.float32, copy=False)
-    if arr.dtype == np.int8:
-        # symmetric int8 → float32
+    if arr.dtype == np.float64:
+        return arr.astype(np.float32)
+
+    qi = quant.get(name)
+    if qi is not None and arr.dtype in (np.int8, np.uint8):
+        scale, zp = qi
         # float_val = (int_val - zero_point) * scale
-        #           = (int_val + 128) / 255
-        return (arr.astype(np.float32) + 128.0) * _FLOAT32_SCALE_1_255
+        return (arr.astype(np.float32) - float(zp)) * np.float32(scale)
+
     if arr.dtype == np.uint8:
         return arr.astype(np.float32) * _FLOAT32_SCALE_1_255
+    if arr.dtype == np.int8:
+        return (arr.astype(np.float32) + 128.0) * _FLOAT32_SCALE_1_255
+    if arr.dtype == np.float16:
+        return arr.astype(np.float32)
+
     return arr.astype(np.float32)
 
 
-# ────────────────────────────────────────────────────────────────────
-# file detection helper
-# ────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
+# file detection
+# ──────────────────────────────────────────────────────────────────
 
 def is_nb_model(model_path: str) -> bool:
-    """Return True if *model_path* refers to a compiled .nb network binary."""
+    """Return True if *model_path* is a compiled .nb network binary."""
     if model_path.endswith(".nb"):
         return True
-    # Check magic bytes for VPMN (VeriSilicon VIP Model Network)
     if os.path.isfile(model_path):
         try:
             with open(model_path, "rb") as fh:

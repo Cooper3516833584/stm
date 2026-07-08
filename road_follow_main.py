@@ -70,6 +70,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--corridor-half-width-cm", type=float, default=50.0)
     parser.add_argument("--max-vx-cm-s", type=float, default=25.0)
     parser.add_argument("--max-yaw-rate-deg-s", type=float, default=25.0)
+    parser.add_argument("--road-bypass-enable", action="store_true",
+                        help="Enable radar-assisted in-road bypass for branches/vines intruding into the road center")
+    parser.add_argument("--road-half-width-cm", type=float, default=120.0)
+    parser.add_argument("--road-edge-margin-cm", type=float, default=25.0)
+    parser.add_argument("--road-bypass-lookahead-cm", type=float, default=180.0)
+    parser.add_argument("--road-bypass-min-x-cm", type=float, default=40.0)
+    parser.add_argument("--road-bypass-intrusion-half-width-cm", type=float, default=80.0)
+    parser.add_argument("--road-bypass-clearance-cm", type=float, default=75.0)
+    parser.add_argument("--road-bypass-speed-cm-s", type=float, default=12.0)
+    parser.add_argument("--road-bypass-lateral-step-cm", type=float, default=10.0)
+    parser.add_argument("--road-bypass-guide-distance-cm", type=float, default=150.0)
+    parser.add_argument("--road-bypass-yaw-kp", type=float, default=0.75)
+    parser.add_argument("--road-bypass-max-yaw-bias-deg-s", type=float, default=15.0)
+    parser.add_argument("--road-bypass-yaw-sign", type=float, default=1.0)
+    parser.add_argument("--road-bypass-activate-frames", type=int, default=2)
+    parser.add_argument("--road-bypass-release-s", type=float, default=0.5)
+    parser.add_argument("--road-bypass-min-confidence", type=float, default=0.4)
+    parser.add_argument("--road-bypass-return-pixel-deadband-px", type=float, default=35.0)
     parser.add_argument("--offset-comp-enable", action="store_true")
     parser.add_argument("--enable-offset-comp", action="store_true", help="Deprecated alias for --offset-comp-enable")
     parser.add_argument("--flight-height-m", type=float, default=2.0,
@@ -92,6 +110,10 @@ def main() -> None:
     from road_perception import CameraOffsetCompensationConfig, CameraWhiteBalanceConfig
     from FlightController.Components import MultiRadar, RadarConfig
     from FlightController.Components.FCConnector import FCConnectConfig, connect_fc
+    from FlightController.Solutions.RoadObstacleBypassPlanner import (
+        RoadBypassConfig,
+        RoadObstacleBypassPlanner,
+    )
     from FlightController.Solutions.RoadFollower import RoadFollower, RoadFollowerConfig
     from FlightController.Solutions.SessionRecorder import SessionRecorder, SessionRecorderConfig
     from FlightController.Solutions.Safety import (
@@ -148,6 +170,28 @@ def main() -> None:
             max_vx_cm_s=args.max_vx_cm_s,
             max_yaw_rate_deg_s=args.max_yaw_rate_deg_s,
             branch_preference=args.branch,
+        )
+    )
+    bypass_planner = RoadObstacleBypassPlanner(
+        RoadBypassConfig(
+            enabled=bool(args.road_bypass_enable),
+            road_half_width_cm=args.road_half_width_cm,
+            road_edge_margin_cm=args.road_edge_margin_cm,
+            min_x_cm=args.road_bypass_min_x_cm,
+            lookahead_cm=args.road_bypass_lookahead_cm,
+            intrusion_half_width_cm=args.road_bypass_intrusion_half_width_cm,
+            bypass_clearance_cm=args.road_bypass_clearance_cm,
+            lateral_step_cm=args.road_bypass_lateral_step_cm,
+            guide_distance_cm=args.road_bypass_guide_distance_cm,
+            bypass_speed_cm_s=args.road_bypass_speed_cm_s,
+            bypass_yaw_kp=args.road_bypass_yaw_kp,
+            max_bypass_yaw_bias_deg_s=args.road_bypass_max_yaw_bias_deg_s,
+            max_yaw_rate_deg_s=args.max_yaw_rate_deg_s,
+            bypass_yaw_sign=args.road_bypass_yaw_sign,
+            activate_frames=args.road_bypass_activate_frames,
+            release_s=args.road_bypass_release_s,
+            min_confidence=args.road_bypass_min_confidence,
+            return_pixel_deadband_px=args.road_bypass_return_pixel_deadband_px,
         )
     )
     arbiter = SafetyArbiter(
@@ -239,6 +283,12 @@ def main() -> None:
                 radar_age_s = 0.0
                 radar_connected = True
 
+            planned = bypass_planner.update(
+                desired=desired,
+                perception=perception,
+                radar_field=radar_field,
+                now_s=loop_start,
+            )
             health = flight_health_from_sources(
                 fc=fc,
                 multi_radar=multi_radar,
@@ -246,7 +296,7 @@ def main() -> None:
                 camera_ok=bool(ok),
             )
             safe = arbiter.filter(
-                desired,
+                planned,
                 flight=flight_status_from_fc(fc),
                 radar_connected=radar_connected,
                 radar_age_s=radar_age_s,
@@ -270,7 +320,7 @@ def main() -> None:
                 desired=desired,
                 safe_command=safe.command,
                 decision_reason=decision.reason,
-                extra=_road_record_extra(perception, ok),
+                extra=_road_record_extra(perception, ok, planned, bypass_planner),
             )
             recorder.record_command(
                 loop_count=loop_count,
@@ -278,7 +328,11 @@ def main() -> None:
                 desired=desired,
                 safe_command=safe.command,
                 decision_reason=decision.reason,
-                extra={"camera_ok": bool(ok)},
+                extra={
+                    "camera_ok": bool(ok),
+                    **_bypass_record_extra(bypass_planner),
+                    "planned": _command_extra(planned),
+                },
             )
 
             if loop_start - last_log_s >= 1.0:
@@ -287,11 +341,13 @@ def main() -> None:
                     args=args,
                     perception=perception,
                     desired=desired,
+                    planned=planned,
                     safe_command=safe.command,
                     safety_reason=decision.reason,
                     sent=bool(not actual_dry_run and fc is not None),
                     radar_fresh=radar_connected if multi_radar is not None else "disabled",
                     fc=fc,
+                    bypass_planner=bypass_planner,
                 )
 
             loop_count += 1
@@ -386,11 +442,13 @@ def _log_road_summary(
     args: argparse.Namespace,
     perception,
     desired,
+    planned,
     safe_command,
     safety_reason: str,
     sent: bool,
     radar_fresh,
     fc,
+    bypass_planner=None,
 ) -> None:
     selected = getattr(perception, "selected_branch", None)
     branch = getattr(selected, "label", "none")
@@ -400,9 +458,16 @@ def _log_road_summary(
     angle = float(getattr(perception, "centerline_angle", 90.0)) if perception is not None else 90.0
     conf = float(getattr(perception, "confidence", 0.0)) if perception is not None else 0.0
     fc_mode = getattr(getattr(getattr(fc, "state", None), "mode", None), "value", None)
+    bypass_state = (
+        getattr(getattr(bypass_planner, "state", None), "value", "disabled")
+        if bypass_planner is not None
+        else "disabled"
+    )
+    bypass_y = getattr(bypass_planner, "last_target_y_cm", None) if bypass_planner is not None else None
     logger.info(
         "[ROAD] state={} branch={} err={:.0f} corr={:.0f} angle={:.0f} conf={:.2f} "
-        "desired=(vx={} yaw={}) safe=(vx={} yaw={}) safety={} sent={} radar_fresh={} fc_mode={}".format(
+        "desired=(vx={} yaw={}) planned=(vx={} yaw={}) safe=(vx={} yaw={}) "
+        "bypass={} bypass_y={} safety={} sent={} radar_fresh={} fc_mode={}".format(
             state,
             branch if branch != "none" else args.branch,
             err,
@@ -411,8 +476,12 @@ def _log_road_summary(
             conf,
             round(desired.vx_cm_s),
             round(desired.yaw_rate_deg_s),
+            round(planned.vx_cm_s),
+            round(planned.yaw_rate_deg_s),
             round(safe_command.vx_cm_s),
             round(safe_command.yaw_rate_deg_s),
+            bypass_state,
+            _float_or_none(bypass_y),
             safety_reason,
             sent,
             radar_fresh,
@@ -421,10 +490,10 @@ def _log_road_summary(
     )
 
 
-def _road_record_extra(perception, camera_ok: bool) -> dict[str, object]:
+def _road_record_extra(perception, camera_ok: bool, planned=None, bypass_planner=None) -> dict[str, object]:
     selected = getattr(perception, "selected_branch", None)
     branch = getattr(selected, "label", "none")
-    return {
+    extra = {
         "camera_ok": bool(camera_ok),
         "road_state": getattr(perception, "road_state", "lost") if perception is not None else "lost",
         "branch": branch,
@@ -433,6 +502,32 @@ def _road_record_extra(perception, camera_ok: bool) -> dict[str, object]:
         "centerline_angle": _float_or_none(getattr(perception, "centerline_angle", None)),
         "confidence": _float_or_none(getattr(perception, "confidence", None)),
         "is_road_found": bool(getattr(perception, "is_road_found", False)) if perception is not None else False,
+    }
+    if bypass_planner is not None:
+        extra.update(_bypass_record_extra(bypass_planner))
+    if planned is not None:
+        extra["planned"] = _command_extra(planned)
+    return extra
+
+
+def _command_extra(command) -> dict[str, object] | None:
+    if command is None:
+        return None
+    return {
+        "vx_cm_s": _float_or_none(getattr(command, "vx_cm_s", None)),
+        "vy_cm_s": _float_or_none(getattr(command, "vy_cm_s", None)),
+        "vz_cm_s": _float_or_none(getattr(command, "vz_cm_s", None)),
+        "yaw_rate_deg_s": _float_or_none(getattr(command, "yaw_rate_deg_s", None)),
+        "reason": getattr(command, "reason", ""),
+    }
+
+
+def _bypass_record_extra(bypass_planner) -> dict[str, object]:
+    state = getattr(getattr(bypass_planner, "state", None), "value", "disabled")
+    return {
+        "road_bypass_state": state,
+        "road_bypass_target_y_cm": _float_or_none(getattr(bypass_planner, "last_target_y_cm", None)),
+        "road_bypass_active_side": getattr(bypass_planner, "active_side", None),
     }
 
 

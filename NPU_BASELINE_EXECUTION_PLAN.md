@@ -473,6 +473,7 @@ wrapped latency mean: about 167 ms
 raw_input dtype: float16
 raw_output dtype: float16
 raw profile ended with segmentation fault after reporting metadata
+strace -yy grep: /dev/galcore open and many ioctl calls observed
 ```
 
 Interpretation:
@@ -480,6 +481,8 @@ Interpretation:
 - This `.nb` was generated from the FP32 model path and is not the desired INT8
   NPU artifact.
 - It fails the strict acceptance gate before any overlay test is needed.
+- The model does call into the galcore driver, so "galcore ioctl exists" alone
+  is not sufficient proof of a usable INT8 NPU deployment.
 - The raw-profile segmentation fault is secondary; the model already failed
   because tensor metadata is float16 and latency is above the 80 ms gate.
 - Do not spend more time validating `road_fastseg_256_fp32_1.nb` as an NPU
@@ -602,10 +605,13 @@ file: road_fastseg_256_fp32_1.nb
 input_0:  tensor(float16) [1, 3, 256, 256]
 output_0: tensor(float16) [1, 2, 256, 256]
 mean latency: about 167 ms
+/dev/galcore open/ioctl: observed
 result: FAIL
 ```
 
 This model should not be used for overlay validation or integration.
+The important lesson is that `/dev/galcore` ioctl proves driver interaction,
+but does not by itself prove the model is on the desired fast INT8 path.
 
 2. `road_fastseg_256` QDQ ONNX is internally quantized, but ST Cloud
    Optimize/Generate still produced no usable output.
@@ -639,6 +645,9 @@ result: stop using YOLO11-seg conversion as the main path
 - QDQ markers are necessary evidence, but not sufficient. The ST Cloud
   Optimize/Generate step may still fail with no output.
 - Do not run overlay or integration tests until `.nb` contract passes first.
+- `/dev/galcore` ioctl is necessary evidence, not sufficient evidence. A
+  float16 `.nb` can still touch galcore and remain too slow / not the target
+  INT8 deployment path.
 - The acceptance gate remains:
 
 ```text

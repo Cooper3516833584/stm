@@ -10,7 +10,7 @@
 
 完整记录见 [NPU_ST_CLOUD_20260709_FINDINGS.md](NPU_ST_CLOUD_20260709_FINDINGS.md)，旧转换计划修正见 [NPU_MODEL_CONVERSION_PLAN.md](NPU_MODEL_CONVERSION_PLAN.md)，`.nb` 板端诊断见 [NPU_MODEL_NB_DIAGNOSIS.md](NPU_MODEL_NB_DIAGNOSIS.md)。
 
-当前已确认：官方 ST DeepLab v3 256x256 INT8 `.nb` 能在板端通过 STAI MPU/OpenVX 调用 `/dev/galcore`，raw run 约 51-52ms，说明硬件、驱动和 `.nb` 运行时路径是通的。但它在本项目道路图像上输出全背景，只能作为 NPU 性能基线，不能作为道路感知模型。`road_yolo11n_seg.onnx` 和全改写 FP32 模型可在 ST Cloud Optimize 并生成 `.nb`，但板端输出为 float16、推理约 600ms，不能作为真实 VIP9000 NPU 加速结果。新候选 `road_fastseg_256_fp32.onnx` 可在 ST 云平台 Optimize / Generate 并生成 `.nb`，但 `road_fastseg_256_fp32_1.nb` 板端仍是 float16 I/O，mean latency 约167ms，不能作为 INT8 NPU 目标。`road_fastseg_256_fp32_PerTensor_quant_...onnx` 静态检查确实包含 QDQ 量化节点，但云端 Optimize/Generate 无输出。当前结论是：板端 NPU 路径已被官方模型证明可用，但自训练道路模型尚未获得可用 INT8 `.nb`；停止重复相同转换，经验总结见 [NPU_BASELINE_EXECUTION_PLAN.md](NPU_BASELINE_EXECUTION_PLAN.md) 第 11 节。
+当前已确认：官方 ST DeepLab v3 256x256 INT8 `.nb` 能在板端通过 STAI MPU/OpenVX 调用 `/dev/galcore`，raw run 约 51-52ms，说明硬件、驱动和 `.nb` 运行时路径是通的。但它在本项目道路图像上输出全背景，只能作为 NPU 性能基线，不能作为道路感知模型。`road_yolo11n_seg.onnx` 和全改写 FP32 模型可在 ST Cloud Optimize 并生成 `.nb`，但板端输出为 float16、推理约 600ms，不能作为真实 VIP9000 NPU 加速结果。新候选 `road_fastseg_256_fp32.onnx` 可在 ST 云平台 Optimize / Generate 并生成 `.nb`，但 `road_fastseg_256_fp32_1.nb` 板端仍是 float16 I/O，mean latency 约167ms；`strace -yy` 已确认该模型会 open/ioctl `/dev/galcore`，这说明它触碰了 galcore 驱动，但仍不能作为合格 INT8 NPU 目标。`road_fastseg_256_fp32_PerTensor_quant_...onnx` 静态检查确实包含 QDQ 量化节点，但云端 Optimize/Generate 无输出。当前结论是：板端 NPU 路径已被官方模型证明可用，但自训练道路模型尚未获得可用 INT8 `.nb`；停止重复相同转换，经验总结见 [NPU_BASELINE_EXECUTION_PLAN.md](NPU_BASELINE_EXECUTION_PLAN.md) 第 11 节。
 
 ---
 

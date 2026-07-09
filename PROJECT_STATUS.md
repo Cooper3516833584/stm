@@ -1,8 +1,8 @@
 # 🚁 Cooper_drone 伴随计算机系统配置与开发进度纪要
 
 **项目名称**: Cooper_drone (基于 MYiR 开发板的无人机机载/伴随计算机开发)
-**当前阶段**: M7 阶段 — OS 迁移完成 (OpenSTLinux v6.0) + 全子系统验证通过 + Yaw 符号 Bug 修复 + NPU INT8 `.nb` 转换链路排查中
-**最后更新**: 2026年7月9日 (ST Cloud/STM32MP257 NPU 模型转换实测记录补充；FP32 `.nb` 可运行但未证明 NPU 生效，INT8/QDQ/QOperator Optimize 仍失败)
+**当前阶段**: M7 阶段 — OS 迁移完成 (OpenSTLinux v6.0) + 全子系统验证通过 + Yaw 符号 Bug 修复 + road_fastseg_256 `.nb` 板端验收中
+**最后更新**: 2026年7月9日 (官方 DeepLab 256 `.nb` 已证明板端 NPU 路径可跑；新训练的 `road_fastseg_256_fp32.onnx` 已可在 ST 云平台生成 `.nb`，下一步进入板端 contract/latency/galcore/overlay 验收)
 
 ---
 
@@ -10,7 +10,7 @@
 
 完整记录见 [NPU_ST_CLOUD_20260709_FINDINGS.md](NPU_ST_CLOUD_20260709_FINDINGS.md)，旧转换计划修正见 [NPU_MODEL_CONVERSION_PLAN.md](NPU_MODEL_CONVERSION_PLAN.md)，`.nb` 板端诊断见 [NPU_MODEL_NB_DIAGNOSIS.md](NPU_MODEL_NB_DIAGNOSIS.md)。
 
-当前已确认：`road_yolo11n_seg.onnx` 和全改写 FP32 模型均可在 ST Cloud Optimize 并生成 `.nb`，但板端输出为 float16、推理约 600ms，`strace` 未观察到 `/dev/galcore` ioctl，因此不能作为真实 VIP9000 NPU 加速结果。ST Cloud QDQ、本地 QDQ、强制 int8 I/O 和 QOperator 量化模型 Optimize 均失败，典型错误为 `Generation does not contain any output`。下一步重点不是继续扩大校准集，而是解决“量化 ONNX 到实际 NPU INT8 `.nb`”的编译链路。
+当前已确认：官方 ST DeepLab v3 256x256 INT8 `.nb` 能在板端通过 STAI MPU/OpenVX 调用 `/dev/galcore`，raw run 约 51-52ms，说明硬件、驱动和 `.nb` 运行时路径是通的。但它在本项目道路图像上输出全背景，只能作为 NPU 性能基线，不能作为道路感知模型。`road_yolo11n_seg.onnx` 和全改写 FP32 模型可在 ST Cloud Optimize 并生成 `.nb`，但板端输出为 float16、推理约 600ms，不能作为真实 VIP9000 NPU 加速结果。新候选 `road_fastseg_256_fp32.onnx` 已可在 ST 云平台 Optimize / Generate 并生成 `.nb`，当前主线切换为：下载并部署 `road_fastseg_256` `.nb`，运行 `validate_nb_npu_contract.py --profile-raw-stai`，用 `strace -yy` 确认 `/dev/galcore` ioctl，再用 overlay 工具验证真实道路 mask 是否可用。
 
 ---
 

@@ -38,6 +38,67 @@ FP32 ONNX -> ST Cloud Quantize(QDQ) -> Optimize
 
 因此，当前瓶颈不是某个单独算子改写，而是 **YOLO11-seg 量化图到 STM32MP2 NBG/.nb 的编译链路不通**。
 
+### 1.3 2026-07-09 补充：road_fastseg_256 已可生成 `.nb`
+
+新增测试模型：
+
+```text
+FlightController/Solutions/model/road_fastseg_256_fp32.onnx
+FlightController/Solutions/model/road_fastseg_256_calibration_0_1_rgb.npz
+FlightController/Solutions/model/road_fastseg_256_fp32_PerTensor_quant_road_fastseg_256_calibration_0_1_rgb_npz_1.onnx
+```
+
+该模型不是 YOLO11-seg，而是更简单的道路/背景语义分割模型：
+
+```text
+input:  3x256x256 float32
+output: 2x256x256 float32
+class 0: background
+class 1: road
+```
+
+ST Cloud Quantize 后的 ONNX 仍显示 32-bit graph input/output，这是 QDQ
+模型的正常表现。静态检查已确认内部存在大量量化节点：
+
+```text
+QuantizeLinear:   146
+DequantizeLinear: 309
+```
+
+后续补充实验确认：`road_fastseg_256_fp32.onnx` 可以在 ST 云平台
+Optimize / Generate 并生成 `.nb`：
+
+```text
+road_fastseg_256_fp32.onnx -> ST Cloud Optimize / Generate -> .nb
+```
+
+因此，旧结论中“YOLO11-seg 量化图到 STM32MP2 NBG/.nb 的编译链路不通”
+不应扩展到 `road_fastseg_256`。当前应改为：
+
+```text
+YOLO11-seg 量化/改写路径仍然不适合作为当前主线。
+road_fastseg_256 已进入 .nb 板端验收阶段。
+```
+
+这与两件已经验证的事实一致：
+
+1. ST Cloud Quantize 确实可以生成内部 QDQ 量化 ONNX。
+2. 官方 ST DeepLab 256x256 INT8 `.nb` 已在板端触发 `/dev/galcore`
+   并达到约 51-52 ms raw run。
+
+真正需要继续验证的是：
+
+```text
+road_fastseg_256 生成的 .nb 是否为 int8/uint8 或 static-affine 路径
+road_fastseg_256 生成的 .nb 是否触发 /dev/galcore ioctl
+road_fastseg_256 生成的 .nb 是否达到 <80 ms wrapped / <60 ms raw_run
+road_fastseg_256 的 road mask 是否在真实道路图片上可用
+```
+
+当前不建议继续投入 YOLO11-seg 量化转换。下一步应把
+`road_fastseg_256` 生成的 `.nb` 拷贝到板端，运行
+`validate_nb_npu_contract.py`、`strace -yy` 和 overlay 可视化验收。
+
 ---
 
 ## 2. 模型与文件清单

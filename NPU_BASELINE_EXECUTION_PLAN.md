@@ -364,3 +364,96 @@ Next project direction:
    prefer `Resize nearest + Conv` for upsampling.
 4. Export ONNX, quantize INT8 per-tensor, generate `.nb`, then rerun the same
    contract and overlay tools.
+
+---
+
+## 9. 2026-07-09 road_fastseg_256 ST Cloud Result
+
+Candidate files:
+
+```text
+FlightController/Solutions/model/road_fastseg_256_fp32.onnx
+FlightController/Solutions/model/road_fastseg_256_calibration_0_1_rgb.npz
+FlightController/Solutions/model/road_fastseg_256_fp32_PerTensor_quant_road_fastseg_256_calibration_0_1_rgb_npz_1.onnx
+```
+
+What was confirmed:
+
+- The FP32 ONNX is a much more NPU-friendly road/background semantic
+  segmentation candidate than YOLO11-seg.
+- The calibration file is valid: 128 RGB NCHW float32 images in range 0.0-1.0.
+- ST Cloud Quantize produced an internal QDQ graph. Static inspection showed
+  many `QuantizeLinear` and `DequantizeLinear` nodes even though the UI still
+  showed 32-bit graph input/output.
+
+Latest cloud result:
+
+```text
+road_fastseg_256_fp32.onnx
+-> ST Cloud Optimize / Generate
+-> .nb generated successfully
+```
+
+Corrected interpretation:
+
+- The old YOLO11-seg records were accurate, but the wording was too narrow.
+- The official ST DeepLab `.nb` baseline proves the board OpenVX/NPU runtime
+  can execute a generated `.nb`.
+- The new `road_fastseg_256` evidence proves that a custom road semantic
+  segmentation model can also pass the ST Cloud generation stage.
+- The remaining question is no longer "can we generate `.nb`"; it is whether
+  the generated `.nb` is a real, fast, quantized NPU artifact and whether its
+  road mask is usable.
+
+Do not spend more time on:
+
+```text
+YOLO11-seg QDQ/QOperator conversion tuning
+forcing graph input/output to INT8
+repeating cloud conversion for road_fastseg_256 before board acceptance
+```
+
+Next useful actions, in order:
+
+1. Use the generated `.nb` now present in the model directory:
+
+```text
+FlightController/Solutions/model/road_fastseg_256_fp32_1.nb
+```
+
+2. Run the strict `.nb` contract check on the board:
+
+```bash
+PYTHONPATH=. python3 FlightController/tools/validate_nb_npu_contract.py \
+  --model FlightController/Solutions/model/road_fastseg_256_fp32_1.nb \
+  --runs 20 \
+  --max-mean-ms 80 \
+  --profile-raw-stai
+```
+
+3. Confirm driver calls:
+
+```bash
+PYTHONPATH=. strace -f -yy -e openat,ioctl \
+  python3 FlightController/tools/validate_nb_npu_contract.py \
+    --model FlightController/Solutions/model/road_fastseg_256_fp32_1.nb \
+    --runs 3 \
+    --max-mean-ms 80 \
+    --profile-raw-stai \
+  2>&1 | tee /media/sdcard/road_fastseg_256_nb_strace_yy.log
+
+grep -E 'galcore|ioctl\([^)]*</dev/galcore' /media/sdcard/road_fastseg_256_nb_strace_yy.log
+```
+
+4. Render road overlays:
+
+```bash
+PYTHONPATH=. python3 FlightController/tools/render_deeplab_nb_overlay.py \
+  --model FlightController/Solutions/model/road_fastseg_256_fp32_1.nb \
+  --resize-mode stretch \
+  --output-dir /media/sdcard/npu_debug/road_fastseg_256_overlay \
+  tests/roads/IPC_2026-06-14.10.32.58.1790.jpg
+```
+
+5. If latency, `/dev/galcore`, and mask quality pass, add a semantic-segmentation
+   runtime path in `road_perception.py` and keep the YOLO path as fallback.

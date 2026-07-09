@@ -6,6 +6,20 @@
 
 ---
 
+## 0. 2026-07-09 最新实测结论
+
+> 详细记录见 [NPU_ST_CLOUD_20260709_FINDINGS.md](NPU_ST_CLOUD_20260709_FINDINGS.md)。本节用于修正本文早期的乐观假设。
+
+1. `road_yolo11n_seg.onnx` 原始 FP32 模型可以在 ST Cloud 中 Optimize；全改写版 `road_yolo11n_seg_vsinpu_fp32_for_stcloud.onnx` 也可以 Optimize。
+2. `ConvTranspose`、`Split`、`MaxPool.dilations` 的单点改写变体均已验证可 Optimize，说明当前 ST Cloud Optimize 阶段并不是被某一个单独 FP32 算子阻塞。
+3. ST Cloud Quantize 生成的是 QDQ 量化图，graph 输入/输出仍显示为 float32，这是正常现象，不代表没有量化；静态检查可见大量 `QuantizeLinear`/`DequantizeLinear` 节点。
+4. 但 ST Cloud QDQ、本地 QDQ、强制 int8 I/O、本地 QOperator 等量化模型进入 Optimize 时均失败，典型报错为 `Generation does not contain any output`。
+5. FP32 Optimize 生成的 `.nb` 可加载和推理，但输入/输出为 float16，板端实测约 600ms，`strace` 未看到 `/dev/galcore` ioctl，因此不能视为 VIP9000 NPU 加速。
+6. 当前真正未解决的问题是：**如何得到 ST Cloud/STM32AI MPU 能编译为实际 NPU 执行路径的 INT8 `.nb`**。FP32 `.nb` 只能作为功能链路探活产物，不能作为性能目标。
+7. 后续可行方案已记录在 [NPU_ST_CLOUD_20260709_FINDINGS.md](NPU_ST_CLOUD_20260709_FINDINGS.md) 第 7 节，包括 ST 官方链路、官方模型/换架构、拆图、重训 NPU 友好模型和板端 VSINPU EP 直跑等分支。
+
+---
+
 ## 1. 问题根因
 
 ### 1.1 NPU 硬件栈已就绪

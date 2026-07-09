@@ -7,6 +7,22 @@
 
 ---
 
+## 0. 2026-07-09 补充结论
+
+> 后续 ST Cloud、量化、变体模型和板端测试的完整记录见 [NPU_ST_CLOUD_20260709_FINDINGS.md](NPU_ST_CLOUD_20260709_FINDINGS.md)。
+
+最新测试对象为 `road_yolo11n_seg_vsinpu_fp32_opt.nb`。该 `.nb` 可以被 `stai_mpu` 加载并完成多次推理，未再复现本文早期记录的第二次推理 segfault，但它仍然不是有效 NPU 加速结果：
+
+- 加载日志包含 `Loading dynamically: /usr/lib/libstai_mpu_ovx.so.6` 和 `[OVX]: Loading nbg model`，只能说明 STAI/OVX 路径被加载，不能单独证明 NPU 硬件执行。
+- 模型 I/O 为 float16：输入 `input_0 [1, 3, 416, 416] tensor(float16)`，输出 `output_0 [1, 37, 3549] tensor(float16)`、`output_1 [1, 32, 104, 104] tensor(float16)`。
+- 10 次随机输入推理平均约 `611.78 ms`，FPS 约 `1.6`，属于 CPU/fallback 量级。
+- `strace -f -e ioctl ... | grep galcore` 没有输出，未观察到 `/dev/galcore` ioctl。
+- 运行 `test_nb_model.py` 时需要在项目根目录前置 `PYTHONPATH=.`，否则可能因找不到 `nb_graph` 模块而误判测试失败。
+
+因此，`.nb` 是否“能加载/能推理”和“是否真正调用 VIP9000 NPU”必须分开验收。生产可用的 NPU 模型至少需要同时满足：INT8/定点执行路径、板端出现 `/dev/galcore` ioctl、推理耗时显著低于 600ms。
+
+---
+
 ## 1. 最终结论（TL;DR）
 
 **.nb 模型加载成功但 NPU 硬件未被使用**。推理 669ms 走的是纯 CPU 路径，且在第二次推理时 segfault。ST Cloud 产出的这个 `.nb` 文件不能用于生产。

@@ -40,6 +40,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not fail on float input/output metadata.",
     )
+    parser.add_argument(
+        "--profile-raw-stai",
+        action="store_true",
+        help="Also time raw stai_mpu set_input/run/get_output without NBGraphSession conversions.",
+    )
     return parser.parse_args()
 
 
@@ -90,6 +95,95 @@ def _make_input(session, image_path: str | None) -> tuple[str, np.ndarray]:
     img = img.astype(np.float32) / 255.0
     img = np.transpose(img, (2, 0, 1))
     return input_name, np.expand_dims(img, axis=0).astype(np.float32)
+
+
+def _dtype_from_meta_type(type_name: str) -> np.dtype:
+    lower = str(type_name).lower()
+    if "uint8" in lower:
+        return np.dtype(np.uint8)
+    if "int8" in lower:
+        return np.dtype(np.int8)
+    if "float16" in lower:
+        return np.dtype(np.float16)
+    return np.dtype(np.float32)
+
+
+def _profile_raw_stai(model_path: str, runs: int, warmup: int) -> None:
+    """Print raw STAI timings without Python-side quant/dequant wrappers."""
+    from stai_mpu import stai_mpu_network  # type: ignore[import-untyped]
+
+    print()
+    print("=" * 72)
+    print("  Raw stai_mpu profile")
+    print("=" * 72)
+
+    network = stai_mpu_network(model_path=model_path, use_hw_acceleration=True)
+    input_infos = network.get_input_infos()
+    output_infos = network.get_output_infos()
+
+    raw_inputs: list[np.ndarray] = []
+    for index, info in enumerate(input_infos):
+        shape = list(info.get_shape())
+        dtype = _dtype_from_meta_type(info.get_dtype())
+        if dtype == np.int8:
+            arr = np.random.randint(-128, 127, size=shape, dtype=np.int8)
+        elif dtype == np.uint8:
+            arr = np.random.randint(0, 255, size=shape, dtype=np.uint8)
+        else:
+            arr = np.random.rand(*shape).astype(dtype)
+        raw_inputs.append(np.ascontiguousarray(arr))
+        print(f"raw_input[{index}]: shape={shape} dtype={raw_inputs[-1].dtype}")
+
+    for index, info in enumerate(output_infos):
+        print(
+            f"raw_output[{index}]: shape={list(info.get_shape())} "
+            f"dtype={_dtype_from_meta_type(info.get_dtype())}"
+        )
+
+    for index, arr in enumerate(raw_inputs):
+        network.set_input(index, arr)
+
+    for _ in range(max(0, warmup)):
+        network.run()
+        for index in range(len(output_infos)):
+            _ = network.get_output(index)
+
+    run_times: list[float] = []
+    get_times: list[float] = []
+    set_times: list[float] = []
+    for _ in range(max(1, runs)):
+        start = time.perf_counter()
+        for index, arr in enumerate(raw_inputs):
+            network.set_input(index, arr)
+        set_times.append((time.perf_counter() - start) * 1000.0)
+
+        start = time.perf_counter()
+        network.run()
+        run_times.append((time.perf_counter() - start) * 1000.0)
+
+        start = time.perf_counter()
+        for index in range(len(output_infos)):
+            _ = network.get_output(index)
+        get_times.append((time.perf_counter() - start) * 1000.0)
+
+    print(
+        "raw_set_input_ms: "
+        f"mean={float(np.mean(set_times)):.2f} "
+        f"min={float(np.min(set_times)):.2f} "
+        f"max={float(np.max(set_times)):.2f}"
+    )
+    print(
+        "raw_run_ms: "
+        f"mean={float(np.mean(run_times)):.2f} "
+        f"min={float(np.min(run_times)):.2f} "
+        f"max={float(np.max(run_times)):.2f}"
+    )
+    print(
+        "raw_get_output_ms: "
+        f"mean={float(np.mean(get_times)):.2f} "
+        f"min={float(np.min(get_times)):.2f} "
+        f"max={float(np.max(get_times)):.2f}"
+    )
 
 
 def main() -> int:
@@ -162,10 +256,14 @@ def main() -> int:
         print("[FAIL]")
         for failure in failures:
             print(f"  - {failure}")
+        if args.profile_raw_stai:
+            _profile_raw_stai(args.model, args.runs, args.warmup)
         return 1
 
     print("[PASS] tensor metadata and latency look NPU-compatible")
     print("Next proof: run this command under strace and grep for /dev/galcore ioctl.")
+    if args.profile_raw_stai:
+        _profile_raw_stai(args.model, args.runs, args.warmup)
     return 0
 
 

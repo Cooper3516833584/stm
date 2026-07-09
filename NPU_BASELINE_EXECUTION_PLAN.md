@@ -59,6 +59,26 @@ Expected result:
 ... ioctl(... galcore fd ...)
 ```
 
+If tensor metadata is `int8`/`uint8` but latency is still high, rerun with raw
+STAI profiling:
+
+```bash
+PYTHONPATH=. python3 FlightController/tools/validate_nb_npu_contract.py \
+  --model FlightController/Solutions/model/<candidate>.nb \
+  --runs 20 \
+  --max-mean-ms 80 \
+  --profile-raw-stai
+```
+
+Interpretation:
+
+| Observation | Meaning |
+|---|---|
+| `raw_run_ms` is also hundreds of ms | The compiled network/runtime path is slow; check galcore ioctl and cloud benchmark. |
+| `raw_run_ms` is fast but total latency is slow | Python input conversion or output dequantization is the bottleneck; adapt the runtime pipeline to feed quantized tensors directly. |
+| No `/dev/galcore` in strace | The model is not using the NPU even if I/O is int8. |
+| `/dev/galcore` exists but `raw_run_ms` is slow | NPU may be called, but model placement, driver/runtime, or generated NBG is not performant enough. |
+
 ---
 
 ## 3. Official Baseline Candidate

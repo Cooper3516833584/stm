@@ -339,3 +339,28 @@ Inspect these outputs to determine which class is the road mask:
 ```
 
 If class 1 is not the road, rerun with `--road-class 0`.
+
+Preprocessing comparison result on the same road image:
+
+| Preprocess | Class histogram | Channel relationship |
+|---|---|---|
+| letterbox + RGB | class0=1.000, class1=0.000 | class0 strongly positive, class1 negative |
+| stretch + RGB | class0=1.000, class1=0.000 | class0 strongly positive, class1 negative |
+| stretch + BGR | class0=1.000, class1=0.000 | class0 strongly positive, class1 negative |
+
+Conclusion:
+
+- The ST DeepLab v3 256x256 `.nb` is a valid NPU performance baseline.
+- It is not a usable road-following perception model for the current road
+  images. It predicts all pixels as class 0/background.
+- The failure is not explained by the tested resize/color-order variants.
+
+Next project direction:
+
+1. Keep this model as the verified NPU smoke/performance baseline.
+2. Train or fine-tune a road/background semantic segmentation model.
+3. Keep the model NPU-friendly: fixed `1x3x256x256` or `1x3x320x320`,
+   single semantic output `[1,2,H,W]`, no `ConvTranspose`, no dynamic shape,
+   prefer `Resize nearest + Conv` for upsampling.
+4. Export ONNX, quantize INT8 per-tensor, generate `.nb`, then rerun the same
+   contract and overlay tools.

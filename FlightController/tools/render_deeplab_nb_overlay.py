@@ -54,6 +54,18 @@ def parse_args() -> argparse.Namespace:
         help="Class index to use for the primary overlay. Try 0 or 1.",
     )
     parser.add_argument(
+        "--color-order",
+        choices=["rgb", "bgr"],
+        default="rgb",
+        help="Model input color order after letterbox.",
+    )
+    parser.add_argument(
+        "--resize-mode",
+        choices=["letterbox", "stretch"],
+        default="letterbox",
+        help="Resize input with YOLO-style letterbox or direct stretch.",
+    )
+    parser.add_argument(
         "--alpha",
         type=float,
         default=0.35,
@@ -78,9 +90,22 @@ def _letterbox(frame: np.ndarray, size: int) -> tuple[np.ndarray, float, float, 
     return image, scale, pad_x, pad_y
 
 
-def _preprocess(frame: np.ndarray, size: int) -> tuple[np.ndarray, float, float, float]:
-    image, scale, pad_x, pad_y = _letterbox(frame, size)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+def _preprocess(
+    frame: np.ndarray,
+    size: int,
+    *,
+    color_order: str,
+    resize_mode: str,
+) -> tuple[np.ndarray, float, float, float]:
+    if resize_mode == "stretch":
+        image = cv2.resize(frame, (size, size), interpolation=cv2.INTER_LINEAR)
+        scale = size / float(max(frame.shape[:2]))
+        pad_x = 0.0
+        pad_y = 0.0
+    else:
+        image, scale, pad_x, pad_y = _letterbox(frame, size)
+    if color_order == "rgb":
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     image = image.astype(np.float32) / 255.0
     image = np.transpose(image, (2, 0, 1))
     return np.expand_dims(image, axis=0).astype(np.float32), scale, pad_x, pad_y
@@ -133,6 +158,17 @@ def _write_outputs(
         "  class_pixels:",
         " ".join(f"class{idx}={int(count)}({count / total:.3f})" for idx, count in enumerate(hist)),
     )
+    print(
+        "  channel_stats:",
+        " ".join(
+            (
+                f"class{idx}:min={float(logits[idx].min()):.4f},"
+                f"mean={float(logits[idx].mean()):.4f},"
+                f"max={float(logits[idx].max()):.4f}"
+            )
+            for idx in range(classes)
+        ),
+    )
     for idx in range(classes):
         mask = (class_map == idx).astype(np.uint8) * 255
         cv2.imwrite(str(output_dir / f"{stem}_class{idx}_mask.png"), mask)
@@ -167,7 +203,12 @@ def main() -> int:
             print(f"[WARN] could not read image: {image_path}")
             continue
         orig_h, orig_w = frame.shape[:2]
-        blob, _scale, pad_x, pad_y = _preprocess(frame, input_size)
+        blob, _scale, pad_x, pad_y = _preprocess(
+            frame,
+            input_size,
+            color_order=args.color_order,
+            resize_mode=args.resize_mode,
+        )
         start = time.perf_counter()
         outputs = session.run(None, {input_name: blob})
         elapsed_ms = (time.perf_counter() - start) * 1000.0

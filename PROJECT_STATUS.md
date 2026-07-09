@@ -1,8 +1,16 @@
 # 🚁 Cooper_drone 伴随计算机系统配置与开发进度纪要
 
 **项目名称**: Cooper_drone (基于 MYiR 开发板的无人机机载/伴随计算机开发)
-**当前阶段**: M7 阶段 — OS 迁移完成 (OpenSTLinux v6.0) + 全子系统验证通过 + NPU 等待模型转换
-**最后更新**: 2026年6月11日 (M7 回话: OS迁移完成, 双雷达/飞控/摄像头全链路验证, 白平衡修正, NPU模型转换方案. 旧: 2026-06-07 NPU适配诊断, 摄像头几何标定, OS迁移决策)
+**当前阶段**: M7 阶段 — OS 迁移完成 (OpenSTLinux v6.0) + 全子系统验证通过 + Yaw 符号 Bug 修复 + NPU INT8 `.nb` 转换链路排查中
+**最后更新**: 2026年7月9日 (ST Cloud/STM32MP257 NPU 模型转换实测记录补充；FP32 `.nb` 可运行但未证明 NPU 生效，INT8/QDQ/QOperator Optimize 仍失败)
+
+---
+
+## 0. 2026-07-09 NPU/ST Cloud 当前结论
+
+完整记录见 [NPU_ST_CLOUD_20260709_FINDINGS.md](NPU_ST_CLOUD_20260709_FINDINGS.md)，旧转换计划修正见 [NPU_MODEL_CONVERSION_PLAN.md](NPU_MODEL_CONVERSION_PLAN.md)，`.nb` 板端诊断见 [NPU_MODEL_NB_DIAGNOSIS.md](NPU_MODEL_NB_DIAGNOSIS.md)。
+
+当前已确认：`road_yolo11n_seg.onnx` 和全改写 FP32 模型均可在 ST Cloud Optimize 并生成 `.nb`，但板端输出为 float16、推理约 600ms，`strace` 未观察到 `/dev/galcore` ioctl，因此不能作为真实 VIP9000 NPU 加速结果。ST Cloud QDQ、本地 QDQ、强制 int8 I/O 和 QOperator 量化模型 Optimize 均失败，典型错误为 `Generation does not contain any output`。下一步重点不是继续扩大校准集，而是解决“量化 ONNX 到实际 NPU INT8 `.nb`”的编译链路。
 
 ---
 
@@ -43,6 +51,15 @@
    * **症状**: `PROFILE` 日志行显示个别循环迭代耗时 88.9ms（正常 < 5ms），伴随 `Map_Circle` 有效点云数从 ~850 暴跌至 ~390，雷达吞吐降至 ~51%。
    * **根源**: `loguru.add(..., enqueue=False)` 同步写 eMMC 文件。当文件系统触发 journal commit 或写回缓存 flush 时，`write()` 调用阻塞主线程 80-90ms。Python GIL 在此期间被持有，串口读取线程无法执行 `Map_Circle.update()`，雷达帧积压在 `buf` 中无法处理，`timeout_clear` (0.15s) 清除过期点云导致覆盖率下降。
    * **修复**: `enqueue=False` → `enqueue=True`（异步队列写入），配合 `sleep(0.001)` + batch read 串口策略，最终方案经实物验证：GIL 阻塞峰值从 88.9ms 降至不可测（所有 PROFILE total < 12ms），零 CRC 错误，详见 [§6.6](#66-mapupdate-性能优化攻坚)。
+8. **RelativeGoalNavigator Yaw 符号 Bug — 避障方向左右颠倒** ✅ 已修复 (2026-07-08):
+   * **症状**: 雷达避障表现"左右镜像"——障碍物在左侧时飞机右转撞向障碍物，在右侧时左转撞向障碍物。地面推车测试 (§6.8) 仅验证了 1D 前向 stop/slow/cruise（不涉及 yaw），未暴露此问题。
+   * **根源**: `_yaw_command()` 缺少符号反转。Navigator 内部角度以机体坐标系表示（+Y = 左），但飞控 API `send_realtime_control_data(yaw)` 的约定是 `yaw>0 = 顺时针 = 右转`。
+     * 场景：障碍物在左前方 → Navigator 选择右侧方向(-30°)避开 → `_yaw_command(-30°) = -15 °/s` → 飞控解读为左转 → 飞机**转向障碍物**而非远离。
+     * 正确行为：`_yaw_command(-30°)` 应输出 `+15 °/s`（右转）。
+   * **修复** (`RelativeGoalNavigator.py:605`, 1行):
+     * `angle_deg * cfg.yaw_kp` → `-angle_deg * cfg.yaw_kp`
+     * `RoadFollower` 已有 `yaw_sign` 参数应对同类问题，`RelativeGoalNavigator` 此前漏掉了。
+   * **验证**: 阶段 0 测试套件 (`tests/test_radar_coordinates.py` + `tests/test_yaw_sign_consistency.py`) 确认雷达坐标转换正确、yaw 符号反了；阶段 1 合成数据管道测试 (`tests/stage1_synthetic_radar_pipeline.py`) 10/10 通过；实物雷达方向监控脚本 (`tests/stage1_hardware_radar_dir.py`) 待运行。
 
 ## 4. 激光雷达 (LDROBOT D500) 硬件拓扑
 
@@ -738,3 +755,106 @@ strings /usr/lib/libonnxruntime.so.1.19.2 | grep -i vsinpu
 | 校准图片采集 | 🟡 | 用于 INT8 量化 (需道路场景) |
 | Weston 桌面管理 | 🟢 | 当前未关闭, ~100MB RAM; 可 `systemctl disable weston` |
 | eMMC 空间利用 | 🟢 | 7.3G eMMC 空闲, 可作备份/数据盘 |
+
+---
+
+## 12. M8 阶段：坐标系全链路验证 & Yaw 符号 Bug 修复 (2026-07-08)
+
+### 12.1 问题描述
+
+用户报告"雷达平面内数据左右镜像"——无人机的避障转向方向与预期相反。
+
+### 12.2 坐标系全链路审计
+
+经完整追踪从 D500 雷达原始数据到飞控指令的坐标转换链：
+
+| 环节 | 约定 | 验证结果 |
+|------|------|:--:|
+| D500 雷达物理约定 | 0°=前, 顺时针递增（俯视） | ✅ |
+| `get_points_xy_cm()` 极坐标→笛卡尔 | `x=d·cos(θ), y=-d·sin(θ)` | ✅ |
+| 机体坐标系 | +X=前, +Y=左, -Y=右 | ✅ |
+| `get_points_body_cm()` 安装位姿变换 | 旋转 + 平移 + Y镜像 (下雷达) | ✅ |
+| `select_forward_corridor()` SafetyArbiter 前方走廊 | `x>min_x & |y|<half_w` | ✅ (仅 1D) |
+| 可视化渲染 (`visualize_radar_data.py`) | 前=上, 左=左 | ✅ |
+| 飞控 API `send_realtime_control_data(yaw)` | yaw>0 = 顺时针 = 右转 | ✅ (在线取反 `-yaw`) |
+| **`_yaw_command()` 输出→飞控 yaw** | **缺少符号反转** | 🔴 **BUG** |
+
+**结论：雷达坐标映射完全正确，问题出在 `RelativeGoalNavigator._yaw_command()` 的 yaw 输出符号。**
+
+### 12.3 Bug 详解
+
+Navigator 内部候选方向以机体坐标系表示（+ = 左, - = 右），但飞控 API 的 yaw 约定是 `yaw>0 = 顺时针 = 右转`。二者之间存在一个负号关系，而 `_yaw_command()` 没有处理：
+
+```
+障碍物在左前方 (body angle=+45°) 
+  → Navigator 选右侧方向避开 (selected=-30°)
+  → 当前 _yaw_command(-30°) = -30×0.5 = -15 °/s  → FC: 左转 ❌ 撞向障碍物!
+  → 修复 _yaw_command(-30°) = +30×0.5 = +15 °/s  → FC: 右转 ✅ 避开障碍物!
+```
+
+| 场景 | 修复前 | 修复后 |
+|------|:------:|:------:|
+| 左前有障碍，选右侧方向(-30°) | yaw=-15 → 左转 ❌ | yaw=+15 → 右转 ✅ |
+| 右前有障碍，选左侧方向(+30°) | yaw=+15 → 右转 ❌ | yaw=-15 → 左转 ✅ |
+
+**为什么之前没发现**：`LocalPlanner` 的 `_plan_free_flight()` 只做前向 stop/slow/cruise，不输出 yaw；地面推车测试（§6.8）只验证了 1D 前向障碍物检测。
+
+### 12.4 修复
+
+**文件**: `FlightController/Solutions/RelativeGoalNavigator.py:605`，**1 行改动**:
+
+```python
+# 修复前
+yaw = angle_deg * cfg.yaw_kp
+
+# 修复后
+yaw = -angle_deg * cfg.yaw_kp
+```
+
+注：`RoadFollower` 已有 `yaw_sign` 配置参数（默认 1.0）应对同类问题，`RelativeGoalNavigator` 此前缺失了此防护。
+
+### 12.5 新增测试套件
+
+| 测试脚本 | 类型 | 说明 |
+|----------|------|------|
+| `tests/test_radar_coordinates.py` | PC 单元测试 | 雷达极坐标→笛卡尔坐标转换验证 (10/10) |
+| `tests/test_yaw_sign_consistency.py` | PC 单元测试 | 完整控制链 yaw 符号一致性验证 (6/6) |
+| `tests/stage1_synthetic_radar_pipeline.py` | PC 合成数据测试 | Map_Circle → body frame → 可视化全管道 (10/10) |
+| `tests/stage1_hardware_radar_dir.py` | 开发板实物测试 | 雷达物理方向监控脚本 (按扇区显示最近距离) |
+
+### 12.6 虚拟环境自动激活修复
+
+开发板默认 shell 为 `/bin/sh`（非 `/bin/bash`），`.bashrc` 不会被加载。在 `~/.profile` 中添加：
+
+```bash
+source /usr/local/UFC_venv/bin/activate
+```
+
+### 12.7 外设诊断命令
+
+```bash
+# 串口设备列表
+ls -la /dev/tty* 2>/dev/null | grep -E 'tty(USB|ACM|STM|AMA)'
+
+# USB 设备树
+lsusb
+
+# 雷达/飞控 VID:PID 识别
+# D500 雷达: 10C4:EA60 (CP210x)
+# 凌霄飞控: 66CC:2233
+
+# 摄像头
+ls -la /dev/video*
+
+# 内核日志 (串口/USB 信息)
+dmesg | grep -iE 'tty|cp210|usb|radar|uart' | tail -30
+```
+
+### 12.8 雷达数据录制与可视化
+
+```bash
+# 录制 (仅雷达, 不上摄像头)
+PYTHONPATH=. python record_data.py --no-camera --output-dir /media/sdcard/recordings
+
+# PC 端渲染
+python visualize_radar_data.py <record_dir> --video --video-fps 10

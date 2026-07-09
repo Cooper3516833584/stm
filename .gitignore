@@ -17,3 +17,12 @@ dist/
 
 # Local calibration images
 /adjustment/
+
+/venv_activate.txt
+
+/cam9_wb5000.jpg
+/cam9_wb6500.jpg
+/upper_road.jpg
+
+# ST Cloud upload artifacts
+/FlightController/Solutions/model/stcloud_upload/

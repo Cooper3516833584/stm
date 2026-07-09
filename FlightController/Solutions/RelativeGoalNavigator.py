@@ -602,7 +602,7 @@ class RelativeGoalNavigator:
         if abs(angle_deg) <= cfg.align_stop_deg:
             return 0.0
         yaw = _clip(
-            angle_deg * cfg.yaw_kp,
+            -angle_deg * cfg.yaw_kp,
             -cfg.yaw_rate_limit_deg_s,
             cfg.yaw_rate_limit_deg_s,
         )

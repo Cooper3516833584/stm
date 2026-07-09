@@ -2,7 +2,7 @@
 
 **基于**: Codex 实现方案包 (00/02/05/06 号文档) + 当前仓库状态  
 **硬件**: MYD-LD25X (STM32MP257) + 凌霄飞控 + 双 D500 雷达 + USB 摄像头  
-**最后更新**: 2026-06-11 (OS 迁移完成; 更新 NPU 状态、摄像头 index)
+**最后更新**: 2026-07-08 (Yaw 符号 Bug 修复, 坐标系验证, 测试套件建设. 旧: 2026-06-11 OS 迁移完成)
 **平台变更**: ~~计划~~从 Debian 12 迁移至 OpenSTLinux **v6.0** — 已完成
 
 ---
@@ -233,6 +233,21 @@ GoalNavMission.update(world)
 - yaw_rate 正号沿用 `send_realtime_control_data(..., yaw)` 语义, 底层 `struct.pack("<hhhh", vx, vy, vz, -yaw)`
 - 下雷达倒装: Y 轴镜像 (`mount_mirror_y=True`), 先后: 翻转 → 旋转 → 平移
 
+### Yaw 控制符号链路
+
+**关键发现** (2026-07-08): `RelativeGoalNavigator` 内部角度用机体坐标系（+ = 左），飞控 API `yaw>0 = 顺时针 = 右转`。二者差一个负号。
+
+| 层 | 约定 | 示例: 左转 |
+|------|------|:--:|
+| `_yaw_command(angle_deg)` | angle>0 = 机体左 | +30° |
+| 期望 yaw 输出 (FC API) | yaw<0 = CCW = 左转 | **-15°/s** |
+| 修复后 | `yaw = -angle_deg * kp` | **-15°/s** ✅ |
+| `send_realtime_control_data(yaw)` | API 入参, yaw>0 = CW | -15 → 左转 |
+| 线上字节 | `struct.pack("hhhh", ..., -yaw)` | +15 (FC 原生 CCW) |
+
+**修复**: `RelativeGoalNavigator.py:605`, `angle_deg * yaw_kp` → `-angle_deg * yaw_kp`。
+`RoadFollower` 已有 `yaw_sign` 参数 (默认 1.0) 应对同类问题。
+
 ### 图像坐标系 (Road Perception)
 
 ```
@@ -299,6 +314,10 @@ GoalNavMission.update(world)
 | **性能基线** | | |
 | 单雷达: 端到端 <5ms, CPU 12% | ✅ | |
 | 双雷达: 30Hz 稳定, CPU 15-25% | ✅ | |
+| **代码质量** | | |
+| Yaw 符号 Bug 修复 (RelativeGoalNavigator) | ✅ | `_yaw_command()` 缺符号反转导致避障方向左右颠倒, `RelativeGoalNavigator.py:605` 加负号修复 (2026-07-08) |
+| 坐标系验证测试套件 | ✅ | `tests/test_radar_coordinates.py` (10/10) + `tests/test_yaw_sign_consistency.py` (6/6) + `tests/stage1_synthetic_radar_pipeline.py` (10/10) |
+| 雷达方向实物监控脚本 | ✅ | `tests/stage1_hardware_radar_dir.py` — 按扇区显示最近距离 |
 
 ### 待实现 ⚠️
 
@@ -342,6 +361,7 @@ GoalNavMission.update(world)
 |------|:---:|------|
 | ~~**ONNX 模型文件缺失**~~ | 🟢 | `road_yolo11n_seg.onnx` (11.5MB) 确认存在于仓库中 |
 | ~~**Debian 12 不支持 NPU**~~ | 🟢 | **已解决**: 已迁移至 OpenSTLinux v6.0, NPU 驱动栈完整就绪 |
+| ~~**RelativeGoalNavigator Yaw 符号 Bug**~~ | 🟢 | **已修复** (2026-07-08): `_yaw_command()` 缺符号反转, 导致避障方向左右颠倒; `RelativeGoalNavigator.py:605` 加负号修复, 测试套件验证通过 |
 | **YOLO11-seg 不兼容 NPU** | 🔴 高 | `ConvTranspose` + `NonMaxPool(dilation)` 不被 VIP9000 支持, 推理 segfault; **解决方案**: ST Edge AI Cloud 模型转换 — 详见 `NPU_MODEL_CONVERSION_PLAN.md` |
 | **无测试图片集** | 🟡 中 | 无法离线验证岔路分类和偏移补偿的正确性 |
 | **两套 VelocityCommand 并存** | 🟡 中 | 根目录 `autonomy_command.py` 和 `FlightController/Solutions/LocalPlanner.py` 各有定义; 字段相似但类型不兼容; 长期需统一 |
@@ -349,7 +369,7 @@ GoalNavMission.update(world)
 | **eMMC 仅剩 930M** | 🟢 低 | 不能追加大型 APT 包或 pip 包; ONNX 模型和额外 Python 依赖需控制大小 |
 | **摄像头色彩偏色** | 🟡 中 | cam#7 间歇偏蓝/偏青，怀疑自动白平衡不稳定; 暂时假定大部分时间正常，后续可用 `cv2.xphoto.createSimpleWB()` 修正 |
 | **摄像头偏移补偿符号未验证** | 🟡 中 | 补偿公式中的 `correction_sign` 需实机验证; 写反会导致纠偏方向错误 |
-| **RoadFollower yaw 方向未验证** | 🟡 中 | `centerline_angle=90°` 对应正前方的假设需实机验证; 角度符号与 `send_realtime_control_data()` 的 `-yaw` 打包的交互需确认 |
+| **RoadFollower yaw 方向未验证** | 🟢 低 | yaw 控制链符号已验证 (`yaw_sign` 参数可用), 但仍需实飞确认角度符号整体正确性 |
 | **ARM 100Hz 内核 sleep 精度** | 🟢 低 | 已知问题, 已用固定频率 `sleep(remaining)` 规避; 但视觉处理加入后 CPU 预算需重新评估 |
 | **GIL 尖峰 (362ms)** | 🟢 低 | 偶发, 可能来自 eMMC I/O; 视觉推理期间主线程持 GIL 时间显著增长, 需监控 CRC 错误是否回升 |
 

@@ -6,6 +6,21 @@
 
 ---
 
+## 0. 2026-07-09 修订说明
+
+本文件记录的是早期“软件包和系统栈需求”。项目已迁移到 OpenSTLinux v6.0 并完成 NPU 基础栈探活，但后续实测表明：**软件栈就绪不等于模型已经被 VIP9000 NPU 加速**。最新模型转换和 ST Cloud 结论见 [NPU_ST_CLOUD_20260709_FINDINGS.md](NPU_ST_CLOUD_20260709_FINDINGS.md)。
+
+当前对“可用 NPU 模型”的要求应更新为：
+
+1. ONNX 或 `.nb` 不能只是在 ST Cloud 中 Optimize 成功；必须上板验证。
+2. FP32 `.nb` 当前可加载、可推理，但 I/O 为 float16、平均约 600ms，`strace` 未观察到 `/dev/galcore` ioctl，不能算 NPU 加速。
+3. 生产目标需要 INT8/定点执行路径，且板端推理时应出现 `/dev/galcore` open/ioctl，耗时显著低于 CPU/fallback。
+4. ST Cloud QDQ、本地 QDQ、强制 int8 I/O 和 QOperator 量化模型目前均未成功 Optimize 到可用 `.nb`，典型错误为 `Generation does not contain any output`。
+
+因此，下文第 2 节中的 5-15ms 属于早期目标预期，不是当前已达成结果。
+
+---
+
 ## 1. 硬件与底层库现状
 
 | 层 | 文件 | 状态 | 来源 |

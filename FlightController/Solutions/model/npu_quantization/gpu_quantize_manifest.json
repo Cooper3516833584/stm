@@ -1,0 +1,62 @@
+{
+  "created_at_epoch": 1783516169,
+  "gpu_provider": "DmlExecutionProvider",
+  "quant_config": {
+    "format": "QDQ",
+    "per_channel": false,
+    "activation_type": "QInt8",
+    "weight_type": "QInt8",
+    "symmetric": true,
+    "reduce_range": false,
+    "method": "MinMax",
+    "force_int8_io": true
+  },
+  "results": [
+    {
+      "model": "FlightController\\Solutions\\model\\npu_quantization\\tree_furniture_vsinpu_fp32.onnx",
+      "output": "D:\\drone2\\ObstacleAvoidanceDrone\\FlightController\\Solutions\\model\\npu_quantization\\tree_furniture_int8_io.onnx",
+      "status": "OK",
+      "qdq_output": "D:\\drone2\\ObstacleAvoidanceDrone\\FlightController\\Solutions\\model\\npu_quantization\\tree_furniture_int8_qdq.onnx",
+      "input_name": "images",
+      "input_size": 416,
+      "inputs": [
+        {
+          "name": "images",
+          "shape": [
+            1,
+            3,
+            416,
+            416
+          ],
+          "type": "tensor(float)"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output0",
+          "shape": [
+            1,
+            7,
+            3549
+          ],
+          "type": "tensor(float)"
+        }
+      ],
+      "calibration_samples": 133,
+      "quantize_time_s": 5.929641999995511,
+      "verify_time_s": 1.8160254999966128,
+      "int8_io_output": "D:\\drone2\\ObstacleAvoidanceDrone\\FlightController\\Solutions\\model\\npu_quantization\\tree_furniture_int8_io.onnx",
+      "int8_io_rewrite": {
+        "input_model": "D:\\drone2\\ObstacleAvoidanceDrone\\FlightController\\Solutions\\model\\npu_quantization\\tree_furniture_int8_qdq.onnx",
+        "output_model": "D:\\drone2\\ObstacleAvoidanceDrone\\FlightController\\Solutions\\model\\npu_quantization\\tree_furniture_int8_io.onnx",
+        "rewritten_inputs": [
+          "images"
+        ],
+        "rewritten_outputs": [
+          "output0"
+        ],
+        "removed_boundary_nodes": 2
+      }
+    }
+  ]
+}

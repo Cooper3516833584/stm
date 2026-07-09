@@ -16,6 +16,8 @@ from typing import Any, List, Tuple
 import cv2
 import numpy as np
 
+from nb_graph import NBGraphSession, is_nb_model
+
 
 @dataclass
 class RoadBranch:
@@ -172,7 +174,13 @@ class RoadInstance:
     centerline_points: List[CenterPoint] = field(default_factory=list)
 
 
+# ONNX model (CPU / XNNPACK / VSINPU EP fallback)
 MODEL_PATH = "FlightController/Solutions/model/road_yolo11n_seg.onnx"
+# Compiled .nb network binary from ST Edge AI Cloud (VIP9000 NPU)
+MODEL_PATH_NPU = "FlightController/Solutions/model/road_yolo11n_seg_1.nb"
+
+# When True, prefer .nb NPU model over .onnx when both are available.
+_AUTO_USE_NPU = True
 
 INP_SIZE = 320
 CONF_THRESH = 0.4
@@ -317,15 +325,39 @@ def _branch_quality(branch: RoadBranch) -> float:
     return float(branch.confidence) - 0.25 * error_penalty
 
 
-def _resolve_model_path() -> str:
+def _resolve_model_path() -> tuple[str, bool]:
+    """Return ``(model_path, is_nb)``.
+
+    Resolution order:
+    1. If *MODEL_PATH* itself is a .nb file → use directly (--model-npu path).
+    2. Absolute ONNX path + NPU auto-detect sideline check.
+    3. Relative paths: .nb preferred when _AUTO_USE_NPU is set.
+    """
+    # 1. MODEL_PATH already points to a .nb file (e.g. --model-npu)
+    if is_nb_model(MODEL_PATH):
+        return MODEL_PATH, True
+
+    # 2. Absolute ONNX path
     if os.path.isabs(MODEL_PATH):
-        return MODEL_PATH
+        nb_candidate = MODEL_PATH_NPU
+        if _AUTO_USE_NPU and os.path.isfile(nb_candidate):
+            return nb_candidate, True
+        return MODEL_PATH, False
 
     module_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # 3. NB model takes priority when auto-detect is on
+    nb_candidate = os.path.join(module_dir, MODEL_PATH_NPU)
+    if _AUTO_USE_NPU and os.path.isfile(nb_candidate):
+        return nb_candidate, True
+
+    # 4. ONNX model relative to module
     module_relative = os.path.join(module_dir, MODEL_PATH)
     if os.path.isfile(module_relative):
-        return module_relative
-    return MODEL_PATH
+        return module_relative, False
+
+    # 5. Fallback: bare paths
+    return MODEL_PATH, False
 
 
 def _select_providers() -> list[str]:
@@ -343,7 +375,21 @@ def _select_providers() -> list[str]:
     return ["CPUExecutionProvider"]
 
 
-def _make_session(model_path: str):
+def _make_session(model_path: str, is_nb: bool = False):
+    if is_nb or is_nb_model(model_path):
+        try:
+            sess = NBGraphSession(model_path)
+            return sess, "NPU_NBGraph"
+        except Exception as exc:
+            # NB load failed — cannot fall back to CPU for a compiled binary
+            raise RuntimeError(
+                f"Failed to load .nb NPU model: {model_path}\n"
+                f"  Error: {exc}\n"
+                f"  Verify that stai_mpu is installed:\n"
+                f"    apt install python3-stai-mpu\n"
+                f"  Or switch to the ONNX model by setting _AUTO_USE_NPU = False"
+            ) from exc
+
     import onnxruntime as ort
 
     providers = _select_providers()
@@ -360,17 +406,35 @@ def _get_session():
     global _SESSION, _INPUT_NAME, _MODEL_INPUT_SIZE, _SESSION_PROVIDER
 
     if _SESSION is None:
-        model_path = _resolve_model_path()
+        model_path, is_nb = _resolve_model_path()
         if not os.path.isfile(model_path):
-            raise FileNotFoundError(f"ONNX model not found: {model_path}")
+            raise FileNotFoundError(f"Model file not found: {model_path}")
 
-        _SESSION, provider = _make_session(model_path)
+        _SESSION, provider = _make_session(model_path, is_nb=is_nb)
         _SESSION_PROVIDER = provider
         input_meta = _SESSION.get_inputs()[0]
         _INPUT_NAME = input_meta.name
         _MODEL_INPUT_SIZE = _input_size_from_meta(input_meta.shape)
 
+        if is_nb:
+            _log_npu_info(model_path)
+
     return _SESSION, _INPUT_NAME
+
+
+def _log_npu_info(model_path: str) -> None:
+    """Emit a one-line diagnostic when the NPU .nb model is active."""
+    try:
+        from loguru import logger
+        logger.info(
+            "NPU model loaded: {}  |  backend={}  |  input={} shape=[{}]",
+            os.path.basename(model_path),
+            _SESSION_PROVIDER,
+            _INPUT_NAME,
+            "x".join(str(d) for d in (_SESSION.get_inputs()[0].shape or [])),
+        )
+    except ImportError:
+        pass
 
 
 def _input_size_from_meta(shape: Any) -> int:
@@ -1557,6 +1621,7 @@ def _parse_cli_args():
     parser = argparse.ArgumentParser(description="Run road perception on one image")
     parser.add_argument("--image", required=True, help="Input BGR/RGB image path")
     parser.add_argument("--model", default=None, help="ONNX model path")
+    parser.add_argument("--model-npu", default=None, help=".nb NPU compiled model path")
     parser.add_argument("--debug-out", default=None, help="Optional debug image output path")
     parser.add_argument("--branch-preference", choices=["auto", "straight", "left", "right"], default="auto")
     parser.add_argument("--enable-offset-comp", action="store_true")
@@ -1571,9 +1636,14 @@ def _parse_cli_args():
 
 def _main_cli() -> int:
     args = _parse_cli_args()
+    global MODEL_PATH, MODEL_PATH_NPU, _AUTO_USE_NPU
     if args.model:
-        global MODEL_PATH
         MODEL_PATH = args.model
+        _AUTO_USE_NPU = False  # explicit ONNX path disables NPU auto-detect
+    if args.model_npu:
+        MODEL_PATH_NPU = args.model_npu
+        MODEL_PATH = args.model_npu  # override so _resolve_model_path picks it
+        _AUTO_USE_NPU = True
 
     frame = cv2.imread(args.image, cv2.IMREAD_COLOR)
     if frame is None:

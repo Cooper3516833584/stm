@@ -256,7 +256,71 @@ meters_per_pixel_x = 2 × D_ground × tan(HFOV/2) / 640
 偏移补偿取道路中线所在行（约 row 120）的 `meters_per_pixel_x ≈ 0.0007 m/px`。
 
 ---
-## 6. 参考文档
+## 6. 外设诊断命令
+
+### 6.1 快速诊断
+
+```bash
+# 串口设备一览
+ls -la /dev/tty* 2>/dev/null | grep -E 'tty(USB|ACM|STM|AMA)'
+
+# USB 设备树 + 雷达/飞控 VID:PID 识别
+lsusb
+
+# 摄像头设备
+ls -la /dev/video*
+
+# /dev/serial/by-id 符号链接
+ls -la /dev/serial/by-id/ 2>/dev/null
+```
+
+### 6.2 设备 VID:PID 速查
+
+| VID:PID | 设备 | 芯片 | 预期数量 |
+|---------|------|------|:--:|
+| `10C4:EA60` | D500 激光雷达 | CP210x USB-UART | 2 (仅 USB 连接时) |
+| `66CC:2233` | 凌霄飞控 | — | 1 |
+| `0BDA:3035` | USB 摄像头 | Realtek | 2 |
+
+> **注意**: D500 雷达直接接在 J13 UART 引脚 (UART4/UART9) 时，不走 USB，`lsusb` 看不到。此时端口为 `/dev/ttySTM4` 和 `/dev/ttySTM9`。
+
+### 6.3 内核日志排查
+
+```bash
+# 查看最近插入的 USB/串口设备
+dmesg | grep -iE 'tty|cp210|usb.*hub|radar|uart|video' | tail -30
+
+# 持续监控 (插拔设备时观察)
+dmesg -w
+```
+
+### 6.4 虚拟环境激活
+
+```bash
+# 手动激活 (每次登录后)
+source /usr/local/UFC_venv/bin/activate
+
+# 开机自动激活 (开发板 shell 为 /bin/sh, 需写入 .profile)
+echo 'source /usr/local/UFC_venv/bin/activate' >> ~/.profile
+```
+
+### 6.5 雷达数据录制与 PC 传输
+
+```bash
+# 开发板: 录制 (仅雷达)
+cd ~/Desktop/ObstacleAvoidanceDrone
+PYTHONPATH=. python record_data.py --no-camera --output-dir /media/sdcard/recordings
+
+# PC: 下载录制的数据
+scp -r root@192.168.31.199:/media/sdcard/recordings/<session_dir> .
+
+# PC: 渲染可视化
+python visualize_radar_data.py <session_dir> --video --video-fps 10
+```
+
+---
+
+## 7. 参考文档
 
 - 米尔开发板硬件用户手册: `MYD-LD25X-硬件用户手册-V1.3.pdf`
 - 雷达驱动实现: `FlightController/Components/LDRadar_Driver.py`

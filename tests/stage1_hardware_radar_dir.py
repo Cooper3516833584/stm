@@ -118,17 +118,15 @@ def run_continuous_monitor(upper_port="/dev/ttySTM4", lower_port="/dev/ttySTM9")
     print(f"Starting upper radar on {upper_port}...")
     upper = LD_Radar(name="upper", index=0, mount_xy_cm=(0.0, 0.0),
                      mount_yaw_deg=0.0, mount_mirror_y=False)
-    upper.port_override = upper_port
-    upper.start()
+    upper.start(com=upper_port)
     time.sleep(1)
 
     lower = None
-    if os.path.exists(lower_port):
+    if lower_port is not None and os.path.exists(lower_port):
         print(f"Starting lower radar on {lower_port}...")
         lower = LD_Radar(name="lower", index=1, mount_xy_cm=(0.96, 0.15),
                          mount_yaw_deg=0.0, mount_mirror_y=True)
-        lower.port_override = lower_port
-        lower.start()
+        lower.start(com=lower_port)
         time.sleep(1)
 
     print()
@@ -145,34 +143,42 @@ def run_continuous_monitor(upper_port="/dev/ttySTM4", lower_port="/dev/ttySTM9")
         frame = 0
         while True:
             frame += 1
-            report_lines = [f"\n=== Frame {frame} ==="]
+            report_lines = [f"\n===== Frame {frame} ====="]
 
             # Upper radar
             pts_u = upper.get_points_body_cm(max_distance_cm=300)
             if len(pts_u) > 0:
                 body_angles_u = body_angle_deg(pts_u)
                 report_lines.append(f"\n[UPPER] {len(pts_u)} pts")
-                report_lines.append(f"  angle range: {body_angles_u.min():+.0f} to {body_angles_u.max():+.0f} deg")
-                report_lines.append(f"  x range: {pts_u[:, 0].min():+.0f} to {pts_u[:, 0].max():+.0f} cm")
-                report_lines.append(f"  y range: {pts_u[:, 1].min():+.0f} to {pts_u[:, 1].max():+.0f} cm")
 
-                # Quick stats
-                front_mask = (np.abs(body_angles_u) < 30) & (pts_u[:, 0] > 10)
-                left_mask = (body_angles_u > 10) & (pts_u[:, 0] > 10)
-                right_mask = (body_angles_u < -10) & (pts_u[:, 0] > 10)
+                # --- 按扇区显示最近距离（比总点数更有意义）---
+                sectors = [
+                    ("FRONT",       -15,   15,  pts_u),
+                    ("FRONT-LEFT",   15,   75,  pts_u),
+                    ("LEFT",         75,  105,  pts_u),
+                    ("BACK-LEFT",   105,  165,  pts_u),
+                    ("BACK",        165,  180,  pts_u),
+                    ("BACK",       -180, -165,  pts_u),
+                    ("BACK-RIGHT", -165, -105,  pts_u),
+                    ("RIGHT",      -105,  -75,  pts_u),
+                    ("FRONT-RIGHT", -75,  -15,  pts_u),
+                ]
 
-                if np.any(front_mask):
-                    d = pts_u[front_mask, 0].min()
-                    report_lines.append(f"  FRONT nearest: {d:.0f} cm")
-                if np.any(left_mask):
-                    report_lines.append(f"  LEFT points: {np.sum(left_mask)}")
-                if np.any(right_mask):
-                    report_lines.append(f"  RIGHT points: {np.sum(right_mask)}")
+                # Build a compact display line
+                nearest_parts = []
+                for name, lo, hi, pts in sectors:
+                    mask = (body_angles_u >= lo) & (body_angles_u < hi) & (pts[:, 0] > 5)
+                    if np.any(mask):
+                        d = pts[mask, 0].min()
+                        cnt = np.sum(mask)
+                        nearest_parts.append(f"{name}:{d:.0f}cm({cnt})")
+                    else:
+                        nearest_parts.append(f"{name}:---")
 
-                # Key diagnostic: left/right balance
-                if np.any(left_mask) and np.any(right_mask):
-                    ratio = np.sum(left_mask) / max(1, np.sum(right_mask))
-                    report_lines.append(f"  L/R ratio: {ratio:.2f} (1.0 = balanced)")
+                # Print in two groups: front half + back half
+                report_lines.append("  " + "  ".join(nearest_parts[:5]))
+                report_lines.append("  " + "  ".join(nearest_parts[5:]))
+
             else:
                 report_lines.append("\n[UPPER] NO POINTS")
 
@@ -182,18 +188,20 @@ def run_continuous_monitor(upper_port="/dev/ttySTM4", lower_port="/dev/ttySTM9")
                 if len(pts_l) > 0:
                     body_angles_l = body_angle_deg(pts_l)
                     report_lines.append(f"\n[LOWER] {len(pts_l)} pts")
-                    report_lines.append(f"  angle range: {body_angles_l.min():+.0f} to {body_angles_l.max():+.0f} deg")
-
-                    front_l = (np.abs(body_angles_l) < 30) & (pts_l[:, 0] > 10)
-                    if np.any(front_l):
-                        report_lines.append(f"  FRONT nearest: {pts_l[front_l, 0].min():.0f} cm")
+                    front_l = (np.abs(body_angles_l) < 30) & (pts_l[:, 0] > 5)
+                    left_l = (body_angles_l > 10) & (body_angles_l < 90) & (pts_l[:, 0] > 5)
+                    right_l = (body_angles_l < -10) & (body_angles_l > -90) & (pts_l[:, 0] > 5)
+                    f = f"{pts_l[front_l, 0].min():.0f}cm" if np.any(front_l) else "---"
+                    l = f"{pts_l[left_l, 0].min():.0f}cm" if np.any(left_l) else "---"
+                    r = f"{pts_l[right_l, 0].min():.0f}cm" if np.any(right_l) else "---"
+                    report_lines.append(f"  FRONT:{f}  LEFT:{l}  RIGHT:{r}")
                 else:
                     report_lines.append("\n[LOWER] NO POINTS")
 
             # Print report
             print("\n".join(report_lines))
 
-            time.sleep(0.5)
+            time.sleep(0.3)
 
     except KeyboardInterrupt:
         print("\n\nStopping...")
@@ -221,8 +229,7 @@ def run_single_snapshot(upper_port="/dev/ttySTM4", lower_port="/dev/ttySTM9"):
     print("Taking radar snapshot (2s warmup)...")
     upper = LD_Radar(name="upper", index=0, mount_xy_cm=(0.0, 0.0),
                      mount_yaw_deg=0.0, mount_mirror_y=False)
-    upper.port_override = upper_port
-    upper.start()
+    upper.start(com=upper_port)
     time.sleep(2)
 
     pts_u = upper.get_points_body_cm(max_distance_cm=300)
@@ -230,11 +237,10 @@ def run_single_snapshot(upper_port="/dev/ttySTM4", lower_port="/dev/ttySTM9"):
 
     print_direction_report(pts_u, "UPPER RADAR")
 
-    if os.path.exists(lower_port):
+    if lower_port is not None and os.path.exists(lower_port):
         lower = LD_Radar(name="lower", index=1, mount_xy_cm=(0.96, 0.15),
                          mount_yaw_deg=0.0, mount_mirror_y=True)
-        lower.port_override = lower_port
-        lower.start()
+        lower.start(com=lower_port)
         time.sleep(2)
         pts_l = lower.get_points_body_cm(max_distance_cm=300)
         lower.stop()

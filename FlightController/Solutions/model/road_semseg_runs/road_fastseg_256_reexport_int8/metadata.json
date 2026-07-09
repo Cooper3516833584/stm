@@ -1,0 +1,52 @@
+{
+  "data_root": "C:\\Users\\TZDEZACR\\Desktop\\\u5d4c\u8d5b\\road_yolo_for_stm32mp257",
+  "size": 256,
+  "num_classes": 2,
+  "class_order": [
+    "background",
+    "road"
+  ],
+  "mask_rule": "RGB non-black -> road=1, black -> background=0",
+  "input_layout": "NCHW",
+  "input_range_after_loader": "normalized float32",
+  "onnx_input_range": "RGB float32 0.0-1.0; mean/std normalization is embedded in ONNX",
+  "mean": [
+    0.42971184620490444,
+    0.4524415204158196,
+    0.31330202183184713
+  ],
+  "std": [
+    0.19885569133281744,
+    0.1857075660072467,
+    0.17966238757198866
+  ],
+  "train_count": 208,
+  "val_count": 23,
+  "test_count": 23,
+  "train_groups": [
+    "road1",
+    "road2"
+  ],
+  "val_groups": [
+    "road3"
+  ],
+  "test_groups": [
+    "road4"
+  ],
+  "args": {
+    "data_root": "C:\\Users\\TZDEZACR\\Desktop\\\u5d4c\u8d5b\\road_yolo_for_stm32mp257",
+    "output_dir": "FlightController\\Solutions\\model\\road_semseg_runs\\road_fastseg_256_reexport_int8",
+    "epochs": 120,
+    "batch_size": 16,
+    "size": 256,
+    "lr": 0.002,
+    "weight_decay": 0.0001,
+    "val_ratio": 0.1,
+    "test_ratio": 0.1,
+    "seed": 20260709,
+    "workers": 0,
+    "no_cache": false,
+    "no_amp": false,
+    "export_name": "road_fastseg_256_reexport_fp32.onnx"
+  }
+}

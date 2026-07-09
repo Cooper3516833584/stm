@@ -415,6 +415,7 @@ def save_checkpoint(
     metrics: dict[str, float],
     metadata: dict,
 ) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
     torch.save(
         {
             "epoch": epoch,
@@ -423,8 +424,9 @@ def save_checkpoint(
             "metrics": metrics,
             "metadata": metadata,
         },
-        path,
+        tmp_path,
     )
+    tmp_path.replace(path)
 
 
 def export_onnx(

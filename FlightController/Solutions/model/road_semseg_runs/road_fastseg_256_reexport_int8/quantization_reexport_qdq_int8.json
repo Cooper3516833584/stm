@@ -1,0 +1,21 @@
+{
+  "fp32_model": "FlightController\\Solutions\\model\\road_fastseg_256_reexport_fp32.onnx",
+  "int8_qdq_model": "FlightController\\Solutions\\model\\road_fastseg_256_reexport_qdq_int8.onnx",
+  "calibration_npz": "FlightController\\Solutions\\model\\road_fastseg_256_reexport_calibration_0_1_rgb.npz",
+  "calibration_shape": [
+    128,
+    3,
+    256,
+    256
+  ],
+  "calibration_dtype": "float32",
+  "calibration_min": 0.0,
+  "calibration_max": 1.0,
+  "quant_format": "QDQ",
+  "activation_type": "QUInt8",
+  "weight_type": "QInt8",
+  "per_channel": false,
+  "calibration_method": "MinMax",
+  "input_name": "images",
+  "input_layout": "NCHW RGB 0.0-1.0"
+}

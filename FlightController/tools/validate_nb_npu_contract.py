@@ -257,7 +257,13 @@ def main() -> int:
         for failure in failures:
             print(f"  - {failure}")
         if args.profile_raw_stai:
-            _profile_raw_stai(args.model, args.runs, args.warmup)
+            if _has_float_tensor(inputs) or _has_float_tensor(outputs):
+                print(
+                    "[SKIP] raw stai_mpu profile skipped because float/float16 "
+                    "I/O already failed the NPU contract."
+                )
+            else:
+                _profile_raw_stai(args.model, args.runs, args.warmup)
         return 1
 
     print("[PASS] tensor metadata and latency look NPU-compatible")

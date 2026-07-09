@@ -38,7 +38,7 @@ FP32 ONNX -> ST Cloud Quantize(QDQ) -> Optimize
 
 因此，当前瓶颈不是某个单独算子改写，而是 **YOLO11-seg 量化图到 STM32MP2 NBG/.nb 的编译链路不通**。
 
-### 1.3 2026-07-09 补充：road_fastseg_256 已可生成 `.nb`
+### 1.3 2026-07-09 补充：road_fastseg_256 FP32 可生成 `.nb`，但 QDQ 仍无输出
 
 新增测试模型：
 
@@ -66,18 +66,29 @@ DequantizeLinear: 309
 ```
 
 后续补充实验确认：`road_fastseg_256_fp32.onnx` 可以在 ST 云平台
-Optimize / Generate 并生成 `.nb`：
+Optimize / Generate 并生成 `.nb`，但板端验证显示该 `.nb` 仍是 float16：
 
 ```text
-road_fastseg_256_fp32.onnx -> ST Cloud Optimize / Generate -> .nb
+road_fastseg_256_fp32.onnx -> ST Cloud Optimize / Generate -> road_fastseg_256_fp32_1.nb
+board metadata: tensor(float16) input/output
+wrapped latency mean: about 167 ms
 ```
 
-因此，旧结论中“YOLO11-seg 量化图到 STM32MP2 NBG/.nb 的编译链路不通”
-不应扩展到 `road_fastseg_256`。当前应改为：
+同时，QDQ 量化后的 `road_fastseg_256` ONNX 已经在云平台尝试
+Optimize / Generate，但仍然没有输出可用 `.nb`：
+
+```text
+road_fastseg_256_fp32_PerTensor_quant_road_fastseg_256_calibration_0_1_rgb_npz_1.onnx
+-> ST Cloud Optimize / Generate
+-> no output
+```
+
+因此，当前应改为：
 
 ```text
 YOLO11-seg 量化/改写路径仍然不适合作为当前主线。
-road_fastseg_256 已进入 .nb 板端验收阶段。
+road_fastseg_256 FP32 生成物为 float16，不满足 INT8 NPU 目标。
+road_fastseg_256 QDQ 生成物在云端无输出。
 ```
 
 这与两件已经验证的事实一致：
@@ -86,18 +97,17 @@ road_fastseg_256 已进入 .nb 板端验收阶段。
 2. 官方 ST DeepLab 256x256 INT8 `.nb` 已在板端触发 `/dev/galcore`
    并达到约 51-52 ms raw run。
 
-真正需要继续验证的是：
+真正需要继续解决的是：
 
 ```text
-road_fastseg_256 生成的 .nb 是否为 int8/uint8 或 static-affine 路径
-road_fastseg_256 生成的 .nb 是否触发 /dev/galcore ioctl
-road_fastseg_256 生成的 .nb 是否达到 <80 ms wrapped / <60 ms raw_run
-road_fastseg_256 的 road mask 是否在真实道路图片上可用
+如何让自训练道路语义分割模型生成 int8/uint8 或 static-affine .nb
+如何得到 <80 ms wrapped / <60 ms raw_run 的可用 NPU artifact
+如何避免 FP32 -> float16 fallback 和 QDQ -> no output 两类失败
 ```
 
-当前不建议继续投入 YOLO11-seg 量化转换。下一步应把
-`road_fastseg_256` 生成的 `.nb` 拷贝到板端，运行
-`validate_nb_npu_contract.py`、`strace -yy` 和 overlay 可视化验收。
+当前不建议继续投入 YOLO11-seg 量化转换，也不建议重复相同的
+`road_fastseg_256` FP32/QDQ 云端转换。应先归档失败证据，再从 ST 官方
+model-zoo deployment、离线 ST Edge AI Core 或 ST 支持复现包重新切入。
 
 ---
 

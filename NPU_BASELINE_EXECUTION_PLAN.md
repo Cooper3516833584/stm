@@ -400,20 +400,22 @@ Corrected interpretation:
 - The official ST DeepLab `.nb` baseline proves the board OpenVX/NPU runtime
   can execute a generated `.nb`.
 - The new `road_fastseg_256` evidence proves that a custom road semantic
-  segmentation model can also pass the ST Cloud generation stage.
-- The remaining question is no longer "can we generate `.nb`"; it is whether
-  the generated `.nb` is a real, fast, quantized NPU artifact and whether its
-  road mask is usable.
+  segmentation model can pass the ST Cloud FP32 generation stage, but the
+  generated artifact is still float16.
+- The remaining question is now answered for the tested artifacts: FP32
+  generation produces float16 fallback-style `.nb`; QDQ generation still fails
+  before producing a usable `.nb`.
 
 Do not spend more time on:
 
 ```text
 YOLO11-seg QDQ/QOperator conversion tuning
 forcing graph input/output to INT8
-repeating cloud conversion for road_fastseg_256 before board acceptance
+repeating cloud conversion for road_fastseg_256 with the same settings
 ```
 
-Next useful actions, in order:
+The following actions were the planned board validation flow for the generated
+file, but the first contract check already failed:
 
 1. Use the generated `.nb` now present in the model directory:
 
@@ -457,3 +459,206 @@ PYTHONPATH=. python3 FlightController/tools/render_deeplab_nb_overlay.py \
 
 5. If latency, `/dev/galcore`, and mask quality pass, add a semantic-segmentation
    runtime path in `road_perception.py` and keep the YOLO path as fallback.
+
+This path is currently stopped because `road_fastseg_256_fp32_1.nb` failed the
+contract check.
+
+2026-07-09 board result for the generated file:
+
+```text
+FlightController/Solutions/model/road_fastseg_256_fp32_1.nb
+input_0  [1, 3, 256, 256] tensor(float16)
+output_0 [1, 2, 256, 256] tensor(float16)
+wrapped latency mean: about 167 ms
+raw_input dtype: float16
+raw_output dtype: float16
+raw profile ended with segmentation fault after reporting metadata
+```
+
+Interpretation:
+
+- This `.nb` was generated from the FP32 model path and is not the desired INT8
+  NPU artifact.
+- It fails the strict acceptance gate before any overlay test is needed.
+- The raw-profile segmentation fault is secondary; the model already failed
+  because tensor metadata is float16 and latency is above the 80 ms gate.
+- Do not spend more time validating `road_fastseg_256_fp32_1.nb` as an NPU
+  target. Keep it only as evidence that FP32 Optimize produces a float16
+  fallback-style `.nb`.
+
+---
+
+## 10. Fast ONNX Preflight Before Generating `.nb`
+
+New local static inspector:
+
+```text
+FlightController/tools/inspect_onnx_npu_candidate.py
+```
+
+Use it before uploading or generating `.nb`:
+
+```bash
+PYTHONPATH=. python3 FlightController/tools/inspect_onnx_npu_candidate.py \
+  FlightController/Solutions/model/road_fastseg_256_fp32.onnx
+
+PYTHONPATH=. python3 FlightController/tools/inspect_onnx_npu_candidate.py \
+  FlightController/Solutions/model/road_fastseg_256_fp32_PerTensor_quant_road_fastseg_256_calibration_0_1_rgb_npz_1.onnx
+```
+
+Observed local inspection:
+
+```text
+road_fastseg_256_fp32.onnx
+  class: FP32_OR_FP16_ONNX
+  QuantizeLinear: 0
+  DequantizeLinear: 0
+  likely .nb result: float16 unless ST Cloud quantization is applied
+
+road_fastseg_256_fp32_PerTensor_quant_...onnx
+  class: QDQ_QUANTIZED_ONNX
+  QuantizeLinear: 36
+  DequantizeLinear: 90
+  input first consumer: QuantizeLinear
+  output producer: DequantizeLinear
+  likely .nb result: candidate for INT8; still must verify generated .nb
+```
+
+Decision rule:
+
+| Inspector result | Action |
+|---|---|
+| `FP32_OR_FP16_ONNX` with no QDQ/QOperator markers | Do not expect INT8 `.nb`; useful only for FP32/f16 fallback smoke tests. |
+| `QDQ_QUANTIZED_ONNX`, input immediately quantized, output dequantized | Best current candidate to send into ST Generate for INT8 `.nb`. |
+| Risky ops such as `ConvTranspose`, `NonMaxSuppression`, dynamic shape ops | Fix/export a simpler graph before spending cloud conversion time. |
+
+Follow-up cloud result:
+
+```text
+FlightController/Solutions/model/road_fastseg_256_fp32_PerTensor_quant_road_fastseg_256_calibration_0_1_rgb_npz_1.onnx
+-> ST Cloud Optimize / Generate
+-> no output / no usable .nb
+```
+
+Therefore the QDQ path is also blocked in the tested ST Cloud flow. Do not
+repeat the same conversion unless the ST tool version, target settings, or
+model export changes.
+
+---
+
+## 11. 2026-07-09 Experiment Summary and Lessons Learned
+
+### 11.1 What Worked
+
+1. Board-side NPU runtime is real and usable.
+
+```text
+stai_mpu import: OK
+/usr/lib/libstai_mpu_ovx.so.6: present
+[OVX]: Loading nbg model: observed
+/dev/galcore open/ioctl: observed with official INT8 .nb
+```
+
+2. Official ST DeepLab v3 256x256 INT8 `.nb` is the only confirmed good NPU
+   baseline so far.
+
+```text
+input:  [1, 3, 256, 256] tensor(int8)
+output: [1, 2, 256, 256] tensor(int8)
+raw_run_ms: about 51-52 ms
+wrapped latency: about 66-79 ms
+/dev/galcore ioctl: confirmed
+```
+
+It is not a usable road-following model because it predicts all pixels as
+class 0/background on our road images. It remains a hardware/runtime baseline.
+
+3. The custom `road_fastseg_256_fp32.onnx` model is structurally much better
+   than YOLO11-seg for this target.
+
+```text
+input:  [1, 3, 256, 256] FLOAT
+output: [1, 2, 256, 256] FLOAT
+task: road/background semantic segmentation
+no YOLO head, no NMS, no mask prototype decode graph
+```
+
+The calibration file is also valid:
+
+```text
+shape: (128, 3, 256, 256)
+dtype: float32
+range: 0.0 to 1.0
+layout: NCHW RGB
+```
+
+### 11.2 What Failed
+
+1. `road_fastseg_256_fp32.onnx -> ST Cloud Generate -> .nb` produced a float16
+   artifact, not an INT8 NPU artifact.
+
+```text
+file: road_fastseg_256_fp32_1.nb
+input_0:  tensor(float16) [1, 3, 256, 256]
+output_0: tensor(float16) [1, 2, 256, 256]
+mean latency: about 167 ms
+result: FAIL
+```
+
+This model should not be used for overlay validation or integration.
+
+2. `road_fastseg_256` QDQ ONNX is internally quantized, but ST Cloud
+   Optimize/Generate still produced no usable output.
+
+```text
+file: road_fastseg_256_fp32_PerTensor_quant_road_fastseg_256_calibration_0_1_rgb_npz_1.onnx
+QuantizeLinear/DequantizeLinear: present
+graph input/output: FLOAT, as expected for QDQ
+ST Cloud Optimize/Generate: no output
+result: FAIL
+```
+
+3. YOLO11-seg remains unsuitable as the main NPU path.
+
+```text
+FP32 .nb: float16, about 600 ms
+QDQ / QOperator / forced int8 I/O: failed or not recognized
+graph complexity: YOLO segmentation head, mask coefficients, prototype decode
+result: stop using YOLO11-seg conversion as the main path
+```
+
+### 11.3 Lessons Learned
+
+- ST Cloud successfully generating a `.nb` does not mean the model is using the
+  desired INT8 NPU path. Board metadata is the authority.
+- FP32 ONNX generation can create a loadable `.nb`, but the result may be
+  float16 fallback-style execution.
+- QDQ ONNX graph I/O staying FLOAT is normal; it does not mean quantization
+  failed. Static ONNX inspection must check `QuantizeLinear` and
+  `DequantizeLinear` nodes.
+- QDQ markers are necessary evidence, but not sufficient. The ST Cloud
+  Optimize/Generate step may still fail with no output.
+- Do not run overlay or integration tests until `.nb` contract passes first.
+- The acceptance gate remains:
+
+```text
+input/output metadata: int8/uint8 or static-affine
+raw_run_ms: preferably < 60 ms
+wrapped mean: < 80 ms
+/dev/galcore ioctl: observed
+road mask overlay: visually plausible
+```
+
+### 11.4 Current Stop Point
+
+At this point, the current ST Cloud path has not produced a usable INT8 `.nb`
+for the custom road model. The project should pause repeated cloud conversion
+attempts with the same artifacts and preserve the evidence above.
+
+Next investigation should start from a changed condition, such as:
+
+- an ST-supported deployment recipe from `stm32ai-modelzoo-services`,
+- an offline ST Edge AI Core command that explicitly targets INT8 NBG,
+- a retrained model using an ST-proven semantic segmentation architecture and
+  deployment config,
+- or direct support from ST using the minimal reproduction package.

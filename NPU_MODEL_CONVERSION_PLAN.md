@@ -17,7 +17,7 @@
 5. FP32 Optimize 生成的 `.nb` 可加载和推理，但输入/输出为 float16，板端实测约 600ms，`strace` 未看到 `/dev/galcore` ioctl，因此不能视为 VIP9000 NPU 加速。
 6. 当前真正未解决的问题是：**如何得到 ST Cloud/STM32AI MPU 能编译为实际 NPU 执行路径的 INT8 `.nb`**。FP32 `.nb` 只能作为功能链路探活产物，不能作为性能目标。
 7. 后续可行方案已记录在 [NPU_ST_CLOUD_20260709_FINDINGS.md](NPU_ST_CLOUD_20260709_FINDINGS.md) 第 7 节，包括 ST 官方链路、官方模型/换架构、拆图、重训 NPU 友好模型和板端 VSINPU EP 直跑等分支。
-8. 2026-07-09 新增验证：`road_fastseg_256_fp32.onnx` 是更简单的道路/背景语义分割模型，ST 云平台已可 Optimize / Generate 并生成 `.nb`。因此当前主线应从 YOLO11-seg 转换排查切换到 `road_fastseg_256` 的板端 `.nb` 验收：tensor contract、raw latency、`/dev/galcore` ioctl、真实道路 overlay、再到 `road_perception.py` 集成。
+8. 2026-07-09 新增验证：`road_fastseg_256_fp32.onnx` 是更简单的道路/背景语义分割模型，ST 云平台已可 Optimize / Generate 并生成 `.nb`，但板端验证仍为 float16 I/O、mean latency 约167ms，不是 INT8 NPU 目标。其 QDQ 量化 ONNX 虽含 `QuantizeLinear`/`DequantizeLinear`，但云端 Optimize / Generate 无输出。因此当前不应继续重复相同转换，应归档失败经验并从 ST 官方 model-zoo deployment、离线 ST Edge AI Core 或 ST 支持复现包重新切入。
 
 ---
 
@@ -200,7 +200,7 @@ print(f'Output1 OK: {o1.name} {o1.shape}')
 
 ST 官方云端工具，理论上用于分析和生成硬件可执行文件。
 
-**重要更新**：以下步骤对 YOLO11-seg 仍应视为历史操作记录和 ST 支持复现依据，不应继续投入为主线。但对新训练的 `road_fastseg_256_fp32.onnx`，ST 云平台已能生成 `.nb`，所以当前推荐路线是下载 `.nb` 后做板端验收，而不是继续调 YOLO11-seg 的 QDQ/QOperator 细节。
+**重要更新**：以下步骤对 YOLO11-seg 仍应视为历史操作记录和 ST 支持复现依据，不应继续投入为主线。对新训练的 `road_fastseg_256_fp32.onnx`，ST 云平台能生成 `.nb`，但生成物为 float16；对 QDQ 量化 ONNX，云端 Generate 无输出。因此当前不再把这条云端流程作为可直接成功的推荐路线。
 
 **URL**: https://stedgeai-dc.st.com
 
@@ -227,7 +227,7 @@ ST 官方云端工具，理论上用于分析和生成硬件可执行文件。
 4. 点击右下角的 **"Launch quantization"** 启动量化。
 
 #### Step 4: 分析兼容性与优化替换 (Optimize)
-1. 量化完成后进入 **Optimize** 阶段。对 `road_fastseg_256_fp32.onnx`，当前已确认 ST 云平台可以生成 `.nb`。若后续其它模型在此步报 `Generation does not contain any output`，不要继续重复相同上传/量化流程，应先回到 `road_fastseg_256` 这条已跑通的主线。
+1. 量化完成后进入 **Optimize** 阶段。对 `road_fastseg_256_fp32.onnx`，当前已确认 ST 云平台可以生成 `.nb`，但结果为 float16；对 `road_fastseg_256` QDQ ONNX，当前已确认 Generate 无输出。若后续其它模型在此步报 `Generation does not contain any output`，不要继续重复相同上传/量化流程，应保留复现材料并更换工具链/模型导出路线。
 2. 对照 **[§2 验收 Checklist](#2-转换后模型硬性要求验收-checklist)** 逐项检查分析报告，确认：
    - 不兼容算子已被成功替换
    - 输入 shape/dtype 不变

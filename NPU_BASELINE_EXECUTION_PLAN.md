@@ -293,3 +293,49 @@ targets `/usr/local/x-linux-ai`; `/usr/local` is nearly full. Prefer one of:
 2. Use `/media/sdcard` for downloaded/generated models and logs.
 3. Install ST demo packages only after freeing `/usr/local` or bind-mounting /
    symlinking the demo directory to `/media/sdcard`.
+
+Follow-up 256x256 baseline:
+
+```text
+FlightController/Solutions/model/st_deeplabv3_mnv2_a050_s16_asppv2_256_qdq_int8_1.nb
+```
+
+Observed contract:
+
+```text
+input_0  [1, 3, 256, 256] tensor(int8)
+output_0 [1, 2, 256, 256] tensor(int8)
+load_ms: about 110 ms
+wrapped latency mean: about 79.04 ms
+raw_set_input_ms mean: about 0.22 ms
+raw_run_ms mean: about 51.58 ms
+raw_get_output_ms mean: about 0.30 ms
+```
+
+Interpretation:
+
+- This is the first usable NPU baseline in the project.
+- 256x256 DeepLab v3 is inside the initial `<80 ms` wrapped gate and near the
+  practical 10 Hz road-following budget.
+- `/dev/galcore` ioctl has been confirmed with `strace -yy`.
+- Real-image validation on `tests/roads/IPC_2026-06-14.10.32.58.1790.jpg`
+  passed with wrapped mean about 66.11 ms and raw run about 51.73 ms.
+
+Next step:
+
+```bash
+PYTHONPATH=. python3 FlightController/tools/render_deeplab_nb_overlay.py \
+  --model FlightController/Solutions/model/st_deeplabv3_mnv2_a050_s16_asppv2_256_qdq_int8_1.nb \
+  --output-dir /media/sdcard/npu_debug/deeplab_overlay \
+  tests/roads/IPC_2026-06-14.10.32.58.1790.jpg
+```
+
+Inspect these outputs to determine which class is the road mask:
+
+```text
+/media/sdcard/npu_debug/deeplab_overlay/*_class0_mask.png
+/media/sdcard/npu_debug/deeplab_overlay/*_class1_mask.png
+/media/sdcard/npu_debug/deeplab_overlay/*_class1_overlay.jpg
+```
+
+If class 1 is not the road, rerun with `--road-class 0`.

@@ -227,3 +227,69 @@ FlightController/tools/validate_nb_npu_contract.py
 ```
 
 It intentionally fails current float16 fallback `.nb` models unless `--allow-float-io` is passed. This keeps the acceptance criteria strict.
+
+---
+
+## 8. 2026-07-09 DeepLab v3 Baseline Result
+
+Tested model:
+
+```text
+FlightController/Solutions/model/st_deeplabv3_mnv2_a050_s16_asppv2_416_qdq_int8_1.nb
+```
+
+Observed contract:
+
+```text
+input_0  [1, 3, 416, 416] tensor(int8)
+output_0 [1, 2, 416, 416] tensor(int8)
+load_ms: about 160 ms
+wrapped latency mean: about 316 ms
+raw_set_input_ms mean: about 0.56 ms
+raw_run_ms mean: about 266.67 ms
+raw_get_output_ms mean: about 0.51 ms
+```
+
+Interpretation:
+
+- This is a real quantized `.nb` contract, unlike the earlier float16 YOLO `.nb`.
+- Python conversion/dequantization is not the bottleneck.
+- The slow part is `stai_mpu_network.run()` itself.
+- `/dev/galcore` is opened during execution, but this alone only proves that the OVX stack opens the driver. It does not prove that each inference is effectively accelerated by the NPU.
+
+Next proof command:
+
+```bash
+PYTHONPATH=. strace -f -yy -e openat,ioctl \
+  python3 FlightController/tools/validate_nb_npu_contract.py \
+    --model FlightController/Solutions/model/st_deeplabv3_mnv2_a050_s16_asppv2_416_qdq_int8_1.nb \
+    --runs 3 \
+    --max-mean-ms 80 \
+    --profile-raw-stai \
+  2>&1 | tee /media/sdcard/deeplab_nb_strace_yy.log
+
+grep -E 'galcore|ioctl\(4<|ioctl\([^)]*</dev/galcore' /media/sdcard/deeplab_nb_strace_yy.log
+```
+
+If `ioctl` calls on the `/dev/galcore` file descriptor are present but
+`raw_run_ms` remains around 266 ms, this baseline is using the driver but is
+not performant enough for road-following. In that case, try the same official
+DeepLab family at `256x256` or `320x320`, or use a smaller official
+classification/detection model only to prove a low-latency NPU baseline before
+returning to semantic segmentation.
+
+Storage status from the board:
+
+```text
+/            3.7G total, 2.5G free
+/usr/local   1.3G total, 39M free
+/media/sdcard 23G total, 21G free
+```
+
+Do not install the ST semantic-segmentation demo package directly yet if it
+targets `/usr/local/x-linux-ai`; `/usr/local` is nearly full. Prefer one of:
+
+1. Generate and test smaller `.nb` models first (`256x256`, then `320x320`).
+2. Use `/media/sdcard` for downloaded/generated models and logs.
+3. Install ST demo packages only after freeing `/usr/local` or bind-mounting /
+   symlinking the demo directory to `/media/sdcard`.

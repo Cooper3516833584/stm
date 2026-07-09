@@ -90,8 +90,34 @@ Reference:
 
 ## 4. ST Cloud / Model Zoo Procedure
 
+Model Zoo normally gives an ONNX model first. That is expected. For STM32MP2x
+high-performance NPU/GPU execution, ONNX is an input artifact, not the final
+runtime artifact. The ONNX must be quantized and converted to NBG (`.nb`) with
+ST Edge AI Core or ST Edge AI Developer Cloud.
+
+### 4.1 Get the ONNX baseline
+
 1. Start with the ST semantic-segmentation DeepLab v3 example or model-zoo configuration.
-2. Select target:
+2. Export or collect the generated ONNX model.
+3. Use a clear file name when copying it into this project:
+
+```text
+FlightController/Solutions/model/baseline_deeplabv3_mp257_fp32.onnx
+```
+
+This ONNX can be used to verify model shape and output contract, but it is not
+the `.nb` model consumed by `validate_nb_npu_contract.py`.
+
+### 4.2 Convert ONNX to NBG / `.nb`
+
+Use one of these two official routes:
+
+| Route | Use when | Output |
+|---|---|---|
+| ST Edge AI Developer Cloud | You want the fastest manual path and cloud benchmark/download | optimized NBG / `.nb` |
+| ST Edge AI Core offline compiler | You have the host-side ST tool installed and want repeatable local conversion | optimized NBG / `.nb` |
+
+Developer Cloud target settings:
 
 ```text
 Board: STM32MP257F-EV1 or STM32MP2 family
@@ -100,8 +126,12 @@ Accelerator: NPU / VIP9000 / GCNano
 Quantization: INT8, per-tensor
 ```
 
-3. Generate/download the optimized `.nb`.
-4. Copy it to:
+Important: if the cloud only returns another quantized `.onnx`, continue to the
+Optimize / Benchmark / Generate stage for STM32MP2. ST documentation states that
+when benchmark is run on an STM32MP2x board with AI hardware accelerator, the
+NBG model is generated and can be downloaded.
+
+4. Copy the downloaded `.nb` to:
 
 ```text
 FlightController/Solutions/model/baseline_deeplabv3_mp257_int8.nb
@@ -114,6 +144,20 @@ FlightController/Solutions/model/baseline_deeplabv3_mp257_int8.nb
 /media/sdcard/nb_npu_strace.log
 /media/sdcard/baseline_deeplabv3_validation.txt
 ```
+
+### 4.3 Optional ONNX smoke test before `.nb`
+
+If you only have the ONNX right now, use it only as a pre-check:
+
+```bash
+PYTHONPATH=. python3 FlightController/tools/validate_vsinpu_model.py \
+  --model FlightController/Solutions/model/baseline_deeplabv3_mp257_fp32.onnx \
+  --runs 3 \
+  --allow-cpu-provider
+```
+
+This does not prove the NBG path. It only checks whether the board-side ONNX
+Runtime can load/run the model without crashing.
 
 ---
 

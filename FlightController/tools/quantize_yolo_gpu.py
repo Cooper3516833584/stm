@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import Iterator, Sequence
 
 import numpy as np
+import onnx
 import onnxruntime as ort
+from onnx import TensorProto
 from onnxruntime.quantization import (
     CalibrationDataReader,
     CalibrationMethod,
@@ -78,6 +80,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-gpu", action="store_true", help="Force CPU calibration")
     p.add_argument("--keep-preprocessed", action="store_true",
                    help="Keep preprocessed ONNX intermediates")
+    p.add_argument("--force-int8-io", action="store_true",
+                   help=("After QDQ quantization, rewrite model boundaries so "
+                         "graph inputs/outputs are INT8 instead of float. "
+                         "Use this for ST Cloud experiments only."))
     return p.parse_args()
 
 
@@ -162,6 +168,129 @@ def _resize_calibration(images: np.ndarray, target_size: int) -> np.ndarray:
     return out
 
 
+def _set_tensor_value_info_dtype(value_info: onnx.ValueInfoProto, dtype: int) -> None:
+    value_info.type.tensor_type.elem_type = dtype
+
+
+def _replace_node_input(node: onnx.NodeProto, old: str, new: str) -> None:
+    for index, name in enumerate(node.input):
+        if name == old:
+            node.input[index] = new
+
+
+def _rewrite_qdq_boundaries_to_int8(model_input: Path, model_output: Path) -> dict:
+    """Rewrite QDQ model I/O from float boundaries to int8 boundaries.
+
+    ONNX Runtime static QDQ quantization normally keeps graph inputs and outputs
+    as float tensors:
+
+        float input -> QuantizeLinear -> DequantizeLinear -> quantized graph
+        quantized graph -> QuantizeLinear -> DequantizeLinear -> float output
+
+    ST Cloud can mis-handle those float boundary Q/DQ pairs when compiling an
+    already quantized network. This pass removes only the outer boundary Q/DQ
+    nodes and changes graph input/output value-info to the quantized dtype.
+    """
+    model = onnx.load(str(model_input))
+    graph = model.graph
+
+    initializer_names = {item.name for item in graph.initializer}
+    initializers = {item.name: item for item in graph.initializer}
+
+    def rebuild_maps() -> tuple[dict[str, list[onnx.NodeProto]], dict[str, onnx.NodeProto]]:
+        consumers: dict[str, list[onnx.NodeProto]] = {}
+        producers: dict[str, onnx.NodeProto] = {}
+        for node in graph.node:
+            for name in node.input:
+                consumers.setdefault(name, []).append(node)
+            for name in node.output:
+                producers[name] = node
+        return consumers, producers
+
+    consumers, producers = rebuild_maps()
+    removed_nodes: list[onnx.NodeProto] = []
+    rewritten_inputs: list[str] = []
+    rewritten_outputs: list[str] = []
+
+    # Input boundary: input -> Q -> DQ becomes int8 input -> DQ.
+    for graph_input in graph.input:
+        if graph_input.name in initializer_names:
+            continue
+
+        direct_consumers = consumers.get(graph_input.name, [])
+        q_nodes = [
+            node for node in direct_consumers
+            if node.op_type == "QuantizeLinear" and node.input and node.input[0] == graph_input.name
+        ]
+        if not q_nodes or len(q_nodes) != len(direct_consumers):
+            continue
+
+        dtype = TensorProto.INT8
+        for q_node in q_nodes:
+            if len(q_node.input) >= 3 and q_node.input[2] in initializers:
+                dtype = initializers[q_node.input[2]].data_type
+            q_output = q_node.output[0]
+            for consumer in consumers.get(q_output, []):
+                _replace_node_input(consumer, q_output, graph_input.name)
+            removed_nodes.append(q_node)
+
+        _set_tensor_value_info_dtype(graph_input, dtype)
+        rewritten_inputs.append(graph_input.name)
+
+    # Output boundary: Q -> DQ -> output becomes Q -> int8 output.
+    consumers, producers = rebuild_maps()
+    for graph_output in graph.output:
+        producer = producers.get(graph_output.name)
+        if producer is None or producer.op_type != "DequantizeLinear":
+            continue
+        if not producer.output or producer.output[0] != graph_output.name:
+            continue
+        if len(producer.input) < 3:
+            continue
+
+        quantized_name = producer.input[0]
+        dtype = TensorProto.INT8
+        zero_point_name = producer.input[2]
+        if zero_point_name in initializers:
+            dtype = initializers[zero_point_name].data_type
+
+        quantized_producer = producers.get(quantized_name)
+        if quantized_producer is None:
+            continue
+
+        for index, output_name in enumerate(quantized_producer.output):
+            if output_name == quantized_name:
+                quantized_producer.output[index] = graph_output.name
+                break
+
+        for value_info in list(graph.value_info):
+            if value_info.name == quantized_name:
+                graph.value_info.remove(value_info)
+
+        _set_tensor_value_info_dtype(graph_output, dtype)
+        removed_nodes.append(producer)
+        rewritten_outputs.append(graph_output.name)
+
+    for node in removed_nodes:
+        if node in graph.node:
+            graph.node.remove(node)
+
+    model.doc_string = (
+        (model.doc_string + "\n") if model.doc_string else ""
+    ) + "Boundary Q/DQ pairs rewritten to INT8 graph I/O for ST Cloud experiments."
+
+    onnx.checker.check_model(model)
+    onnx.save(model, str(model_output))
+
+    return {
+        "input_model": str(model_input),
+        "output_model": str(model_output),
+        "rewritten_inputs": rewritten_inputs,
+        "rewritten_outputs": rewritten_outputs,
+        "removed_boundary_nodes": len(removed_nodes),
+    }
+
+
 # ── quantization pipeline ────────────────────────────────────────
 
 def quantize_one(
@@ -172,6 +301,7 @@ def quantize_one(
     gpu_provider: str | None,
     max_samples: int,
     keep_preprocessed: bool,
+    force_int8_io: bool,
 ) -> dict:
     """Run the full pipeline for one model. Returns a result dict."""
     result: dict = {"model": str(model_path), "output": "", "status": "FAILED"}
@@ -290,6 +420,7 @@ def quantize_one(
         result["status"] = "NON_FINITE"
 
     result["output"] = str(quantized_path)
+    result["qdq_output"] = str(quantized_path)
     result["input_name"] = input_name
     result["input_size"] = model_size
     result["inputs"] = inputs_meta
@@ -297,6 +428,21 @@ def quantize_one(
     result["calibration_samples"] = len(calib_images)
     result["quantize_time_s"] = quant_ms / 1000
     result["verify_time_s"] = verify_t
+
+    if force_int8_io:
+        int8_io_path = output_dir / f"{output_name}_int8_io.onnx"
+        print(f"\n  [extra] Rewriting graph boundaries to INT8 I/O → {int8_io_path.name}", flush=True)
+        rewrite_meta = _rewrite_qdq_boundaries_to_int8(quantized_path, int8_io_path)
+        result["output"] = str(int8_io_path)
+        result["int8_io_output"] = str(int8_io_path)
+        result["int8_io_rewrite"] = rewrite_meta
+        print(
+            "  INT8 I/O rewrite: "
+            f"inputs={rewrite_meta['rewritten_inputs']} "
+            f"outputs={rewrite_meta['rewritten_outputs']} "
+            f"removed_nodes={rewrite_meta['removed_boundary_nodes']}",
+            flush=True,
+        )
 
     # cleanup
     if preprocessed_path.exists() and not keep_preprocessed:
@@ -332,6 +478,7 @@ def main() -> int:
             gpu_provider=gpu,
             max_samples=args.max_calibration_samples,
             keep_preprocessed=args.keep_preprocessed,
+            force_int8_io=args.force_int8_io,
         ))
 
     if not args.skip_tree:
@@ -343,6 +490,7 @@ def main() -> int:
             gpu_provider=gpu,
             max_samples=args.max_calibration_samples,
             keep_preprocessed=args.keep_preprocessed,
+            force_int8_io=args.force_int8_io,
         ))
 
     # ── summary ──
@@ -367,6 +515,7 @@ def main() -> int:
             "symmetric": True,
             "reduce_range": False,
             "method": "MinMax",
+            "force_int8_io": bool(args.force_int8_io),
         },
         "results": results,
     }

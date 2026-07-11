@@ -175,12 +175,13 @@ class RoadInstance:
 
 
 # ONNX model (CPU / XNNPACK / VSINPU EP fallback)
-MODEL_PATH = "FlightController/Solutions/model/road_yolo11n_seg.onnx"
+MODEL_PATH = "FlightController/Solutions/model/road_yolo11n_seg_128.onnx"
 # Compiled .nb network binary from ST Edge AI Cloud (VIP9000 NPU)
 MODEL_PATH_NPU = "FlightController/Solutions/model/road_yolo11n_seg_1.nb"
 
-# When True, prefer .nb NPU model over .onnx when both are available.
-_AUTO_USE_NPU = True
+# NPU auto-detect disabled — the 128×128 lightweight model has no .nb counterpart.
+# Re-enable only after producing a matching INT8 .nb via ST Cloud.
+_AUTO_USE_NPU = False
 
 INP_SIZE = 320
 CONF_THRESH = 0.4
@@ -403,7 +404,7 @@ def _make_session(model_path: str, is_nb: bool = False):
 
 
 def _get_session():
-    global _SESSION, _INPUT_NAME, _MODEL_INPUT_SIZE, _SESSION_PROVIDER
+    global _SESSION, _INPUT_NAME, _MODEL_INPUT_SIZE, _SESSION_PROVIDER, _USE_CROP_PREPROCESS
 
     if _SESSION is None:
         model_path, is_nb = _resolve_model_path()
@@ -416,10 +417,35 @@ def _get_session():
         _INPUT_NAME = input_meta.name
         _MODEL_INPUT_SIZE = _input_size_from_meta(input_meta.shape)
 
+        if not is_nb:
+            _log_low_resolution_warning(model_path, _MODEL_INPUT_SIZE)
+
+        # At low resolutions letterbox wastes too much canvas on gray
+        # padding — switch to center-crop preprocessing automatically.
+        resolved_size = _MODEL_INPUT_SIZE or INP_SIZE
+        if resolved_size <= 160:
+            _USE_CROP_PREPROCESS = True
+
         if is_nb:
             _log_npu_info(model_path)
 
     return _SESSION, _INPUT_NAME
+
+
+def _log_low_resolution_warning(model_path: str, model_input_size: int) -> None:
+    """Warn when a low-resolution model is loaded (accuracy may degrade)."""
+    if model_input_size is not None and model_input_size < 160:
+        try:
+            from loguru import logger
+            logger.warning(
+                "Low-resolution model loaded: {}  |  input_size={}px  "
+                "|  road segmentation accuracy may be reduced.  "
+                "Consider 160×160 if road detection is unreliable.",
+                os.path.basename(model_path),
+                model_input_size,
+            )
+        except ImportError:
+            pass
 
 
 def _log_npu_info(model_path: str) -> None:
@@ -476,6 +502,77 @@ def _preprocess(frame: np.ndarray, input_size: int):
     img = np.transpose(img, (2, 0, 1))
     img = np.expand_dims(img, axis=0).astype(np.float32)
     return img, scale, pad_x, pad_y
+
+
+def _preprocess_crop(frame: np.ndarray, input_size: int):
+    """Preprocess via center-crop + resize (no letterbox / gray padding).
+
+    At low resolutions (≤160 px) letterbox wastes too much canvas area on
+    gray padding, starving the model of road features.  Center-crop keeps
+    the entire spatial budget on content.
+
+    Also stores crop metadata in ``_CROP_META`` for downstream mask
+    geometry correction in ``get_road_perception()``.
+
+    Returns ``(blob, 0.0, 0.0, 0.0)`` — *scale*, *pad_x*, *pad_y* are
+    always zero here; masks are fixed by ``_fix_mask_for_crop()`` after
+    the decode step.
+    """
+    h, w = frame.shape[:2]
+    if h <= 0 or w <= 0:
+        raise ValueError("frame has invalid shape")
+
+    crop_side = min(h, w)
+    crop_y = (h - crop_side) // 2
+    crop_x = (w - crop_side) // 2
+    cropped = frame[crop_y : crop_y + crop_side, crop_x : crop_x + crop_side]
+
+    # Persist crop geometry for mask correction.
+    _CROP_META["crop_side"] = crop_side
+    _CROP_META["crop_x"] = crop_x
+    _CROP_META["crop_y"] = crop_y
+    _CROP_META["frame_w"] = w
+    _CROP_META["frame_h"] = h
+
+    resized = cv2.resize(cropped, (input_size, input_size), interpolation=cv2.INTER_LINEAR)
+    img = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+    img = img.astype(np.float32) / 255.0
+    img = np.transpose(img, (2, 0, 1))
+    img = np.expand_dims(img, axis=0).astype(np.float32)
+    return img, 0.0, 0.0, 0.0
+
+
+# Metadata written by _preprocess_crop on every call; consumed by
+# _fix_mask_for_crop after the ONNX decode step.
+_CROP_META: dict[str, int] = {}
+
+
+def _fix_mask_for_crop(mask: np.ndarray) -> np.ndarray:
+    """Correct a mask that was decoded assuming letterbox when crop was used.
+
+    The mask is currently stretched to ``(frame_w, frame_h)``.  We resize it
+    back to the square crop region and embed it at the correct position.
+    """
+    if mask is None or mask.size == 0:
+        return np.zeros(
+            (_CROP_META["frame_h"], _CROP_META["frame_w"]), dtype=np.uint8
+        )
+
+    crop_side: int = _CROP_META["crop_side"]
+    crop_x: int = _CROP_META["crop_x"]
+    crop_y: int = _CROP_META["crop_y"]
+    frame_w: int = _CROP_META["frame_w"]
+    frame_h: int = _CROP_META["frame_h"]
+
+    corrected = cv2.resize(mask, (crop_side, crop_side), interpolation=cv2.INTER_NEAREST)
+    canvas = np.zeros((frame_h, frame_w), dtype=mask.dtype)
+    canvas[crop_y : crop_y + crop_side, crop_x : crop_x + crop_side] = corrected
+    return canvas
+
+
+# Global flag: when True, use center-crop instead of letterbox at inference
+# time.  Automatically enabled for models with input ≤ 160 px.
+_USE_CROP_PREPROCESS: bool = False
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -1454,7 +1551,10 @@ def get_road_perception(
 
         session, input_name = _get_session()
         input_size = _MODEL_INPUT_SIZE or INP_SIZE
-        blob, _scale, pad_x, pad_y = _preprocess(frame_bgr, input_size)
+        if _USE_CROP_PREPROCESS:
+            blob, _scale, pad_x, pad_y = _preprocess_crop(frame_bgr, input_size)
+        else:
+            blob, _scale, pad_x, pad_y = _preprocess(frame_bgr, input_size)
         outputs = session.run(None, {input_name: blob})
 
         merged_mask, instances, confidence, decode_msg = _decode_yolo_segmentation(
@@ -1465,6 +1565,17 @@ def get_road_perception(
             pad_x=pad_x,
             pad_y=pad_y,
         )
+
+        # Crop-mode preprocessing produces masks that are horizontally
+        # stretched because the decode step resizes from a square crop to a
+        # non-square frame.  Fix the geometry here so that downstream
+        # centerline extraction sees the correct pixel coordinates.
+        if _USE_CROP_PREPROCESS:
+            if merged_mask is not None:
+                merged_mask = _fix_mask_for_crop(merged_mask)
+            for inst in instances:
+                inst.mask = _fix_mask_for_crop(inst.mask)
+
         debug_mask = merged_mask
         if merged_mask is None or not instances or np.count_nonzero(merged_mask) == 0:
             result = _lost_result(decode_msg)

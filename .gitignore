@@ -26,3 +26,7 @@ dist/
 
 # ST Cloud upload artifacts
 /FlightController/Solutions/model/stcloud_upload/
+
+# Archived untracked files
+/_codex_files/
+/_other_untracked/

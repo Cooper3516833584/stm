@@ -206,6 +206,89 @@ class RoadFastSeg(nn.Module):
         return self.final(x)
 
 
+class InvertedResidual(nn.Module):
+    """MobileNetV2-style block using static shapes and NPU-friendly ops."""
+
+    def __init__(self, in_ch: int, out_ch: int, stride: int, expand_ratio: int) -> None:
+        super().__init__()
+        hidden_ch = int(round(in_ch * expand_ratio))
+        self.use_residual = stride == 1 and in_ch == out_ch
+        layers: list[nn.Module] = []
+        if expand_ratio != 1:
+            layers.append(ConvBNReLU(in_ch, hidden_ch, kernel_size=1))
+        layers.extend(
+            [
+                ConvBNReLU(hidden_ch, hidden_ch, kernel_size=3, stride=stride, groups=hidden_ch),
+                nn.Conv2d(hidden_ch, out_ch, kernel_size=1, bias=False),
+                nn.BatchNorm2d(out_ch),
+            ]
+        )
+        self.block = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.block(x)
+        if self.use_residual:
+            return x + out
+        return out
+
+
+class ASPPBranch(nn.Sequential):
+    def __init__(self, in_ch: int, out_ch: int, dilation: int) -> None:
+        padding = dilation
+        super().__init__(
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=padding, dilation=dilation, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+
+class DeepLabV3MobileNetV2(nn.Module):
+    """Small DeepLabV3/MobileNetV2 semantic segmentation model for 256 inputs.
+
+    The output contract intentionally mirrors the validated ST DeepLab baseline:
+    input [1,3,H,W], output [1,2,H,W]. The decoder uses Resize + Conv and avoids
+    ConvTranspose, NMS, dynamic axes, and YOLO-style postprocessing.
+    """
+
+    def __init__(self, num_classes: int = 2, output_stride: int = 16) -> None:
+        super().__init__()
+        if output_stride not in (16,):
+            raise ValueError("only output_stride=16 is supported for the NPU training path")
+
+        self.stem = ConvBNReLU(3, 32, stride=2)
+        self.bottlenecks = nn.Sequential(
+            InvertedResidual(32, 16, stride=1, expand_ratio=1),
+            InvertedResidual(16, 24, stride=2, expand_ratio=6),
+            InvertedResidual(24, 24, stride=1, expand_ratio=6),
+            InvertedResidual(24, 32, stride=2, expand_ratio=6),
+            InvertedResidual(32, 32, stride=1, expand_ratio=6),
+            InvertedResidual(32, 64, stride=2, expand_ratio=6),
+            InvertedResidual(64, 64, stride=1, expand_ratio=6),
+            InvertedResidual(64, 96, stride=1, expand_ratio=6),
+            InvertedResidual(96, 160, stride=2, expand_ratio=6),
+            InvertedResidual(160, 160, stride=1, expand_ratio=6),
+        )
+
+        aspp_ch = 64
+        self.aspp_1x1 = ConvBNReLU(160, aspp_ch, kernel_size=1)
+        self.aspp_d6 = ASPPBranch(160, aspp_ch, dilation=6)
+        self.aspp_d12 = ASPPBranch(160, aspp_ch, dilation=12)
+        self.aspp_project = ConvBNReLU(aspp_ch * 3, 96, kernel_size=1)
+        self.classifier = nn.Sequential(
+            ConvBNReLU(96, 64, kernel_size=3),
+            nn.Conv2d(64, num_classes, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        input_size = x.shape[-2:]
+        x = self.stem(x)
+        x = self.bottlenecks(x)
+        x = torch.cat([self.aspp_1x1(x), self.aspp_d6(x), self.aspp_d12(x)], dim=1)
+        x = self.aspp_project(x)
+        x = self.classifier(x)
+        return F.interpolate(x, size=input_size, mode="bilinear", align_corners=False)
+
+
 class InputNormalizeWrapper(nn.Module):
     """Embed RGB 0-1 to training normalization into the exported ONNX graph."""
 
@@ -450,6 +533,7 @@ def export_onnx(
         opset_version=13,
         do_constant_folding=True,
         dynamic_axes=None,
+        dynamo=False,
     )
 
     import onnx
@@ -486,8 +570,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
-    parser.add_argument("--export-name", default="road_fastseg_256_fp32.onnx")
+    parser.add_argument(
+        "--arch",
+        choices=("road_fastseg", "deeplab_mnv2"),
+        default="road_fastseg",
+        help="model architecture; use deeplab_mnv2 for the STM32MP257 NPU main path",
+    )
+    parser.add_argument("--export-name", default=None)
     return parser.parse_args()
+
+
+def build_model(arch: str) -> nn.Module:
+    if arch == "road_fastseg":
+        return RoadFastSeg(num_classes=2)
+    if arch == "deeplab_mnv2":
+        return DeepLabV3MobileNetV2(num_classes=2)
+    raise ValueError(f"unsupported architecture: {arch}")
+
+
+def default_export_name(arch: str, size: int) -> str:
+    if arch == "deeplab_mnv2":
+        return f"road_deeplabv3_mnv2_{size}_fp32.onnx"
+    return f"road_fastseg_{size}_fp32.onnx"
 
 
 def main() -> None:
@@ -571,7 +675,7 @@ def main() -> None:
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = RoadFastSeg(num_classes=2).to(device)
+    model = build_model(args.arch).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     amp = bool(device.type == "cuda" and not args.no_amp)
@@ -646,7 +750,8 @@ def main() -> None:
     )
     print("test_metrics=" + json.dumps(test_metrics), flush=True)
 
-    onnx_path = output_dir / args.export_name
+    export_name = args.export_name or default_export_name(args.arch, args.size)
+    onnx_path = output_dir / export_name
     export_onnx(model, onnx_path, args.size, device, mean, std)
     print(f"exported_onnx={onnx_path}")
 

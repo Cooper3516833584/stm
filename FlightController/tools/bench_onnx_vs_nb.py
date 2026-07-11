@@ -44,11 +44,13 @@ MODEL_DIR = REPO_ROOT / "FlightController" / "Solutions" / "model"
 # Old 416 models
 ONNX_PATH_416 = MODEL_DIR / "road_yolo11n_seg.onnx"
 NB_PATH_416 = MODEL_DIR / "road_yolo11n_seg_1.nb"
-# New 128 lightweight model
+# New 128 lightweight models
 ONNX_PATH_128 = MODEL_DIR / "road_yolo11n_seg_128.onnx"
-# Default test targets
+NB_PATH_128 = MODEL_DIR / "road_yolo11n_seg_128_1.nb"
+# Default test targets — ordered by expected speed
 DEFAULT_MODELS: list[tuple[str, Path, int]] = [
     ("ONNX 128", ONNX_PATH_128, 128),
+    (".nb  128", NB_PATH_128, 128),
     ("ONNX 416", ONNX_PATH_416, 416),
     (".nb  416", NB_PATH_416, 416),
 ]

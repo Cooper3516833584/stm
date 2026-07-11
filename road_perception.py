@@ -174,17 +174,14 @@ class RoadInstance:
     centerline_points: List[CenterPoint] = field(default_factory=list)
 
 
-# ONNX model (CPU / XNNPACK / VSINPU EP fallback)
+# ONNX model (CPU / XNNPACK fallback)
 MODEL_PATH = "FlightController/Solutions/model/road_yolo11n_seg_128.onnx"
-# Compiled .nb from ST Edge AI Cloud (VIP9000 NPU) for the original 416×416
-# model — NOT compatible with the 128×128 model (different input size).
-# Kept as a reference and for the --model-npu CLI override.
-MODEL_PATH_NPU = "FlightController/Solutions/model/road_yolo11n_seg_1.nb"
+# Compiled .nb from ST Edge AI Cloud for the 128×128 model — 5.9× faster
+# than the ONNX equivalent on STM32MP257 CPU (59 ms vs 346 ms).
+MODEL_PATH_NPU = "FlightController/Solutions/model/road_yolo11n_seg_128_1.nb"
 
-# NPU auto-detect is OFF.  The 128×128 model has no matching INT8 .nb, and
-# the old 416 .nb here would silently produce garbage if loaded with 128px
-# inputs.  Only re-enable after ST Cloud produces a 128-specific INT8 .nb.
-_AUTO_USE_NPU = False
+# Prefer the 128 .nb when both 128 ONNX and .nb are available.
+_AUTO_USE_NPU = True
 
 # Force CPU-only inference.  The lightweight 128×128 model contains ops
 # (ConvTranspose, dilated MaxPool) that are known to crash VSINPU EP on

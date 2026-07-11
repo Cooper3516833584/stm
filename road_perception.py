@@ -186,6 +186,11 @@ MODEL_PATH_NPU = "FlightController/Solutions/model/road_yolo11n_seg_1.nb"
 # inputs.  Only re-enable after ST Cloud produces a 128-specific INT8 .nb.
 _AUTO_USE_NPU = False
 
+# Force CPU-only inference.  The lightweight 128×128 model contains ops
+# (ConvTranspose, dilated MaxPool) that are known to crash VSINPU EP on
+# STM32MP257.  When True, _select_providers() skips VSINPU / CUDA entirely.
+_CPU_ONLY = True
+
 INP_SIZE = 320
 CONF_THRESH = 0.4
 IOU_THRESH = 0.45
@@ -368,6 +373,14 @@ def _select_providers() -> list[str]:
     import onnxruntime as ort
 
     available = set(ort.get_available_providers())
+
+    # Low-resolution CPU-only models contain ops (ConvTranspose, dilated
+    # MaxPool) that crash VSINPU EP on STM32MP257.  Skip directly to
+    # XNNPACK / CPU when _CPU_ONLY is set.
+    if _CPU_ONLY:
+        if "XnnpackExecutionProvider" in available:
+            return ["XnnpackExecutionProvider", "CPUExecutionProvider"]
+        return ["CPUExecutionProvider"]
 
     for candidate in ("VSINPUExecutionProvider", "CUDAExecutionProvider"):
         if candidate in available:

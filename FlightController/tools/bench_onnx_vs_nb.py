@@ -41,8 +41,17 @@ import numpy as np
 # ---------------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODEL_DIR = REPO_ROOT / "FlightController" / "Solutions" / "model"
-ONNX_PATH = MODEL_DIR / "road_yolo11n_seg.onnx"
-NB_PATH = MODEL_DIR / "road_yolo11n_seg_1.nb"
+# Old 416 models
+ONNX_PATH_416 = MODEL_DIR / "road_yolo11n_seg.onnx"
+NB_PATH_416 = MODEL_DIR / "road_yolo11n_seg_1.nb"
+# New 128 lightweight model
+ONNX_PATH_128 = MODEL_DIR / "road_yolo11n_seg_128.onnx"
+# Default test targets
+DEFAULT_MODELS: list[tuple[str, Path, int]] = [
+    ("ONNX 128", ONNX_PATH_128, 128),
+    ("ONNX 416", ONNX_PATH_416, 416),
+    (".nb  416", NB_PATH_416, 416),
+]
 TEST_IMAGE_DIR = REPO_ROOT / "tests" / "roads"
 REPORT_PATH = MODEL_DIR / "bench_onnx_vs_nb.json"
 
@@ -84,7 +93,13 @@ def _preprocess(frame: np.ndarray, input_size: int) -> np.ndarray:
     return img
 
 
-def _bench_onnx(model_path: Path, input_size: int, blob: np.ndarray) -> dict[str, Any]:
+def _bench_onnx(
+    model_path: Path,
+    input_size: int,
+    blob: np.ndarray,
+    warmup_runs: int = WARMUP_RUNS,
+    bench_runs: int = BENCH_RUNS,
+) -> dict[str, Any]:
     """Benchmark onnxruntime inference."""
     import onnxruntime as ort
 
@@ -100,12 +115,12 @@ def _bench_onnx(model_path: Path, input_size: int, blob: np.ndarray) -> dict[str
     output_names = [o.name for o in session.get_outputs()]
 
     # Warmup
-    for _ in range(WARMUP_RUNS):
+    for _ in range(warmup_runs):
         session.run(output_names, {input_name: blob})
 
     # Timed runs
     latencies: list[float] = []
-    for _ in range(BENCH_RUNS):
+    for _ in range(bench_runs):
         start = time.monotonic()
         session.run(output_names, {input_name: blob})
         latencies.append((time.monotonic() - start) * 1000.0)
@@ -122,7 +137,13 @@ def _bench_onnx(model_path: Path, input_size: int, blob: np.ndarray) -> dict[str
     }
 
 
-def _bench_nb(model_path: Path, input_size: int, blob: np.ndarray) -> dict[str, Any]:
+def _bench_nb(
+    model_path: Path,
+    input_size: int,
+    blob: np.ndarray,
+    warmup_runs: int = WARMUP_RUNS,
+    bench_runs: int = BENCH_RUNS,
+) -> dict[str, Any]:
     """Benchmark .nb model via nb_graph.NBGraphSession (stai_mpu fallback)."""
     # Add repo root so we can import nb_graph
     if str(REPO_ROOT) not in sys.path:
@@ -138,12 +159,12 @@ def _bench_nb(model_path: Path, input_size: int, blob: np.ndarray) -> dict[str, 
     output_names = [o.name for o in session.get_outputs()]
 
     # Warmup
-    for _ in range(WARMUP_RUNS):
+    for _ in range(warmup_runs):
         session.run(output_names, {input_name: blob})
 
     # Timed runs
     latencies: list[float] = []
-    for _ in range(BENCH_RUNS):
+    for _ in range(bench_runs):
         start = time.monotonic()
         session.run(output_names, {input_name: blob})
         latencies.append((time.monotonic() - start) * 1000.0)
@@ -191,91 +212,146 @@ def _print_table(onnx_result: dict, nb_result: dict | None, nb_error: str | None
     print("=" * 78)
 
 
-def main() -> int:
-    print("YOLO11n-seg ONNX vs .nb CPU benchmark")
-    print(f"  ONNX model : {ONNX_PATH}  ({'exists' if ONNX_PATH.is_file() else 'MISSING'})")
-    print(f"  .nb model  : {NB_PATH}  ({'exists' if NB_PATH.is_file() else 'MISSING'})")
-    print(f"  Runs       : {WARMUP_RUNS} warmup + {BENCH_RUNS} timed")
+def _print_results_table(results: list[dict]) -> None:
+    """Print a multi-model comparison table."""
+    print()
+    print("=" * 78)
+    print("  YOLO11n-seg Model Benchmarks — STM32MP257 CPU")
+    print("=" * 78)
+    header = f"  {'Model':<14} {'Input':<8} {'Backend':<22} {'Mean':>8} {'Std':>8} {'Min':>8} {'Max':>8}"
+    print(header)
+    print("  " + "-" * 76)
 
-    # Find a test image
-    test_img = _find_test_image()
-    if test_img is None:
-        print("\nERROR: no test image found.  Place a road JPEG in tests/roads/")
-        print("  or export TEST_IMAGE=/path/to/road.jpg")
-        env_img = os.environ.get("TEST_IMAGE")
-        if env_img:
-            test_img = Path(env_img)
+    best_latency = min(
+        (r["latency_ms_mean"] for r in results if "latency_ms_mean" in r),
+        default=1.0,
+    )
+
+    for r in results:
+        label = r.get("label", "?")
+        inp = str(r.get("input_size", "?"))
+        backend = r.get("backend", "?")
+        if "error" in r:
+            print(f"  {label:<14} {inp:<8} {backend:<22} {'ERROR':>8}  ({r['error'][:40]})")
+            continue
+        mean = f"{r['latency_ms_mean']:.0f} ms"
+        std = f"{r['latency_ms_std']:.0f} ms"
+        lo = f"{r['latency_ms_min']:.0f} ms"
+        hi = f"{r['latency_ms_max']:.0f} ms"
+        ratio = r["latency_ms_mean"] / max(0.001, best_latency)
+        tag = " ★ best" if ratio < 1.02 else f" ×{ratio:.1f}"
+        print(f"  {label:<14} {inp:<8} {backend:<22} {mean:>8} {std:>8} {lo:>8} {hi:>8}{tag}")
+
+    print("=" * 78)
+
+
+def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="YOLO11n-seg multi-model CPU benchmark")
+    parser.add_argument(
+        "--models",
+        nargs="*",
+        default=None,
+        help="Explicit (label, path, input_size) triples.  Default: ONNX 128, ONNX 416, .nb 416.",
+    )
+    parser.add_argument("--image", default=None, help="Test image path")
+    parser.add_argument("--warmup", type=int, default=WARMUP_RUNS)
+    parser.add_argument("--runs", type=int, default=BENCH_RUNS)
+    parser.add_argument(
+        "--no-nb",
+        action="store_true",
+        help="Skip .nb models (e.g. on PC without stai_mpu).",
+    )
+    parser.add_argument(
+        "--no-416",
+        action="store_true",
+        help="Skip 416 models to save time.",
+    )
+    args = parser.parse_args()
+
+    warmup = args.warmup
+    bench_runs = args.runs
+
+    # Build list of models to test
+    targets: list[tuple[str, Path, int]] = []
+    for label, path, inp_size in DEFAULT_MODELS:
+        if args.no_416 and "416" in label:
+            continue
+        if args.no_nb and ".nb" in label:
+            continue
+        if path.is_file():
+            targets.append((label, path, inp_size))
         else:
-            return 1
-    print(f"  Test image : {test_img}")
+            print(f"SKIP {label}: file not found ({path})")
+
+    if not targets:
+        print("ERROR: no models to benchmark.")
+        return 1
+
+    print(f"Models to benchmark: {len(targets)}")
+    for label, path, inp_size in targets:
+        print(f"  {label}: {path}  ({inp_size}×{inp_size})")
+    print(f"  Runs: {warmup} warmup + {bench_runs} timed")
+
+    # Find test image
+    test_img = Path(args.image) if args.image else _find_test_image()
+    if test_img is None:
+        env_img = os.environ.get("TEST_IMAGE")
+        test_img = Path(env_img) if env_img else None
+    if test_img is None or not test_img.is_file():
+        print("ERROR: no test image.  Use --image or place a JPEG in tests/roads/")
+        return 1
+    print(f"  Test image: {test_img}")
 
     import cv2
     frame = cv2.imread(str(test_img))
     if frame is None:
-        print(f"ERROR: cannot read test image: {test_img}")
+        print(f"ERROR: cannot read: {test_img}")
         return 1
 
-    # ------------------------------------------------------------------
-    # ONNX benchmark
-    # ------------------------------------------------------------------
-    if not ONNX_PATH.is_file():
-        print(f"\nERROR: ONNX model not found: {ONNX_PATH}")
-        return 1
+    results: list[dict] = []
 
-    print("\n[1/2] Benchmarking ONNX (onnxruntime CPU) ...")
-    try:
-        # Detect input size from existing ONNX model
-        import onnxruntime as ort
-        temp = ort.InferenceSession(str(ONNX_PATH), providers=["CPUExecutionProvider"])
-        onnx_input_shape = temp.get_inputs()[0].shape
-        onnx_input_size = onnx_input_shape[2] if len(onnx_input_shape) >= 4 else 320
-    except Exception:
-        onnx_input_size = 320
+    for label, model_path, inp_size in targets:
+        print(f"\n[{len(results)+1}/{len(targets)}] Benchmarking: {label} ...")
 
-    blob = _preprocess(frame, onnx_input_size)
-    onnx_result = _bench_onnx(ONNX_PATH, onnx_input_size, blob)
-    print(f"  ONNX mean latency: {onnx_result['latency_ms_mean']:.1f} ms")
-
-    # ------------------------------------------------------------------
-    # .nb benchmark
-    # ------------------------------------------------------------------
-    nb_result: dict | None = None
-    nb_error: str | None = None
-
-    if not NB_PATH.is_file():
-        nb_error = "model file missing"
-        print(f"\n[2/2] Skipping .nb benchmark — {nb_error}")
-    else:
-        print("\n[2/2] Benchmarking .nb (stai_mpu CPU fallback) ...")
         try:
-            # .nb model has its own expected input size; use 416 (matching calibration
-            # manifest) or detect from the model.
-            nb_input_size = 416  # per calibration_manifest.json
-            blob_nb = _preprocess(frame, nb_input_size)
-            nb_result = _bench_nb(NB_PATH, nb_input_size, blob_nb)
-            print(f"  .nb mean latency: {nb_result['latency_ms_mean']:.1f} ms")
-        except Exception as exc:
-            nb_error = f"{type(exc).__name__}: {exc}"
-            print(f"  .nb benchmark failed: {nb_error}")
+            blob = _preprocess(frame, inp_size)
 
-    # ------------------------------------------------------------------
-    # Report
-    # ------------------------------------------------------------------
-    _print_table(onnx_result, nb_result, nb_error)
+            if ".nb" in label or model_path.suffix == ".nb":
+                # Lazy import nb_graph
+                if str(REPO_ROOT) not in sys.path:
+                    sys.path.insert(0, str(REPO_ROOT))
+                result = _bench_nb(model_path, inp_size, blob, warmup, bench_runs)
+                result["backend"] = "stai_mpu"
+            else:
+                result = _bench_onnx(model_path, inp_size, blob, warmup, bench_runs)
+
+            result["label"] = label
+            result["input_size"] = inp_size
+            result["load_ms"] = result.get("load_ms", 0)
+            results.append(result)
+            print(f"  Mean latency: {result['latency_ms_mean']:.0f} ms")
+
+        except Exception as exc:
+            err_msg = f"{type(exc).__name__}: {exc}"
+            print(f"  FAILED: {err_msg}")
+            results.append({"label": label, "input_size": inp_size, "error": err_msg})
+
+    # Print table and save report
+    _print_results_table(results)
 
     report = {
         "date": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "onnx_model": str(ONNX_PATH),
-        "nb_model": str(NB_PATH),
         "test_image": str(test_img),
-        "warmup_runs": WARMUP_RUNS,
-        "bench_runs": BENCH_RUNS,
-        "onnx": onnx_result,
-        "nb": nb_result,
-        "nb_error": nb_error,
+        "warmup_runs": warmup,
+        "bench_runs": bench_runs,
+        "results": results,
     }
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    REPORT_PATH.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     print(f"\nReport saved to: {REPORT_PATH}")
 
     return 0

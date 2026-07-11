@@ -176,11 +176,14 @@ class RoadInstance:
 
 # ONNX model (CPU / XNNPACK / VSINPU EP fallback)
 MODEL_PATH = "FlightController/Solutions/model/road_yolo11n_seg_128.onnx"
-# Compiled .nb network binary from ST Edge AI Cloud (VIP9000 NPU)
+# Compiled .nb from ST Edge AI Cloud (VIP9000 NPU) for the original 416×416
+# model — NOT compatible with the 128×128 model (different input size).
+# Kept as a reference and for the --model-npu CLI override.
 MODEL_PATH_NPU = "FlightController/Solutions/model/road_yolo11n_seg_1.nb"
 
-# NPU auto-detect disabled — the 128×128 lightweight model has no .nb counterpart.
-# Re-enable only after producing a matching INT8 .nb via ST Cloud.
+# NPU auto-detect is OFF.  The 128×128 model has no matching INT8 .nb, and
+# the old 416 .nb here would silently produce garbage if loaded with 128px
+# inputs.  Only re-enable after ST Cloud produces a 128-specific INT8 .nb.
 _AUTO_USE_NPU = False
 
 INP_SIZE = 320

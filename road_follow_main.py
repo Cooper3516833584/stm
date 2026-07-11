@@ -16,6 +16,8 @@ import cv2
 import numpy as np
 from loguru import logger
 
+from perception_pipeline import PerceptionPipeline
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Road-following dry-run / flight entry")
@@ -135,13 +137,11 @@ def main() -> None:
         road_perception.MODEL_PATH_NPU = args.model_npu
         road_perception._AUTO_USE_NPU = True
         logger.info("NPU .nb model configured: {}", args.model_npu)
-    model_missing_logged = False
     if not os.path.isfile(args.model):
         msg = f"[ROAD] model missing, perception lost: {args.model}"
         if args.require_model:
             raise FileNotFoundError(msg)
         logger.warning(msg)
-        model_missing_logged = True
 
     actual_dry_run = bool(args.dry_run or args.no_fc or not args.enable_flight)
     if actual_dry_run:
@@ -151,7 +151,6 @@ def main() -> None:
 
     fc = None
     multi_radar = None
-    cap = None
     recorder = SessionRecorder(
         SessionRecorderConfig(
             root_dir=args.record_dir,
@@ -235,9 +234,20 @@ def main() -> None:
             multi_radar = MultiRadar(_radar_configs(args.upper_port, args.lower_port))
             multi_radar.start()
 
-        cap = _open_camera(args)
-        if cap is None:
-            logger.warning("[ROAD] camera open failed; perception will stay lost")
+        pipeline = PerceptionPipeline(
+            camera_index=args.camera_index,
+            camera_width=args.camera_width,
+            camera_height=args.camera_height,
+            camera_fps=args.camera_fps,
+            model_path=args.model,
+            flight_height_m=args.flight_height_m,
+            branch_preference=args.branch,
+            wb_enable=bool(args.wb_enable),
+            wb_r=args.wb_r,
+            wb_g=args.wb_g,
+            wb_b=args.wb_b,
+        )
+        pipeline.start()
 
         logger.info(
             "[ROAD] started dry_run={} no_radar={} branch={} camera={} model={}".format(
@@ -252,33 +262,23 @@ def main() -> None:
         last_log_s = 0.0
         while True:
             loop_start = time.perf_counter()
-            ok, frame = _read_camera(cap)
+
+            # ── 1. Non-blocking: read latest perception + frame from pipeline
+            perception, _percept_age, percept_stale = pipeline.latest_perception()
+            camera_ok = pipeline.camera_ok
+
+            # Recording frame (decimated inside SessionRecorder)
+            frame, _frame_ts = pipeline.latest_frame()
             recorder.record_frame(loop_count=loop_count, now_s=loop_start, frame=frame, label="road")
             debug_path = _debug_image_path(args.debug_dir, args.debug_every_n, loop_count)
 
-            if not ok or frame is None:
-                perception = None
-                desired = Command.zero("camera_failed")
+            # ── 2. Road following (uses latest perception, or lost if stale)
+            if perception is None or percept_stale:
+                desired = follower.update(None, now_s=loop_start)
             else:
-                try:
-                    perception = road_perception.get_road_perception(
-                        frame,
-                        flight_height_m=args.flight_height_m,
-                        debug_save_path=debug_path,
-                        offset_comp_config=offset_comp,
-                        branch_preference=args.branch,
-                        previous_branch_label=follower.previous_branch_label(),
-                        wb_config=wb_config,
-                    )
-                    if not model_missing_logged and "ONNX model not found" in getattr(perception, "debug_msg", ""):
-                        logger.warning(f"[ROAD] model missing, perception lost: {args.model}")
-                        model_missing_logged = True
-                    desired = follower.update(perception, now_s=loop_start)
-                except Exception as exc:
-                    logger.warning(f"[ROAD] perception lost: {type(exc).__name__}: {exc}")
-                    perception = None
-                    desired = follower.update(None, now_s=loop_start)
+                desired = follower.update(perception, now_s=loop_start)
 
+            # ── 3. Radar (unchanged)
             if multi_radar is not None:
                 points = multi_radar.get_obstacle_points_body_cm(max_distance_cm=args.max_distance_cm)
                 radar_field.update(points, loop_start)
@@ -289,6 +289,7 @@ def main() -> None:
                 radar_age_s = 0.0
                 radar_connected = True
 
+            # ── 4. Planning / safety / FC send (unchanged)
             planned = bypass_planner.update(
                 desired=desired,
                 perception=perception,
@@ -299,7 +300,7 @@ def main() -> None:
                 fc=fc,
                 multi_radar=multi_radar,
                 radar_timeout_s=args.radar_timeout_s,
-                camera_ok=bool(ok),
+                camera_ok=bool(camera_ok),
             )
             safe = arbiter.filter(
                 planned,
@@ -316,6 +317,8 @@ def main() -> None:
                 health,
                 dry_run=actual_dry_run,
             )
+
+            # ── 5. Recording (unchanged)
             recorder.record_radar(
                 loop_count=loop_count,
                 now_s=loop_start,
@@ -326,7 +329,7 @@ def main() -> None:
                 desired=desired,
                 safe_command=safe.command,
                 decision_reason=decision.reason,
-                extra=_road_record_extra(perception, ok, planned, bypass_planner),
+                extra=_road_record_extra(perception, camera_ok, planned, bypass_planner),
             )
             recorder.record_command(
                 loop_count=loop_count,
@@ -335,7 +338,7 @@ def main() -> None:
                 safe_command=safe.command,
                 decision_reason=decision.reason,
                 extra={
-                    "camera_ok": bool(ok),
+                    "camera_ok": bool(camera_ok),
                     **_bypass_record_extra(bypass_planner),
                     "planned": _command_extra(planned),
                 },
@@ -361,6 +364,7 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("[ROAD] interrupted")
     finally:
+        pipeline.stop()
         if fc is not None:
             try:
                 health = flight_health_from_sources(
@@ -379,8 +383,6 @@ def main() -> None:
                 time.sleep(0.05)
             finally:
                 fc.close()
-        if cap is not None:
-            cap.release()
         if multi_radar is not None:
             multi_radar.stop()
         recorder.close()

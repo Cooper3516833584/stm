@@ -63,7 +63,11 @@ class RoadFollower:
     def _compute_yaw_rate(self, pixel_error: float, centerline_angle_deg: float) -> float:
         if abs(pixel_error) < self.config.pixel_deadband_px:
             pixel_error = 0.0
-        angle_error = float(centerline_angle_deg) - 90.0
+        # Image coordinates have +X to the right and +Y downward.  The road
+        # geometry reports angles below 90° when its forward direction points
+        # toward image-right.  FC API yaw is clockwise/right-positive, so the
+        # heading term must use the opposite sign from (angle - 90).
+        angle_error = 90.0 - float(centerline_angle_deg)
         yaw_rate = (
             self.config.pixel_kp_yaw * pixel_error
             + self.config.angle_kp_yaw * angle_error

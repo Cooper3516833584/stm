@@ -3,7 +3,8 @@
 本程序只连接 ``FC_Controller``。它不会创建雷达、雷达 SLAM、相机导航或
 伴随计算机位置控制对象；水平定点完全由飞控的 HOLD_POS（mode=2）完成。
 所有任务高度判断只使用飞控 ``ALT_ADD``（光流模组激光测距）；已禁用不可靠的
-``ALT_FU`` 融合高度参与起飞、悬停或安全判断。
+``ALT_FU`` 融合高度参与起飞、悬停或安全判断。飞控 ``pos_x/pos_y`` 积分坐标
+仅写入诊断日志，不参与漂移判定、任务成败或降落决策。
 
 为防止误触发，默认只打印任务计划。真实飞行必须显式传入 ``--execute``::
 
@@ -497,7 +498,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--landing-timeout-s", type=float, default=30.0)
     parser.add_argument("--height-tolerance-cm", type=float, default=15.0)
     parser.add_argument("--stable-s", type=float, default=1.5, help="进入定点前高度稳定时间。")
-    parser.add_argument("--max-drift-cm", type=float, default=80.0, help="允许的最大水平漂移。")
+    # Backward-compatible no-op. FC pos_x/pos_y are known-drifting integrated
+    # diagnostics and must never drive a safety or mission decision.
+    parser.add_argument(
+        "--max-drift-cm",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--max-tilt-deg", type=float, default=25.0, help="飞行中允许的最大横滚/俯仰角。")
     parser.add_argument(
         "--min-battery-v",
@@ -533,7 +541,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "landing_timeout_s",
         "height_tolerance_cm",
         "stable_s",
-        "max_drift_cm",
         "max_tilt_deg",
         "status_interval_s",
     ):
@@ -555,6 +562,7 @@ def _print_plan(args: argparse.Namespace) -> None:
         f"定点 {args.hover_s:g} s，然后降落。"
     )
     print("任务高度源：ALT_ADD（光流模组激光测距）；ALT_FU 已禁用。")
+    print("飞控 pos_x/pos_y 积分坐标：仅记录诊断，不参与控制、失败或降落判定。")
     print("真实执行会自动保存逐帧诊断 CSV 和飞控运行日志；ALT_FU 仅记录，不参与控制判断。")
     print("外部雷达/雷达 SLAM/相机导航/位置回灌：全部不启动。")
     print("确认场地、光流纹理与照明、桨叶和遥控接管条件后，加 --execute 执行真实飞行。")
@@ -818,10 +826,13 @@ def _hold_with_fc_optical_flow(
     origin_x = float(fc.state.pos_x.value)
     origin_y = float(fc.state.pos_y.value)
     diagnostic.set_origin(origin_x, origin_y)
+    diagnostic.mark(
+        "FC pos_x/pos_y are diagnostic-only; integrated XY is ignored by mission decisions"
+    )
     diagnostic.set_phase("hold", "native optical-flow hold started")
     deadline = time.perf_counter() + args.hover_s
     next_status = 0.0
-    max_drift = 0.0
+    max_position_integral_offset = 0.0
     max_height_error = 0.0
     height_guard = _ConsecutiveRangeGuard(
         minimum=25.0,
@@ -848,13 +859,9 @@ def _hold_with_fc_optical_flow(
         dx = float(fc.state.pos_x.value) - origin_x
         dy = float(fc.state.pos_y.value) - origin_y
         drift_cm = math.hypot(dx, dy)
-        max_drift = max(max_drift, drift_cm)
+        max_position_integral_offset = max(max_position_integral_offset, drift_cm)
         max_height_error = max(max_height_error, abs(add_cm - args.height_cm))
 
-        if drift_cm > args.max_drift_cm:
-            raise RuntimeError(
-                f"光流定点漂移超过限制：{drift_cm:.1f} cm > {args.max_drift_cm:.1f} cm"
-            )
         height_violation = height_guard.observe(add_cm)
         if height_violation is not None:
             raise RuntimeError(
@@ -881,15 +888,16 @@ def _hold_with_fc_optical_flow(
             )
             print(
                 f"定点中：剩余={remaining:4.1f} s, alt_add={add_cm:5.1f} cm, "
-                f"pos=({current_x:6.1f},{current_y:6.1f}) cm, "
-                f"offset=({dx:5.1f},{dy:5.1f}) cm, drift={drift_cm:5.1f} cm, "
+                f"pos_diag=({current_x:6.1f},{current_y:6.1f}) cm, "
+                f"integral_offset_diag=({dx:5.1f},{dy:5.1f}) cm/"
+                f"{drift_cm:5.1f} cm, "
                 f"vel=({vel_x:5.1f},{vel_y:5.1f}) cm/s, dpos_vel={dpos_text} cm/s, "
                 f"rpy=({float(fc.state.rol.value):4.1f},{float(fc.state.pit.value):4.1f},"
                 f"{float(fc.state.yaw.value):5.1f})°, mode={fc.state.mode.value}"
             )
             next_status = now + args.status_interval_s
 
-    return max_drift, max_height_error
+    return max_position_integral_offset, max_height_error
 
 
 def _land_and_wait_for_lock(fc: Any, args: argparse.Namespace) -> bool:
@@ -1014,13 +1022,14 @@ def main(argv: list[str] | None = None) -> int:
         diagnostic.set_phase("takeoff_climb", "takeoff confirmed; monitoring climb")
         _wait_for_takeoff_height(fc, args)
 
-        max_drift, max_height_error = _hold_with_fc_optical_flow(
+        max_position_integral_offset, max_height_error = _hold_with_fc_optical_flow(
             fc,
             args,
             diagnostic,
         )
         print(
-            f"{args.hover_s:g} 秒定点测试完成：最大水平漂移={max_drift:.1f} cm，"
+            f"{args.hover_s:g} 秒定点测试完成：飞控积分坐标最大偏移(仅诊断)="
+            f"{max_position_integral_offset:.1f} cm，"
             f"最大高度误差={max_height_error:.1f} cm。"
         )
         mission_ok = True

@@ -60,10 +60,12 @@ class FC_Application(FC_Protocol):
 
     def reset_position_prediction(self):
         """
-        复位位置融合预测(伪造通用位置传感器)
+        飞控积分位置已禁用，禁止通过伪造通用位置传感器将其归零。
         """
-        self.send_general_position(0, 0, 0)
-        self._action_log("reset position prediction")
+        raise RuntimeError(
+            "飞控 pos_x/pos_y 积分坐标存在零偏，位置预测重置接口已禁用；"
+            "请使用雷达、T265 或 mapper 的外部坐标。"
+        )
 
     def rectangular_move(self, x: int, y: int, speed: int) -> None:
         """

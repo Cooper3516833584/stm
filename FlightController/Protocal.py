@@ -58,6 +58,9 @@ class FC_Protocol(FC_Base_Uart_Comunication):
         通用位置传感器回传
         x,y,z: cm
         默认值 -2_147_483_648 代表输入无效
+
+        仅用于回传独立外部定位传感器；严禁把飞控自身 pos_x/pos_y
+        回灌到此接口，否则会把已确认的积分零偏重新送入融合器。
         """
         x = x if x is not None else -2_147_483_648
         y = y if y is not None else -2_147_483_648
@@ -451,15 +454,14 @@ class FC_Protocol(FC_Base_Uart_Comunication):
 
     def set_target_position(self, x: int, y: int) -> None:
         """
-        设置目标位置: (程控模式下有效)
-        x:+-100000 cm
-        y:+-100000 cm
+        已禁用：该指令依赖飞控自身会漂移的 pos_x/pos_y 积分坐标。
+
+        水平导航应使用 Navigation 的雷达、T265 或 mapper 外部坐标闭环。
         """
-        self._check_mode(3)
-        self._byte_temp1.reset(x, "s32", int)
-        self._byte_temp2.reset(y, "s32", int)
-        self._send_imu_command_frame(0x10, 0x01, 0x01, self._byte_temp1.bytes + self._byte_temp2.bytes)
-        self._action_log("set target position", f"{x}, {y}")
+        raise RuntimeError(
+            "飞控 pos_x/pos_y 积分坐标存在零偏，set_target_position 已禁用；"
+            "请使用 Navigation 的外部定位闭环。"
+        )
 
     def set_target_height(self, height: int) -> None:
         """

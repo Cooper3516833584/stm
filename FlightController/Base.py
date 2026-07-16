@@ -145,8 +145,12 @@ class FC_State_Struct:
     vel_x = Byte_Var("s16", int)  # cm/s
     vel_y = Byte_Var("s16", int)  # cm/s
     vel_z = Byte_Var("s16", int)  # cm/s
-    pos_x = Byte_Var("s32", int)  # cm
-    pos_y = Byte_Var("s32", int)  # cm
+    # Protocol placeholders only. The FC-integrated XY position has a confirmed
+    # zero-bias drift on this aircraft. Decode it so the following telemetry
+    # fields remain aligned, but application/control code must treat it as
+    # diagnostic-only data.
+    pos_x = Byte_Var("s32", int)  # cm; decode/log only, control use disabled
+    pos_y = Byte_Var("s32", int)  # cm; decode/log only, control use disabled
     bat = Byte_Var("u16", float, 0.01)  # V
     mode = Byte_Var("u8", int)  #
     unlock = Byte_Var("u8", bool)  #

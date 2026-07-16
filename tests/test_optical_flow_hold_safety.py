@@ -1,4 +1,5 @@
 import csv
+import inspect
 from pathlib import Path
 import struct
 from types import SimpleNamespace
@@ -7,10 +8,12 @@ import pytest
 
 from FlightController.Application import FC_Application
 from FlightController.Base import Byte_Var, FC_State_Struct
+from FlightController.Protocal import FC_Protocol
 from FlightController.tools.test_optical_flow_hold import (
     TAKEOFF_COMMAND,
     _ConsecutiveRangeGuard,
     _DiagnosticLogger,
+    _hold_with_fc_optical_flow,
     _median,
     _takeoff_evidence,
     parse_args,
@@ -170,6 +173,39 @@ def test_application_height_control_uses_alt_add_source_one():
     assert calls == [("up", 90, 20)]
 
 
+def test_integrated_position_control_apis_are_disabled():
+    with pytest.raises(RuntimeError, match="pos_x/pos_y"):
+        FC_Application.reset_position_prediction(SimpleNamespace())
+
+    with pytest.raises(RuntimeError, match="pos_x/pos_y"):
+        FC_Protocol.set_target_position(SimpleNamespace(), 100, 200)
+
+
+def test_hold_monitor_does_not_use_integrated_xy_for_safety_decisions():
+    source = inspect.getsource(_hold_with_fc_optical_flow)
+
+    assert "max_drift_cm" not in source
+    assert "光流定点漂移超过限制" not in source
+
+
+def test_runtime_control_code_does_not_read_fc_integrated_position():
+    repository_root = Path(__file__).resolve().parents[1]
+    flight_controller_root = repository_root / "FlightController"
+    allowed_diagnostic_readers = {
+        flight_controller_root / "Base.py",
+        flight_controller_root / "tools" / "test_optical_flow_hold.py",
+    }
+    violations = []
+    for path in flight_controller_root.rglob("*.py"):
+        if path in allowed_diagnostic_readers:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if ".state.pos_x" in text or ".state.pos_y" in text:
+            violations.append(str(path.relative_to(repository_root)))
+
+    assert violations == []
+
+
 def test_runtime_code_does_not_read_disabled_alt_fused():
     repository_root = Path(__file__).resolve().parents[1]
     violations = []
@@ -190,6 +226,7 @@ def test_new_safety_defaults_are_enabled():
     assert args.post_unlock_delay_s == 2.0
     assert args.takeoff_start_timeout_s == 8.0
     assert args.height_outlier_confirm_frames == 3
+    assert args.max_drift_cm is None
 
 
 def test_diagnostic_log_path_can_be_overridden():

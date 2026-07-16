@@ -1,8 +1,9 @@
 """Segmentation-based road-following entry point.
 
 Default behavior is dry-run. Non-zero FC commands are sent only when
---enable-flight is explicitly provided. This file does not unlock, take off,
-or land the aircraft.
+--enable-flight is explicitly provided. Automatic takeoff additionally needs
+--auto-takeoff. On Ctrl+C, an enabled in-flight session requests the FC's
+native in-place landing and waits for it to lock.
 """
 
 from __future__ import annotations
@@ -66,6 +67,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-radar", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--enable-flight", action="store_true")
+    parser.add_argument(
+        "--auto-takeoff",
+        action="store_true",
+        help="Unlock and use the FC one-key takeoff before road following; requires --enable-flight",
+    )
+    parser.add_argument(
+        "--takeoff-height-cm",
+        type=int,
+        default=100,
+        help="One-key takeoff target height in cm (40..500; default: 100)",
+    )
+    parser.add_argument("--post-unlock-delay-s", type=float, default=2.0)
+    parser.add_argument("--takeoff-timeout-s", type=float, default=25.0)
+    parser.add_argument("--takeoff-height-tolerance-cm", type=float, default=15.0)
+    parser.add_argument("--landing-timeout-s", type=float, default=30.0)
     parser.add_argument("--loop-hz", type=float, default=10.0)
     parser.add_argument("--branch", choices=["auto", "straight", "left", "right"], default="auto")
     parser.add_argument("--branch-preference", choices=["auto", "straight", "left", "right"], default=None)
@@ -152,6 +168,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args = _normalize_args(args)
+    _validate_flight_args(args)
     _setup_logging(args.log_file)
 
     from road_perception import CameraOffsetCompensationConfig, CameraWhiteBalanceConfig
@@ -198,6 +215,9 @@ def main() -> None:
 
     fc = None
     multi_radar = None
+    pipeline = None
+    flight_owned = False
+    interrupted = False
     recorder = SessionRecorder(
         SessionRecorderConfig(
             root_dir=args.record_dir,
@@ -275,7 +295,7 @@ def main() -> None:
     try:
         if not args.no_fc:
             fc = connect_fc(FCConnectConfig(port=args.fc_port, mode=2, timeout_s=10.0))
-            logger.info("[ROAD] FC connected and switched to HOLD_POS mode; no unlock/takeoff is performed")
+            logger.info("[ROAD] FC connected and switched to HOLD_POS mode")
 
         if not args.no_radar:
             multi_radar = MultiRadar(_radar_configs(args.upper_port, args.lower_port))
@@ -298,6 +318,10 @@ def main() -> None:
             wb_b=args.wb_b,
         )
         pipeline.start()
+
+        if args.auto_takeoff:
+            flight_owned = True
+            _auto_takeoff(fc, args)
 
         logger.info(
             "[ROAD] started dry_run={} no_radar={} branch={} camera={} "
@@ -415,27 +439,32 @@ def main() -> None:
             loop_count += 1
             _sleep_to_rate(loop_start, period_s)
     except KeyboardInterrupt:
+        interrupted = True
         logger.info("[ROAD] interrupted")
     finally:
-        pipeline.stop()
         if fc is not None:
             try:
-                health = flight_health_from_sources(
-                    fc=fc,
-                    multi_radar=multi_radar,
-                    radar_timeout_s=args.radar_timeout_s,
-                    camera_ok=True,
-                )
-                send_command_safely(
-                    fc,
-                    Command.zero("shutdown"),
-                    arbiter,
-                    health,
-                    dry_run=False,
-                )
-                time.sleep(0.05)
+                if flight_owned or (interrupted and not actual_dry_run):
+                    _land_and_wait_for_lock(fc, args)
+                else:
+                    health = flight_health_from_sources(
+                        fc=fc,
+                        multi_radar=multi_radar,
+                        radar_timeout_s=args.radar_timeout_s,
+                        camera_ok=True,
+                    )
+                    send_command_safely(
+                        fc,
+                        Command.zero("shutdown"),
+                        arbiter,
+                        health,
+                        dry_run=False,
+                    )
+                    time.sleep(0.05)
             finally:
                 fc.close()
+        if pipeline is not None:
+            pipeline.stop()
         if multi_radar is not None:
             multi_radar.stop()
         recorder.close()
@@ -468,6 +497,135 @@ def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         except ValueError:
             args.camera_index = args.camera
     return args
+
+
+def _validate_flight_args(args: argparse.Namespace) -> None:
+    """Reject combinations that could make automatic flight ambiguous."""
+    if args.auto_takeoff and (not args.enable_flight or args.dry_run or args.no_fc):
+        raise ValueError(
+            "--auto-takeoff requires --enable-flight and cannot be combined with --dry-run or --no-fc"
+        )
+    if not 40 <= args.takeoff_height_cm <= 500:
+        raise ValueError("--takeoff-height-cm must be within the FC one-key takeoff range of 40..500")
+    for option in (
+        "post_unlock_delay_s",
+        "takeoff_timeout_s",
+        "takeoff_height_tolerance_cm",
+        "landing_timeout_s",
+    ):
+        if getattr(args, option) <= 0:
+            raise ValueError(f"--{option.replace('_', '-')} must be greater than zero")
+
+
+def _wait_for_fc_mode(fc, target_mode: int, timeout_s: float = 5.0) -> None:
+    """Set an FC mode and confirm the reported state changed."""
+    fc.set_flight_mode(target_mode)
+    deadline = time.perf_counter() + timeout_s
+    while time.perf_counter() < deadline:
+        if not fc.connected:
+            raise RuntimeError("FC disconnected while changing flight mode")
+        if int(fc.state.mode.value) == target_mode:
+            return
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"FC mode change timed out: expected mode={target_mode}, got mode={fc.state.mode.value}"
+    )
+
+
+def _auto_takeoff(fc, args: argparse.Namespace) -> None:
+    """Use the guarded one-key takeoff sequence from the optical-flow test."""
+    if fc is None or not fc.connected:
+        raise RuntimeError("FC is not connected; automatic takeoff refused")
+    if bool(fc.state.unlock.value):
+        raise RuntimeError("FC is already unlocked; automatic takeoff refused")
+    if float(fc.state.bat.value) <= 1.0:
+        raise RuntimeError("FC has not reported a valid battery voltage; automatic takeoff refused")
+
+    logger.info("[ROAD] automatic takeoff: switching FC to PROGRAM mode")
+    _wait_for_fc_mode(fc, fc.PROGRAM_MODE)
+    logger.info("[ROAD] automatic takeoff: requesting unlock")
+    fc.unlock()
+    unlock_deadline = time.perf_counter() + 5.0
+    while time.perf_counter() < unlock_deadline:
+        if not fc.connected:
+            raise RuntimeError("FC disconnected while waiting for unlock")
+        if bool(fc.state.unlock.value):
+            break
+        time.sleep(0.05)
+    else:
+        raise RuntimeError("FC unlock confirmation timed out")
+
+    logger.info("[ROAD] unlock confirmed; waiting {:.1f}s before takeoff", args.post_unlock_delay_s)
+    time.sleep(args.post_unlock_delay_s)
+    if not fc.connected or not bool(fc.state.unlock.value):
+        raise RuntimeError("FC is no longer unlocked before takeoff")
+
+    logger.info("[ROAD] requesting one-key takeoff to {} cm", args.takeoff_height_cm)
+    fc.take_off(args.takeoff_height_cm)
+    deadline = time.perf_counter() + args.takeoff_timeout_s
+    minimum_height_cm = args.takeoff_height_cm - args.takeoff_height_tolerance_cm
+    while time.perf_counter() < deadline:
+        if not fc.connected:
+            raise RuntimeError("FC disconnected during takeoff")
+        if not bool(fc.state.unlock.value):
+            raise RuntimeError("FC locked unexpectedly during takeoff")
+        altitude_cm = float(fc.state.alt_add.value)
+        if altitude_cm >= minimum_height_cm:
+            _wait_for_fc_mode(fc, fc.HOLD_POS_MODE)
+            fc.stablize()
+            logger.info("[ROAD] takeoff complete at alt_add={:.1f} cm; HOLD_POS active", altitude_cm)
+            return
+        time.sleep(0.1)
+    raise RuntimeError(
+        f"takeoff height confirmation timed out: alt_add={float(fc.state.alt_add.value):.1f} cm, "
+        f"target={args.takeoff_height_cm} cm"
+    )
+
+
+def _land_and_wait_for_lock(fc, args: argparse.Namespace) -> bool:
+    """Stop road-following commands, request native landing, and never air-lock."""
+    try:
+        if not fc.connected:
+            logger.error("[ROAD] FC disconnected; unable to request landing. Take over with the RC immediately.")
+            return False
+        if not bool(fc.state.unlock.value):
+            logger.info("[ROAD] FC is already locked; landing is not required")
+            return True
+
+        logger.warning("[ROAD] stopping road following and requesting native in-place landing")
+        fc.stablize()
+        time.sleep(0.1)
+        fc.land()
+        deadline = time.perf_counter() + args.landing_timeout_s
+        next_land_request = time.perf_counter() + 2.0
+        next_status = 0.0
+        while time.perf_counter() < deadline:
+            now = time.perf_counter()
+            if not fc.connected:
+                logger.error("[ROAD] FC disconnected during landing. Take over with the RC immediately.")
+                return False
+            if not bool(fc.state.unlock.value):
+                logger.info("[ROAD] landing confirmed: FC locked")
+                return True
+            if now >= next_land_request:
+                fc.land()
+                next_land_request = now + 2.0
+            if now >= next_status:
+                logger.info(
+                    "[ROAD] landing: alt_add={:.1f} cm unlock={}",
+                    float(fc.state.alt_add.value),
+                    bool(fc.state.unlock.value),
+                )
+                next_status = now + 1.0
+            time.sleep(0.1)
+        logger.error(
+            "[ROAD] landing confirmation timed out; land was requested but motors were not force-locked. "
+            "Take over with the RC immediately."
+        )
+        return False
+    except Exception as exc:
+        logger.exception("[ROAD] landing request failed: {}. Take over with the RC immediately.", exc)
+        return False
 
 
 def _open_camera(args: argparse.Namespace):

@@ -92,7 +92,7 @@ def main() -> None:
         s = fc.state
         headers = [
             ("IMU 姿态", f"roll={s.rol.value:.1f}°  pit={s.pit.value:.1f}°  yaw={s.yaw.value:.1f}°"),
-            ("高度", f"alt_add={s.alt_add.value}cm  alt_fused={s.alt_fused.value}cm"),
+            ("高度", f"alt_add={s.alt_add.value}cm (光流激光测距)"),
             ("速度", f"vx={s.vel_x.value}  vy={s.vel_y.value}  vz={s.vel_z.value}  cm/s"),
             ("位置", f"pos_x={s.pos_x.value}  pos_y={s.pos_y.value}  cm"),
             ("电池/解锁", f"bat={s.bat.value:.1f}V  unlock={s.unlock.value}"),

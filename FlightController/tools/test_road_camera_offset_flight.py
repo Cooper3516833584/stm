@@ -248,7 +248,7 @@ def main() -> int:
         fc.wait_for_connection()
         print(
             "FC connected: "
-            f"alt_add={fc.state.alt_add.value}cm alt_fused={fc.state.alt_fused.value}cm"
+            f"alt_add={fc.state.alt_add.value}cm"
         )
 
         # Only the upper radar is opened. Its solved pose must be stable before

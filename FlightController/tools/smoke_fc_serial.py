@@ -32,7 +32,6 @@ def main() -> None:
             f"bat={state.bat.value:.2f}V",
             f"yaw={state.yaw.value:.2f}deg",
             f"alt_add={state.alt_add.value}cm",
-            f"alt_fused={state.alt_fused.value}cm",
         )
     finally:
         fc.close()

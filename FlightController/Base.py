@@ -137,13 +137,20 @@ class FC_State_Struct:
     rol = Byte_Var("s16", float, 0.01)  # deg
     pit = Byte_Var("s16", float, 0.01)  # deg
     yaw = Byte_Var("s16", float, 0.01)  # deg
-    alt_fused = Byte_Var("s32", int)  # cm
+    # Protocol placeholder only. ALT_FU is known to be unreliable on this
+    # aircraft and must not be used by application/control code. Keep it in
+    # RECV_ORDER so every following telemetry field stays correctly aligned.
+    alt_fused = Byte_Var("s32", int)  # cm; decode only, control use disabled
     alt_add = Byte_Var("s32", int)  # cm
     vel_x = Byte_Var("s16", int)  # cm/s
     vel_y = Byte_Var("s16", int)  # cm/s
     vel_z = Byte_Var("s16", int)  # cm/s
-    pos_x = Byte_Var("s32", int)  # cm
-    pos_y = Byte_Var("s32", int)  # cm
+    # Protocol placeholders only. The FC-integrated XY position has a confirmed
+    # zero-bias drift on this aircraft. Decode it so the following telemetry
+    # fields remain aligned, but application/control code must treat it as
+    # diagnostic-only data.
+    pos_x = Byte_Var("s32", int)  # cm; decode/log only, control use disabled
+    pos_y = Byte_Var("s32", int)  # cm; decode/log only, control use disabled
     bat = Byte_Var("u16", float, 0.01)  # V
     mode = Byte_Var("u8", int)  #
     unlock = Byte_Var("u8", bool)  #

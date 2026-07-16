@@ -183,6 +183,7 @@ class RoadInstance:
     bottom_touch_px: int
     bottom_cx: float
     centerline_points: List[CenterPoint] = field(default_factory=list)
+    row_intervals: List[Tuple[int, List[Tuple[int, int]]]] = field(default_factory=list)
 
 
 # Existing lightweight YOLO segmentation model (CPU / XNNPACK fallback).
@@ -200,6 +201,17 @@ _AUTO_USE_NPU = True
 # (ConvTranspose, dilated MaxPool) that are known to crash VSINPU EP on
 # STM32MP257.  When True, _select_providers() skips VSINPU / CUDA entirely.
 _CPU_ONLY = True
+
+POSTPROCESS_FAST_MAIN = "fast-main"
+POSTPROCESS_FULL = "full"
+POSTPROCESS_MODES = {POSTPROCESS_FAST_MAIN, POSTPROCESS_FULL}
+# The NPU semantic path uses the low-resolution main-road-only profile by
+# default.  The legacy CPU YOLO decoder always keeps its full implementation.
+_POSTPROCESS_MODE = POSTPROCESS_FAST_MAIN
+
+FAST_MASK_WIDTH = 192
+FAST_MASK_HEIGHT = 144
+FAST_CENTERLINE_ROW_STEP = 2
 
 INP_SIZE = 320
 CONF_THRESH = 0.4
@@ -393,6 +405,7 @@ def configure_model(
     backend: str = "npu",
     cpu_model_path: str | None = None,
     npu_model_path: str | None = None,
+    postprocess_mode: str = POSTPROCESS_FAST_MAIN,
 ) -> None:
     """Configure the road model and reset the cached inference session.
 
@@ -404,10 +417,16 @@ def configure_model(
     normalized = str(backend).strip().lower()
     if normalized not in {"npu", "cpu"}:
         raise ValueError(f"unsupported road inference backend: {backend!r}")
+    normalized_postprocess = str(postprocess_mode).strip().lower()
+    if normalized_postprocess not in POSTPROCESS_MODES:
+        raise ValueError(
+            f"unsupported road postprocess mode: {postprocess_mode!r}; "
+            f"expected one of {sorted(POSTPROCESS_MODES)}"
+        )
 
     global MODEL_PATH, MODEL_PATH_NPU, _AUTO_USE_NPU, _CPU_ONLY
     global _SESSION, _INPUT_NAME, _MODEL_INPUT_SIZE, _SESSION_PROVIDER
-    global _MODEL_KIND, _USE_CROP_PREPROCESS
+    global _MODEL_KIND, _USE_CROP_PREPROCESS, _POSTPROCESS_MODE
 
     if cpu_model_path is not None:
         MODEL_PATH = str(cpu_model_path)
@@ -418,6 +437,7 @@ def configure_model(
     # ONNX inference is deliberately CPU-only.  The legacy YOLO graph contains
     # operators that are known to crash the board's VSINPU execution provider.
     _CPU_ONLY = True
+    _POSTPROCESS_MODE = normalized_postprocess
 
     _SESSION = None
     _INPUT_NAME = None
@@ -608,7 +628,10 @@ def _preprocess_semantic(frame: np.ndarray, input_size: int) -> np.ndarray:
     image_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
     blob = image_rgb.astype(np.float32) / 255.0
     blob = np.transpose(blob, (2, 0, 1))
-    return np.expand_dims(blob, axis=0).astype(np.float32, copy=False)
+    # stai_mpu consumes the application buffer as contiguous memory and does
+    # not honor NumPy strides from transpose().  ORT accepts the strided view,
+    # which can hide this bug during CPU validation.
+    return np.ascontiguousarray(np.expand_dims(blob, axis=0), dtype=np.float32)
 
 
 def _preprocess_crop(frame: np.ndarray, input_size: int):
@@ -725,11 +748,59 @@ def _nms_indices(boxes_xywh: List[List[float]], scores: List[float]) -> List[int
     if not boxes_xywh:
         return []
 
-    indices = cv2.dnn.NMSBoxes(boxes_xywh, scores, CONF_THRESH, IOU_THRESH)
-    if indices is None or len(indices) == 0:
+    dnn = getattr(cv2, "dnn", None)
+    if dnn is not None and hasattr(dnn, "NMSBoxes"):
+        indices = dnn.NMSBoxes(boxes_xywh, scores, CONF_THRESH, IOU_THRESH)
+        if indices is None or len(indices) == 0:
+            return []
+        return [int(i) for i in np.array(indices).reshape(-1)]
+
+    return _nms_indices_numpy(boxes_xywh, scores)
+
+
+def _nms_indices_numpy(
+    boxes_xywh: List[List[float]], scores: List[float]
+) -> List[int]:
+    """OpenCV-DNN-independent NMS for minimal OpenSTLinux builds."""
+    boxes = np.asarray(boxes_xywh, dtype=np.float32)
+    score_array = np.asarray(scores, dtype=np.float32)
+    if boxes.ndim != 2 or boxes.shape[0] == 0 or boxes.shape[1] != 4:
         return []
 
-    return [int(i) for i in np.array(indices).reshape(-1)]
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    widths = np.maximum(0.0, boxes[:, 2])
+    heights = np.maximum(0.0, boxes[:, 3])
+    x2 = x1 + widths
+    y2 = y1 + heights
+    areas = widths * heights
+    order = np.argsort(score_array)[::-1]
+    keep: List[int] = []
+
+    while order.size > 0:
+        current = int(order[0])
+        keep.append(current)
+        if order.size == 1:
+            break
+
+        rest = order[1:]
+        inter_x1 = np.maximum(x1[current], x1[rest])
+        inter_y1 = np.maximum(y1[current], y1[rest])
+        inter_x2 = np.minimum(x2[current], x2[rest])
+        inter_y2 = np.minimum(y2[current], y2[rest])
+        inter_w = np.maximum(0.0, inter_x2 - inter_x1)
+        inter_h = np.maximum(0.0, inter_y2 - inter_y1)
+        intersection = inter_w * inter_h
+        union = areas[current] + areas[rest] - intersection
+        iou = np.divide(
+            intersection,
+            union,
+            out=np.zeros_like(intersection),
+            where=union > 0.0,
+        )
+        order = rest[iou <= IOU_THRESH]
+
+    return keep
 
 
 def _decode_yolo_segmentation(
@@ -948,6 +1019,73 @@ def _decode_semantic_segmentation(
     return final_mask, [instance], confidence, "ok"
 
 
+def _decode_semantic_fast_main(
+    outputs: List[np.ndarray],
+) -> Tuple[np.ndarray | None, float, str]:
+    """Decode the semantic output directly into the small fast working mask."""
+    if len(outputs) != 1:
+        return None, 0.0, f"expected 1 semantic output, got {len(outputs)}"
+
+    logits = np.asarray(outputs[0], dtype=np.float32)
+    if logits.ndim != 4 or logits.shape[0] != 1 or logits.shape[1] != 2:
+        return None, 0.0, (
+            "semantic logits must be [1, 2, H, W], "
+            f"got shape={logits.shape}"
+        )
+    if not np.all(np.isfinite(logits)):
+        return None, 0.0, "semantic logits contain non-finite values"
+
+    delta = logits[0, 1] - logits[0, 0]
+    road_small = delta > 0.0
+    if not np.any(road_small):
+        return None, 0.0, "semantic model predicted no road pixels"
+
+    # Confidence is diagnostic/control metadata; evaluate sigmoid only on the
+    # predicted road pixels instead of materialising a second full logits map.
+    confidence = float(np.mean(_sigmoid(delta[road_small])))
+    mask = cv2.resize(
+        road_small.astype(np.uint8) * 255,
+        (FAST_MASK_WIDTH, FAST_MASK_HEIGHT),
+        interpolation=cv2.INTER_NEAREST,
+    )
+    mask = _clean_fast_main_mask(mask)
+    if mask.size == 0 or np.count_nonzero(mask) == 0:
+        return None, 0.0, "semantic road mask became empty after fast cleanup"
+    return mask, confidence, "ok"
+
+
+def _clean_fast_main_mask(mask: np.ndarray) -> np.ndarray:
+    """One low-resolution cleanup pass for the main-road-only profile."""
+    if mask is None or mask.size == 0:
+        return np.zeros((0, 0), dtype=np.uint8)
+
+    mask = (mask > 0).astype(np.uint8) * 255
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        mask,
+        connectivity=8,
+    )
+    if num_labels <= 1:
+        return np.zeros_like(mask)
+
+    h, w = mask.shape[:2]
+    min_area = max(1, int(h * w * MIN_AREA_RATIO))
+    bottom_labels = set(int(v) for v in np.unique(labels[int(h * 0.90) :, :]))
+    bottom_labels.discard(0)
+    candidates: List[Tuple[int, int, bool]] = []
+    for label_id in range(1, num_labels):
+        area = int(stats[label_id, cv2.CC_STAT_AREA])
+        if area >= min_area:
+            candidates.append((label_id, area, label_id in bottom_labels))
+    if not candidates:
+        return np.zeros_like(mask)
+
+    bottom_candidates = [candidate for candidate in candidates if candidate[2]]
+    selected = max(bottom_candidates or candidates, key=lambda item: item[1])[0]
+    return np.where(labels == selected, 255, 0).astype(np.uint8)
+
+
 def _clean_mask(mask: np.ndarray) -> np.ndarray:
     """Fill holes and keep the most plausible road component."""
     if mask is None or mask.size == 0:
@@ -1025,25 +1163,18 @@ def _find_intervals(
     if len(cols) == 0:
         return []
 
-    intervals: List[Interval] = []
-    start = int(cols[0])
-    prev = int(cols[0])
-
-    for c_value in cols[1:]:
-        c = int(c_value)
-        if c == prev + 1:
-            prev = c
-            continue
-
-        if prev - start + 1 >= min_width:
-            intervals.append((start, prev))
-        start = c
-        prev = c
-
-    if prev - start + 1 >= min_width:
-        intervals.append((start, prev))
-
-    return intervals
+    # Vectorized run-boundary extraction.  The previous per-pixel Python loop
+    # dominated the complete perception time on Cortex-A35 even though NPU
+    # inference itself was fast.
+    gap_indices = np.flatnonzero(np.diff(cols) > 1)
+    starts = np.concatenate((cols[:1], cols[gap_indices + 1]))
+    ends = np.concatenate((cols[gap_indices], cols[-1:]))
+    widths = ends - starts + 1
+    valid = widths >= int(min_width)
+    return [
+        (int(start), int(end))
+        for start, end in zip(starts[valid], ends[valid])
+    ]
 
 
 def _extract_centerline_and_intervals(clean_mask: np.ndarray) -> Tuple[List[CenterPoint], RowIntervals]:
@@ -1081,6 +1212,49 @@ def _extract_centerline_and_intervals(clean_mask: np.ndarray) -> Tuple[List[Cent
 
     points = _smooth_centerline_through_junction(points, all_row_intervals, w)
     return _trim_bottom_centerline_outliers(points, w), all_row_intervals
+
+
+def _extract_fast_main_centerline(
+    clean_mask: np.ndarray,
+    orig_w: int,
+    orig_h: int,
+) -> List[CenterPoint]:
+    """Extract a sparse main-road centerline and return original-image pixels."""
+    work_h, work_w = clean_mask.shape[:2]
+    if work_h <= 0 or work_w <= 0 or orig_w <= 0 or orig_h <= 0:
+        return []
+
+    scale_x = float(orig_w) / float(work_w)
+    scale_y = float(orig_h) / float(work_h)
+    min_width = max(2, int(round(MIN_ROAD_PX_PER_ROW / scale_x)))
+    last_cx = work_w / 2.0
+    points: List[CenterPoint] = []
+    bottom_y = min(work_h - 1, int(work_h * CENTERLINE_SCAN_Y_MAX_RATIO))
+
+    for y in range(bottom_y, work_h // 2, -FAST_CENTERLINE_ROW_STEP):
+        intervals = _find_intervals(clean_mask[y, :], min_width)
+        if not intervals:
+            continue
+        left, right = min(
+            intervals,
+            key=lambda interval: abs(((interval[0] + interval[1]) / 2.0) - last_cx),
+        )
+        width = float(right - left + 1)
+        interval_mid = (left + right) / 2.0
+        center_x = (
+            CENTER_SMOOTH_ALPHA * interval_mid
+            + (1.0 - CENTER_SMOOTH_ALPHA) * last_cx
+        )
+        points.append(
+            (
+                float(center_x * scale_x),
+                int(round(float(y) * scale_y)),
+                float(width * scale_x),
+            )
+        )
+        last_cx = center_x
+
+    return _trim_bottom_centerline_outliers(points, orig_w)
 
 
 def _smooth_centerline_through_junction(
@@ -1678,12 +1852,86 @@ def _validate_frame(frame: np.ndarray) -> str | None:
     return None
 
 
+def _build_fast_main_result(
+    outputs: List[np.ndarray],
+    *,
+    orig_w: int,
+    orig_h: int,
+    yaw_rate_deg_s: float,
+    cam_offset_m: float,
+    offset_comp_config: CameraOffsetCompensationConfig | None,
+) -> RoadPerceptionResult:
+    work_mask, confidence, message = _decode_semantic_fast_main(outputs)
+    debug_mask = None
+    if work_mask is not None:
+        debug_mask = cv2.resize(
+            work_mask,
+            (orig_w, orig_h),
+            interpolation=cv2.INTER_NEAREST,
+        )
+    if work_mask is None:
+        result = _lost_result(message)
+        result.debug_mask = debug_mask
+        return result
+
+    points = _extract_fast_main_centerline(work_mask, orig_w, orig_h)
+    if len(points) < MIN_FIT_PTS:
+        result = _lost_result("fast main road has too few centerline points")
+        result.debug_mask = debug_mask
+        return result
+
+    pixel_error, _ = _compute_pixel_error(points, orig_w, orig_h)
+    centerline_angle = _compute_centerline_angle(points, orig_h)
+    path_width_px = _compute_path_width(points, orig_h)
+    branch = RoadBranch(
+        pixel_error=float(pixel_error),
+        centerline_angle=float(centerline_angle),
+        path_width_px=float(path_width_px),
+        score=float(confidence),
+        confidence=float(confidence),
+        branch_id=0,
+        points=[(float(point[0]), float(point[1])) for point in points],
+    )
+    branch.label = classify_branch_label(branch)
+
+    config = offset_comp_config or CameraOffsetCompensationConfig(
+        enabled=False,
+        cam_forward_offset_m=cam_offset_m,
+    )
+    corrected_error, correction_px = apply_camera_offset_compensation(
+        pixel_error=float(pixel_error),
+        centerline_angle_deg=float(centerline_angle),
+        image_width=orig_w,
+        config=config,
+        yaw_rate_deg_s=yaw_rate_deg_s,
+    )
+    return RoadPerceptionResult(
+        is_road_found=True,
+        road_state="single",
+        pixel_error=float(pixel_error),
+        centerline_angle=float(centerline_angle),
+        path_width_px=float(path_width_px),
+        confidence=float(confidence),
+        corrected_pixel_error=float(corrected_error),
+        branches=[branch],
+        selected_branch=branch,
+        branch_decision="fast_main",
+        debug_msg=(
+            f"postprocess={POSTPROCESS_FAST_MAIN}, points={len(points)}, "
+            f"work_mask={FAST_MASK_WIDTH}x{FAST_MASK_HEIGHT}, "
+            f"offset_corr_px={correction_px:.1f}, corrected_error={corrected_error:.1f}"
+        ),
+        debug_mask=debug_mask,
+    )
+
+
 def get_model_io_info() -> dict[str, Any]:
     """Optional helper for inspecting ONNX model input/output metadata."""
     session, _ = _get_session()
     return {
         "provider": _SESSION_PROVIDER,
         "model_kind": _MODEL_KIND,
+        "postprocess_mode": _POSTPROCESS_MODE,
         "input_size": _MODEL_INPUT_SIZE or INP_SIZE,
         "inputs": [
             {"name": item.name, "shape": item.shape, "type": item.type}
@@ -1732,6 +1980,22 @@ def get_road_perception(
             blob, _scale, pad_x, pad_y = _preprocess(frame_bgr, input_size)
         outputs = session.run(None, {input_name: blob})
 
+        if (
+            _MODEL_KIND == MODEL_KIND_SEMANTIC
+            and _POSTPROCESS_MODE == POSTPROCESS_FAST_MAIN
+        ):
+            result = _build_fast_main_result(
+                outputs,
+                orig_w=orig_w,
+                orig_h=orig_h,
+                yaw_rate_deg_s=yaw_rate_deg_s,
+                cam_offset_m=cam_offset_m,
+                offset_comp_config=offset_comp_config,
+            )
+            if debug_save_path:
+                _save_debug_image(frame_bgr, result.debug_mask, result, debug_save_path)
+            return result
+
         if _MODEL_KIND == MODEL_KIND_SEMANTIC:
             merged_mask, instances, confidence, decode_msg = _decode_semantic_segmentation(
                 outputs,
@@ -1772,13 +2036,14 @@ def get_road_perception(
             if inst_clean.size == 0 or np.count_nonzero(inst_clean) == 0:
                 continue
 
-            points, _row_intervals = _extract_centerline_and_intervals(inst_clean)
+            points, row_intervals = _extract_centerline_and_intervals(inst_clean)
             if len(points) < MIN_FIT_PTS:
                 continue
 
             inst.mask = inst_clean
             _refresh_instance_geometry(inst, orig_w, orig_h)
             inst.centerline_points = points
+            inst.row_intervals = row_intervals
             valid_instances.append(inst)
 
         if not valid_instances:
@@ -1812,7 +2077,7 @@ def get_road_perception(
         )
         fallback_msg = ""
         if len(valid_instances) == 1:
-            _points, all_row_intervals = _extract_centerline_and_intervals(current.mask)
+            all_row_intervals = current.row_intervals
             fallback_state, multi_rows, width_growth = _detect_road_state(
                 current.centerline_points,
                 all_row_intervals,
@@ -1834,7 +2099,7 @@ def get_road_perception(
             confidence,
         )
         if len(branches) <= 1 and road_state in {"fork", "intersection"}:
-            _points, all_row_intervals = _extract_centerline_and_intervals(current.mask)
+            all_row_intervals = current.row_intervals
             branches = _build_branches(
                 current.centerline_points,
                 all_row_intervals,
@@ -1915,6 +2180,11 @@ def _parse_cli_args():
     parser.add_argument("--image", required=True, help="Input BGR/RGB image path")
     parser.add_argument("--model", default=None, help="ONNX model path")
     parser.add_argument("--model-npu", default=None, help=".nb NPU compiled model path")
+    parser.add_argument(
+        "--road-postprocess-mode",
+        choices=sorted(POSTPROCESS_MODES),
+        default=POSTPROCESS_FAST_MAIN,
+    )
     parser.add_argument("--debug-out", default=None, help="Optional debug image output path")
     parser.add_argument("--branch-preference", choices=["auto", "straight", "left", "right"], default="auto")
     parser.add_argument("--enable-offset-comp", action="store_true")
@@ -1930,11 +2200,22 @@ def _parse_cli_args():
 def _main_cli() -> int:
     args = _parse_cli_args()
     if args.model_npu:
-        configure_model(backend="npu", npu_model_path=args.model_npu)
+        configure_model(
+            backend="npu",
+            npu_model_path=args.model_npu,
+            postprocess_mode=args.road_postprocess_mode,
+        )
     elif args.model:
-        configure_model(backend="cpu", cpu_model_path=args.model)
+        configure_model(
+            backend="cpu",
+            cpu_model_path=args.model,
+            postprocess_mode=args.road_postprocess_mode,
+        )
     else:
-        configure_model(backend="npu")
+        configure_model(
+            backend="npu",
+            postprocess_mode=args.road_postprocess_mode,
+        )
 
     frame = cv2.imread(args.image, cv2.IMREAD_COLOR)
     if frame is None:

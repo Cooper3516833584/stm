@@ -28,6 +28,8 @@ def main() -> int:
                         help="ONNX model path (default: auto)")
     parser.add_argument("--model-npu", default=None,
                         help=".nb NPU compiled model path")
+    parser.add_argument("--road-postprocess-mode", choices=["fast-main", "full"],
+                        default="fast-main")
     parser.add_argument("--flight-height-m", type=float, default=1.0,
                         help="flight height for m/px calc (default: 1.0)")
     parser.add_argument("--no-offset-comp", action="store_true",
@@ -52,11 +54,22 @@ def main() -> int:
     # --- import road perception (triggers model session load) ---
     import road_perception
     if args.model_npu:
-        road_perception.configure_model(backend="npu", npu_model_path=args.model_npu)
+        road_perception.configure_model(
+            backend="npu",
+            npu_model_path=args.model_npu,
+            postprocess_mode=args.road_postprocess_mode,
+        )
     elif args.model:
-        road_perception.configure_model(backend="cpu", cpu_model_path=args.model)
+        road_perception.configure_model(
+            backend="cpu",
+            cpu_model_path=args.model,
+            postprocess_mode=args.road_postprocess_mode,
+        )
     else:
-        road_perception.configure_model(backend="npu")
+        road_perception.configure_model(
+            backend="npu",
+            postprocess_mode=args.road_postprocess_mode,
+        )
 
     t0 = time.perf_counter()
     from road_perception import (
@@ -144,6 +157,7 @@ def main() -> int:
     print(f"  road found       : {valid_frames} ({valid_frames/max(total_frames,1)*100:.0f}%)")
     print(f"  offset comp      : {'enabled' if offset_cfg and offset_cfg.enabled else 'disabled'}")
     print(f"  flight height    : {args.flight_height_m}m")
+    print(f"  postprocess      : {args.road_postprocess_mode}")
     print()
     print(f"  {'stage':<16} {'p50':>7} {'p95':>7} {'p99':>7} {'mean':>7} {'max':>7}")
     print(f"  {'─'*16} {'─'*7} {'─'*7} {'─'*7} {'─'*7} {'─'*7}")

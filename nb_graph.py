@@ -227,6 +227,7 @@ class NBGraphSession:
                     if "uint8" in meta.type:
                         return np.dtype(np.uint8)
             return np.dtype(np.int8)
+
         return blob.dtype
 
 
@@ -249,7 +250,8 @@ def _convert_input_blob(
     if qi is not None:
         scale, zp = qi
     else:
-        # Fallback: treat as float32
+        # The stai_mpu Python binding accepts float32 application buffers for
+        # float graphs even when optimized NBG metadata exposes float16 I/O.
         return blob.astype(np.float32, copy=False)
 
     if blob.dtype == target_dtype:

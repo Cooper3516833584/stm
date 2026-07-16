@@ -228,6 +228,7 @@ class YOLOInferenceThread:
         model_path: str,
         npu_model_path: str = "FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb",
         inference_backend: str = "npu",
+        postprocess_mode: str = "fast-main",
         flight_height_m: float = 1.0,
         branch_preference: str = "auto",
         wb_enable: bool = False,
@@ -241,6 +242,7 @@ class YOLOInferenceThread:
         self._model_path = model_path
         self._npu_model_path = npu_model_path
         self._inference_backend = inference_backend
+        self._postprocess_mode = postprocess_mode
         self._flight_height_m = flight_height_m
         self._branch_preference = branch_preference
         self._wb_enable = wb_enable
@@ -275,6 +277,7 @@ class YOLOInferenceThread:
             backend=self._inference_backend,
             cpu_model_path=self._model_path,
             npu_model_path=self._npu_model_path,
+            postprocess_mode=self._postprocess_mode,
         )
         io_info = road_perception.get_model_io_info()
 
@@ -290,7 +293,8 @@ class YOLOInferenceThread:
         )
         self._log(
             f"started backend={self._inference_backend} model={selected_model} "
-            f"provider={io_info['provider']} kind={io_info['model_kind']}"
+            f"provider={io_info['provider']} kind={io_info['model_kind']} "
+            f"postprocess={io_info['postprocess_mode']}"
         )
 
     def stop(self) -> None:
@@ -411,6 +415,7 @@ class PerceptionPipeline:
         model_path: str = "FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
         npu_model_path: str = "FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb",
         inference_backend: str = "npu",
+        postprocess_mode: str = "fast-main",
         flight_height_m: float = 1.0,
         branch_preference: str = "auto",
         wb_enable: bool = False,
@@ -429,6 +434,7 @@ class PerceptionPipeline:
             model_path=model_path,
             npu_model_path=npu_model_path,
             inference_backend=inference_backend,
+            postprocess_mode=postprocess_mode,
             flight_height_m=flight_height_m,
             branch_preference=branch_preference,
             wb_enable=wb_enable,

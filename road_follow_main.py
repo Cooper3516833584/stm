@@ -37,6 +37,12 @@ def parse_args() -> argparse.Namespace:
         help="Road inference backend (default: npu; cpu keeps the legacy small YOLO model)",
     )
     parser.add_argument(
+        "--road-postprocess-mode",
+        choices=["fast-main", "full"],
+        default="fast-main",
+        help="NPU semantic postprocess: fast main-road-only path (default) or full fork detection",
+    )
+    parser.add_argument(
         "--model",
         default="FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
         help="Legacy lightweight YOLO ONNX path used by --road-model-backend cpu",
@@ -259,6 +265,7 @@ def main() -> None:
             model_path=args.model,
             npu_model_path=args.model_npu,
             inference_backend=args.road_model_backend,
+            postprocess_mode=args.road_postprocess_mode,
             flight_height_m=args.flight_height_m,
             branch_preference=args.branch,
             wb_enable=bool(args.wb_enable),
@@ -270,13 +277,14 @@ def main() -> None:
 
         logger.info(
             "[ROAD] started dry_run={} no_radar={} branch={} camera={} "
-            "backend={} model={}".format(
+            "backend={} model={} postprocess={}".format(
                 actual_dry_run,
                 args.no_radar,
                 args.branch,
                 args.camera_index,
                 args.road_model_backend,
                 selected_model,
+                args.road_postprocess_mode,
             )
         )
         loop_count = 0

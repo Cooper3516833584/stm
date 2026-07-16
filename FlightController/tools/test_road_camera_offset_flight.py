@@ -1,8 +1,10 @@
 """Capture one downward road-camera frame at a 1 m fixed-point hover.
 
-This is a flight test utility.  It does not perform any horizontal motion.  By
-default it only prints the planned operation; physical actions require the
-explicit ``--execute`` flag.
+This is a flight test utility.  It uses the existing Navigation.pointing_takeoff
+routine with only the upper radar, and fixes the navigation waypoint at the
+radar origin so it does not request horizontal movement.  By default it only
+prints the planned operation; physical actions require the explicit
+``--execute`` flag.
 """
 
 from __future__ import annotations
@@ -36,6 +38,8 @@ def parse_args() -> argparse.Namespace:
         help="Actually unlock, take off, capture, and land. Omit this flag for a no-hardware dry run.",
     )
     parser.add_argument("--port", default=None, help="Flight-controller serial path; default is auto-detect.")
+    parser.add_argument("--upper-radar-port", default="/dev/ttySTM4", help="Upper-radar serial path.")
+    parser.add_argument("--radar-ready-timeout-s", type=float, default=12.0)
     parser.add_argument("--camera-index", type=int, default=7, help="Road camera OpenCV index (default: 7).")
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
@@ -78,6 +82,21 @@ def _capture_frame(cap: cv2.VideoCapture, args: argparse.Namespace) -> object:
     return frame
 
 
+def _wait_for_upper_radar(radar, timeout_s: float) -> None:
+    deadline = time.perf_counter() + max(0.1, timeout_s)
+    while time.perf_counter() < deadline:
+        if radar.connected and radar.is_fresh(max_age_s=0.5):
+            stats = radar.get_radar_latency_stats()
+            print(
+                "Upper radar ready: "
+                f"frames={stats.get('serial_frames_ok', 0)}, "
+                f"latest_age={float(stats.get('last_sample_age_ms', 0.0)):.0f}ms"
+            )
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"Upper radar is not fresh on {radar._serial.port if radar._serial else 'unknown port'}")
+
+
 def _land_and_lock_when_safe(fc, args: argparse.Namespace) -> bool:
     """Request landing; only lock after altitude confirms ground proximity."""
     print("Requesting fixed-point landing...")
@@ -108,8 +127,9 @@ def _land_and_lock_when_safe(fc, args: argparse.Namespace) -> bool:
 def _print_plan(args: argparse.Namespace) -> None:
     print("No-hardware dry run. Add --execute to arm the flight test.")
     print(f"camera=/dev/video{args.camera_index} ({args.camera_width}x{args.camera_height}@{args.camera_fps:g})")
-    print(f"hover target={args.target_height_cm} cm (alt_add), output={args.output}")
-    print("sequence: camera preflight -> fixed-point takeoff -> HOLD_POS settle -> JPEG capture -> land")
+    print(f"upper radar={args.upper_radar_port}; hover target={args.target_height_cm} cm (alt_add)")
+    print(f"output={args.output}")
+    print("sequence: camera/radar preflight -> Navigation.pointing_takeoff at radar origin -> JPEG capture -> land")
 
 
 def main() -> int:
@@ -124,10 +144,14 @@ def main() -> int:
 
     _setup_path()
     from FlightController import FC_Controller
+    from FlightController.Components.LDRadar_Driver import LD_Radar
+    from FlightController.Solutions.Navigation import Navigation
 
     output = Path(args.output)
     cap: cv2.VideoCapture | None = None
     fc = None
+    radar = None
+    navigation = None
     airborne = False
     try:
         # Fail before arming if the road camera cannot deliver frames.
@@ -146,13 +170,26 @@ def main() -> int:
             f"alt_add={fc.state.alt_add.value}cm alt_fused={fc.state.alt_fused.value}cm"
         )
 
-        fc.safe_takeoff(
+        # Only the upper radar is opened.  Its current solved pose becomes the
+        # navigation origin, so the (0, 0) waypoint does not request translation.
+        radar = LD_Radar(name="upper", index=0, mount_xy_cm=(0.0, 0.0), mount_yaw_deg=0.0)
+        radar.start(com=args.upper_radar_port, radar_type="D500")
+        _wait_for_upper_radar(radar, args.radar_ready_timeout_s)
+
+        navigation = Navigation(fc=fc, radar=radar)
+        navigation.start(mode="radar")
+        navigation.calibrate_basepoint(wait=True)
+        navigation.pointing_takeoff(
+            point=(0.0, 0.0),
             target_height=args.target_height_cm,
-            climb_speed=args.climb_speed_cm_s,
             first_lift=args.first_lift_cm,
+            lock_pos_thres=15,
+            lock_pos_time=1.0,
+            lock_timeout=12,
+            hover_timeout=12,
+            height_timeout=15,
         )
         airborne = True
-        fc.set_flight_mode(fc.HOLD_POS_MODE)
         fc.stablize()
 
         alt_cm = float(fc.state.alt_add.value)
@@ -179,6 +216,10 @@ def main() -> int:
     finally:
         if cap is not None:
             cap.release()
+        if navigation is not None:
+            navigation.stop(join=True)
+        if radar is not None:
+            radar.stop(joined=True)
         if fc is not None:
             if airborne or bool(getattr(fc.state.unlock, "value", False)):
                 _land_and_lock_when_safe(fc, args)

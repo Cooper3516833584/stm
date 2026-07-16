@@ -1,8 +1,8 @@
 """Capture one downward road-camera frame at a 1 m fixed-point hover.
 
 This is a flight test utility.  It uses the existing Navigation.pointing_takeoff
-routine with only the upper radar, and fixes the navigation waypoint at the
-radar origin so it does not request horizontal movement.  By default it only
+routine with only the upper radar. Horizontal navigation is disabled by default
+so radar pose errors cannot request lateral movement. By default it only
 prints the planned operation; physical actions require the explicit
 ``--execute`` flag.
 """
@@ -10,6 +10,7 @@ prints the planned operation; physical actions require the explicit
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 import sys
 import time
@@ -40,6 +41,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", default=None, help="Flight-controller serial path; default is auto-detect.")
     parser.add_argument("--upper-radar-port", default="/dev/ttySTM4", help="Upper-radar serial path.")
     parser.add_argument("--radar-ready-timeout-s", type=float, default=12.0)
+    parser.add_argument("--radar-pose-timeout-s", type=float, default=20.0)
+    parser.add_argument("--radar-pose-warmup-s", type=float, default=6.0)
+    parser.add_argument("--radar-pose-stability-window-s", type=float, default=2.0)
+    parser.add_argument("--radar-pose-max-span-cm", type=float, default=10.0)
+    parser.add_argument("--radar-pose-max-yaw-span-deg", type=float, default=5.0)
     parser.add_argument("--camera-index", type=int, default=7, help="Road camera OpenCV index (default: 7).")
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
@@ -48,6 +54,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height-tolerance-cm", type=int, default=8)
     parser.add_argument("--climb-speed-cm-s", type=int, default=20)
     parser.add_argument("--first-lift-cm", type=int, default=60)
+    parser.add_argument("--navigation-speed-cm-s", type=float, default=25.0)
+    parser.add_argument("--vertical-speed-cm-s", type=float, default=20.0)
+    parser.add_argument(
+        "--enable-horizontal-navigation",
+        action="store_true",
+        help="Allow radar pose PID to command vx/vy/yaw. Disabled by default for this camera test.",
+    )
     parser.add_argument("--hover-settle-s", type=float, default=2.0, help="Time to remain in HOLD_POS before capture.")
     parser.add_argument("--camera-warmup-frames", type=int, default=10)
     parser.add_argument("--landing-timeout-s", type=float, default=25.0)
@@ -97,6 +110,60 @@ def _wait_for_upper_radar(radar, timeout_s: float) -> None:
     raise RuntimeError(f"Upper radar is not fresh on {radar._serial.port if radar._serial else 'unknown port'}")
 
 
+def _wait_for_stable_radar_pose(radar, args: argparse.Namespace) -> None:
+    """Require a finite, initialized radar pose that remains stable on the ground."""
+    started = time.perf_counter()
+    deadline = started + max(args.radar_pose_timeout_s, args.radar_pose_warmup_s + 0.1)
+    warmup_deadline = started + max(0.0, args.radar_pose_warmup_s)
+    stable_samples: list[tuple[float, float, float, float]] = []
+
+    while time.perf_counter() < deadline:
+        now = time.perf_counter()
+        inited = list(getattr(radar, "_rt_pose_inited", [False, False, False]))
+        pose = tuple(float(value) for value in radar.rt_pose)
+        valid = (
+            bool(getattr(radar, "_rtpose_flag", False))
+            and all(inited)
+            and radar.is_fresh(max_age_s=0.5)
+            and all(math.isfinite(value) for value in pose)
+        )
+
+        if not valid or now < warmup_deadline:
+            stable_samples.clear()
+            time.sleep(0.1)
+            continue
+
+        stable_samples.append((now, pose[0], pose[1], pose[2]))
+        x_values = [sample[1] for sample in stable_samples]
+        y_values = [sample[2] for sample in stable_samples]
+        yaw_reference = stable_samples[0][3]
+        yaw_offsets = [
+            (sample[3] - yaw_reference + 180.0) % 360.0 - 180.0
+            for sample in stable_samples
+        ]
+        translation_span = math.hypot(max(x_values) - min(x_values), max(y_values) - min(y_values))
+        yaw_span = max(yaw_offsets) - min(yaw_offsets)
+
+        if (
+            translation_span > args.radar_pose_max_span_cm
+            or yaw_span > args.radar_pose_max_yaw_span_deg
+        ):
+            stable_samples = [stable_samples[-1]]
+        elif now - stable_samples[0][0] >= args.radar_pose_stability_window_s:
+            print(
+                "Upper-radar pose stable: "
+                f"pose=({pose[0]:.1f}, {pose[1]:.1f}, {pose[2]:.1f}), "
+                f"translation_span={translation_span:.1f}cm, yaw_span={yaw_span:.1f}deg"
+            )
+            return
+        time.sleep(0.1)
+
+    raise RuntimeError(
+        "Upper-radar solved pose did not become initialized and stable before timeout; "
+        "do not enable horizontal navigation."
+    )
+
+
 def _land_and_lock_when_safe(fc, args: argparse.Namespace) -> bool:
     """Request landing; only lock after altitude confirms ground proximity."""
     print("Requesting fixed-point landing...")
@@ -128,8 +195,16 @@ def _print_plan(args: argparse.Namespace) -> None:
     print("No-hardware dry run. Add --execute to arm the flight test.")
     print(f"camera=/dev/video{args.camera_index} ({args.camera_width}x{args.camera_height}@{args.camera_fps:g})")
     print(f"upper radar={args.upper_radar_port}; hover target={args.target_height_cm} cm (alt_add)")
+    print(
+        f"horizontal navigation={'ENABLED' if args.enable_horizontal_navigation else 'disabled'}; "
+        f"limits: horizontal={args.navigation_speed_cm_s:g}, vertical={args.vertical_speed_cm_s:g} cm/s"
+    )
+    print(
+        f"radar pose: warm up {args.radar_pose_warmup_s:g}s, then remain stable for "
+        f"{args.radar_pose_stability_window_s:g}s"
+    )
     print(f"output={args.output}")
-    print("sequence: camera/radar preflight -> Navigation.pointing_takeoff at radar origin -> JPEG capture -> land")
+    print("sequence: camera/radar preflight -> stable radar pose -> 1 m closed-loop height -> JPEG capture -> land")
 
 
 def main() -> int:
@@ -138,6 +213,12 @@ def main() -> int:
         raise SystemExit("--target-height-cm must be in [40, 500]")
     if args.height_tolerance_cm < 0:
         raise SystemExit("--height-tolerance-cm must be non-negative")
+    if args.navigation_speed_cm_s <= 0 or args.vertical_speed_cm_s <= 0:
+        raise SystemExit("navigation and vertical speed limits must be positive")
+    if args.radar_pose_stability_window_s < 0:
+        raise SystemExit("--radar-pose-stability-window-s must be non-negative")
+    if args.radar_pose_max_span_cm < 0 or args.radar_pose_max_yaw_span_deg < 0:
+        raise SystemExit("radar pose stability spans must be non-negative")
     if not args.execute:
         _print_plan(args)
         return 0
@@ -170,14 +251,17 @@ def main() -> int:
             f"alt_add={fc.state.alt_add.value}cm alt_fused={fc.state.alt_fused.value}cm"
         )
 
-        # Only the upper radar is opened.  Its current solved pose becomes the
-        # navigation origin, so the (0, 0) waypoint does not request translation.
+        # Only the upper radar is opened. Its solved pose must be stable before
+        # calibration; horizontal PID remains opt-in for this camera test.
         radar = LD_Radar(name="upper", index=0, mount_xy_cm=(0.0, 0.0), mount_yaw_deg=0.0)
         radar.start(com=args.upper_radar_port, radar_type="D500")
         _wait_for_upper_radar(radar, args.radar_ready_timeout_s)
 
         navigation = Navigation(fc=fc, radar=radar)
+        navigation.set_navigation_speed(args.navigation_speed_cm_s)
+        navigation.set_vertical_speed(args.vertical_speed_cm_s)
         navigation.start(mode="radar")
+        _wait_for_stable_radar_pose(radar, args)
         navigation.calibrate_basepoint(wait=True)
         navigation.pointing_takeoff(
             point=(0.0, 0.0),
@@ -188,6 +272,7 @@ def main() -> int:
             lock_timeout=12,
             hover_timeout=12,
             height_timeout=15,
+            enable_horizontal_control=args.enable_horizontal_navigation,
         )
         airborne = True
         fc.stablize()

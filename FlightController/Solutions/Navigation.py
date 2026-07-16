@@ -19,6 +19,25 @@ if TYPE_CHECKING:
 logger_dbg = logger.bind(debug=True)
 
 
+def _shortest_yaw_error(target_yaw: float, current_yaw: float) -> float:
+    """Return the signed shortest yaw error in degrees."""
+    raw_error = float(target_yaw) - float(current_yaw)
+    error = (raw_error + 180.0) % 360.0 - 180.0
+    if error == -180.0 and raw_error > 0:
+        return 180.0
+    return error
+
+
+def _world_to_body_velocity(vel_x: float, vel_y: float, yaw: float) -> Tuple[float, float]:
+    """Convert map-frame velocity to forward/left body-frame velocity."""
+    yaw_rad = np.deg2rad(float(yaw))
+    cos_yaw = float(np.cos(yaw_rad))
+    sin_yaw = float(np.sin(yaw_rad))
+    body_x = cos_yaw * float(vel_x) - sin_yaw * float(vel_y)
+    body_y = sin_yaw * float(vel_x) + cos_yaw * float(vel_y)
+    return body_x, body_y
+
+
 class PARAMS:
     ######## 解算参数 ########
     MAP_SIZE = 1000  # 雷达扫网定位图像大小
@@ -78,6 +97,7 @@ class Navigation(object):
             auto_mode=False,
         )
         self.yaw_pid = PID(0.7, 0.0, 0.05, setpoint=0, output_limits=(-30, 30), auto_mode=False)
+        self.yaw_target = 0.0
         #####################################
         self.current_x = 0  # 当前位置X(相对于基地点) / cm
         self.current_y = 0  # 当前位置Y(相对于基地点) / cm
@@ -90,6 +110,8 @@ class Navigation(object):
         self.navigation_flag = False  # 导航状态
         self.keep_height_by_rs = False  # 使用realsense定高
         self.running = False
+        self._control_lock = threading.Lock()
+        self._realtime_control_data_in_xyzYaw = [0, 0, 0, 0]
         self._thread_list: List[threading.Thread] = []
         self.traj_running_event = threading.Event()
         self.traj_progress = 0.0
@@ -134,6 +156,10 @@ class Navigation(object):
         停止导航
         """
         self.running = False
+        try:
+            self.update_realtime_control(vel_x=0, vel_y=0, vel_z=0, yaw=0)
+        except Exception:
+            logger.exception("[NAVI] Failed to send zero control while stopping")
         if self.radar is not None and hasattr(self.radar, "stop_resolve_pose"):
             self.radar.stop_resolve_pose()
         if join:
@@ -181,15 +207,19 @@ class Navigation(object):
         """
         更新实时控制帧
         """
-        if vel_x is not None:
-            self._realtime_control_data_in_xyzYaw[0] = vel_x
-        if vel_y is not None:
-            self._realtime_control_data_in_xyzYaw[1] = vel_y
-        if vel_z is not None:
-            self._realtime_control_data_in_xyzYaw[2] = vel_z
-        if yaw is not None:
-            self._realtime_control_data_in_xyzYaw[3] = yaw
-        self.fc.send_realtime_control_data(*self._realtime_control_data_in_xyzYaw)
+        with self._control_lock:
+            if not self.running:
+                self._realtime_control_data_in_xyzYaw = [0, 0, 0, 0]
+            else:
+                if vel_x is not None:
+                    self._realtime_control_data_in_xyzYaw[0] = vel_x
+                if vel_y is not None:
+                    self._realtime_control_data_in_xyzYaw[1] = vel_y
+                if vel_z is not None:
+                    self._realtime_control_data_in_xyzYaw[2] = vel_z
+                if yaw is not None:
+                    self._realtime_control_data_in_xyzYaw[3] = yaw
+            self.fc.send_realtime_control_data(*self._realtime_control_data_in_xyzYaw)
 
     def switch_navigation_mode(self, mode: Literal["radar", "rs", "fusion", "fusion-ros"]):
         """
@@ -395,19 +425,27 @@ class Navigation(object):
                     logger.info("[NAVI] Navigation resumed")
                 if not available:
                     logger.warning("[NAVI] Pose not available")
+                    self.update_realtime_control(vel_x=0, vel_y=0, yaw=0)
                     time.sleep(0.1)
                     continue
                 # self.fc.send_general_position(x=self.current_x, y=self.current_y)
-                out_x = round(self.navi_x_pid(self.current_x))  # type: ignore
-                if out_x is not None:
-                    self.update_realtime_control(vel_x=out_x)
-                out_y = round(self.navi_y_pid(self.current_y))  # type: ignore
-                if out_y is not None:
-                    self.update_realtime_control(vel_y=out_y)
-                out_yaw = round(self.yaw_pid(self.current_yaw))  # type: ignore
-                if out_yaw is not None:
-                    self.update_realtime_control(yaw=out_yaw)
-                logger_dbg.info(f"[NAVI] Pose PID output: {out_x}, {out_y}, {out_yaw}")
+                out_x_world = self.navi_x_pid(self.current_x)
+                out_y_world = self.navi_y_pid(self.current_y)
+                yaw_error = _shortest_yaw_error(self.yaw_target, self.current_yaw)
+                out_yaw = self.yaw_pid(-yaw_error)
+                if out_x_world is None or out_y_world is None or out_yaw is None:
+                    continue
+                out_x_body, out_y_body = _world_to_body_velocity(
+                    out_x_world, out_y_world, self.current_yaw
+                )
+                out_x_body = round(out_x_body)
+                out_y_body = round(out_y_body)
+                out_yaw = round(out_yaw)
+                self.update_realtime_control(vel_x=out_x_body, vel_y=out_y_body, yaw=out_yaw)
+                logger_dbg.info(
+                    f"[NAVI] Pose PID output: world=({out_x_world}, {out_y_world}), "
+                    f"body=({out_x_body}, {out_y_body}), yaw={out_yaw}"
+                )
             except Exception as e:
                 logger.exception(f"[NAVI] Navigation task error")
                 self.update_realtime_control(vel_x=0, vel_y=0, yaw=0)
@@ -689,8 +727,10 @@ class Navigation(object):
 
         yaw: 相对于初始状态的航向角 / deg
         """
-        self.yaw_pid.setpoint = yaw
-        logger.debug(f"[NAVI] Keep yaw set to {yaw}")
+        if not np.isfinite(yaw):
+            raise ValueError("yaw must be finite")
+        self.yaw_target = float(yaw)
+        logger.debug(f"[NAVI] Keep yaw set to {self.yaw_target}")
 
     def navigation_to_waypoint_relative(self, waypoint_rel, *args, **kwargs):
         """
@@ -1072,11 +1112,13 @@ class Navigation(object):
         """
         time_start = time.perf_counter()
         time_count = 0
-        remap = lambda x: x if x < 180 else 360 - x
         while True:
             time.sleep(0.05)
-            if remap(abs(self.current_yaw - self.yaw_pid.setpoint)) < yaw_thres:
+            yaw_error = abs(_shortest_yaw_error(self.yaw_target, self.current_yaw))
+            if yaw_error < yaw_thres:
                 time_count += 0.05
+            else:
+                time_count = 0
             if time_count >= time_thres:
                 logger.info("[NAVI] Reached yaw")
                 return
@@ -1096,6 +1138,7 @@ class Navigation(object):
         lock_timeout=12,
         hover_timeout=12,
         height_timeout=15,
+        enable_horizontal_control: bool = True,
     ):
         """
         Take off and then enter closed-loop hold/navigation.
@@ -1197,15 +1240,19 @@ class Navigation(object):
 
         self.switch_pid("hover")
         self.direct_set_waypoint([float(point[0]), float(point[1])])
-        self.navigation_flag = True
-
-        self.wait_for_waypoint(
-            time_thres=lock_pos_time,
-            pos_thres=lock_pos_thres,
-            timeout=lock_timeout,
-        )
-
         self.set_height(float(target_height))
+        self.navigation_flag = bool(enable_horizontal_control)
+
+        if self.navigation_flag:
+            self.wait_for_waypoint(
+                time_thres=lock_pos_time,
+                pos_thres=lock_pos_thres,
+                timeout=lock_timeout,
+            )
+        else:
+            self.update_realtime_control(vel_x=0, vel_y=0, yaw=0)
+            logger.info("[NAVI] Horizontal navigation disabled for takeoff")
+
         self.wait_for_height(timeout=height_timeout)
 
     def move_by_direction(self, speed: float = 5, direction_deg: float = 0):

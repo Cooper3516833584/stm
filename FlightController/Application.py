@@ -21,18 +21,17 @@ class FC_Application(FC_Protocol):
     def set_height(self, source: int, height: int, speed: int) -> None:
         """
         设置高度: (程控模式下有效)
-        高度源: 0:融合高度 1:激光高度
+        高度源: 仅支持 1:激光/光流测距高度 (ALT_ADD)
         高度:0-10000 cm
         速度:10-300 cm/s
         """
+        if source != 1:
+            raise ValueError("融合高度 ALT_FU 已禁用；高度源必须为 source=1 (ALT_ADD)")
         self._action_log(
             "set height",
-            f"{'fusion' if source == 0 else 'lidar'}, {height}cm, {speed}cm/s",
+            f"alt_add, {height}cm, {speed}cm/s",
         )
-        if source == 0:
-            alt = self.state.alt_fused
-        elif source == 1:
-            alt = self.state.alt_add
+        alt = self.state.alt_add
         self.state.update_event.clear()  # 确保使用的是最新的高度
         self.state.update_event.wait()
         if height < alt.value:

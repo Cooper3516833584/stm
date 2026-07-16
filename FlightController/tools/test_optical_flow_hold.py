@@ -2,6 +2,8 @@
 
 本程序只连接 ``FC_Controller``。它不会创建雷达、雷达 SLAM、相机导航或
 伴随计算机位置控制对象；水平定点完全由飞控的 HOLD_POS（mode=2）完成。
+所有任务高度判断只使用飞控 ``ALT_ADD``（光流模组激光测距）；已禁用不可靠的
+``ALT_FU`` 融合高度参与起飞、悬停或安全判断。
 
 为防止误触发，默认只打印任务计划。真实飞行必须显式传入 ``--execute``::
 
@@ -11,9 +13,14 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
+import csv
+from datetime import datetime
 import math
 from pathlib import Path
+import queue
 import sys
+import threading
 import time
 from typing import Any
 
@@ -23,6 +30,388 @@ PROGRAM_MODE = 3
 TAKEOFF_COMMAND = (0x10, 0x00, 0x05)
 TAKEOFF_MIN_RISE_CM = 8.0
 TAKEOFF_MIN_VZ_CM_S = 4.0
+
+
+DIAGNOSTIC_FIELDS = (
+    "record_type",
+    "wall_time",
+    "capture_monotonic_s",
+    "session_elapsed_s",
+    "phase",
+    "message",
+    "update_count",
+    "state_monotonic_s",
+    "state_age_ms",
+    "frame_dt_ms",
+    "raw_state_hex",
+    "roll_deg",
+    "pitch_deg",
+    "yaw_deg",
+    "tilt_deg",
+    "roll_rate_deg_s",
+    "pitch_rate_deg_s",
+    "yaw_rate_deg_s",
+    "alt_fused_cm",
+    "alt_add_cm",
+    "alt_fused_minus_add_cm",
+    "alt_add_rate_cm_s",
+    "vel_x_cm_s",
+    "vel_y_cm_s",
+    "vel_z_cm_s",
+    "vel_xy_cm_s",
+    "pos_x_cm",
+    "pos_y_cm",
+    "origin_x_cm",
+    "origin_y_cm",
+    "offset_x_cm",
+    "offset_y_cm",
+    "drift_cm",
+    "dpos_vel_x_cm_s",
+    "dpos_vel_y_cm_s",
+    "dpos_vel_xy_cm_s",
+    "dpos_minus_fused_vel_x_cm_s",
+    "dpos_minus_fused_vel_y_cm_s",
+    "dpos_window_s",
+    "dpos_window_vel_x_cm_s",
+    "dpos_window_vel_y_cm_s",
+    "dpos_window_vel_xy_cm_s",
+    "dpos_window_minus_fused_vel_x_cm_s",
+    "dpos_window_minus_fused_vel_y_cm_s",
+    "hold_elapsed_s",
+    "mean_from_origin_vel_x_cm_s",
+    "mean_from_origin_vel_y_cm_s",
+    "mean_from_origin_vel_xy_cm_s",
+    "battery_v",
+    "mode",
+    "unlock",
+    "flight_state_raw",
+    "cid",
+    "cmd_0",
+    "cmd_1",
+)
+
+
+class _DiagnosticLogger:
+    """Persist every FC state frame without blocking the serial receive thread."""
+
+    def __init__(self, path: Path, *, queue_size: int = 8192) -> None:
+        self.path = path.resolve()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self.path.open("w", encoding="utf-8", newline="")
+        self._writer = csv.DictWriter(
+            self._file,
+            fieldnames=DIAGNOSTIC_FIELDS,
+            extrasaction="ignore",
+        )
+        self._writer.writeheader()
+        self._file.flush()
+
+        self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(
+            maxsize=max(128, int(queue_size))
+        )
+        self._state_lock = threading.Lock()
+        self._phase = "initializing"
+        self._origin: tuple[float, float, float] | None = None
+        self._previous_state: tuple[float, float, float, float, float, float, float] | None = None
+        self._position_history: deque[tuple[float, float, float]] = deque()
+        self._latest_state_record: dict[str, Any] = {}
+        self._start_monotonic = time.monotonic()
+        self._rows_written = 0
+        self._dropped_rows = 0
+        self._capture_errors = 0
+        self._worker_error: Exception | None = None
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._write_loop,
+            name="optical-flow-diagnostic-writer",
+            daemon=True,
+        )
+        self._thread.start()
+        self.mark("diagnostic logger started")
+
+    @staticmethod
+    def _state_value(state: Any, name: str) -> Any:
+        field = getattr(state, name, None)
+        return getattr(field, "value", "")
+
+    @staticmethod
+    def _wall_time() -> str:
+        return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+    def _base_record(self, record_type: str, message: str = "") -> dict[str, Any]:
+        now = time.monotonic()
+        with self._state_lock:
+            phase = self._phase
+        return {
+            "record_type": record_type,
+            "wall_time": self._wall_time(),
+            "capture_monotonic_s": f"{now:.6f}",
+            "session_elapsed_s": f"{now - self._start_monotonic:.6f}",
+            "phase": phase,
+            "message": message,
+        }
+
+    def _enqueue(self, record: dict[str, Any]) -> None:
+        if self._closed:
+            return
+        try:
+            self._queue.put_nowait(record)
+        except queue.Full:
+            self._dropped_rows += 1
+
+    def set_phase(self, phase: str, message: str = "") -> None:
+        with self._state_lock:
+            self._phase = phase
+        self.mark(message or f"phase={phase}")
+
+    def set_origin(self, x_cm: float, y_cm: float) -> None:
+        with self._state_lock:
+            self._origin = (time.monotonic(), float(x_cm), float(y_cm))
+        self.mark(f"hold origin set: x={x_cm:.1f} cm, y={y_cm:.1f} cm")
+
+    def mark(self, message: str) -> None:
+        self._enqueue(self._base_record("event", message))
+
+    def capture_state(self, state: Any) -> None:
+        """Serial callback boundary: diagnostics must never break FC reception."""
+        try:
+            self._capture_state(state)
+        except Exception as exc:
+            self._capture_errors += 1
+            self._enqueue(
+                self._base_record(
+                    "event",
+                    f"state capture failed: {type(exc).__name__}: {exc}",
+                )
+            )
+
+    def _capture_state(self, state: Any) -> None:
+        """Copy one immutable snapshot; called in the FC serial listener thread."""
+        capture_monotonic = time.monotonic()
+        state_monotonic = float(
+            getattr(state, "last_update_monotonic", capture_monotonic)
+            or capture_monotonic
+        )
+        roll = float(self._state_value(state, "rol"))
+        pitch = float(self._state_value(state, "pit"))
+        yaw = float(self._state_value(state, "yaw"))
+        alt_fused = float(self._state_value(state, "alt_fused"))
+        alt_add = float(self._state_value(state, "alt_add"))
+        vel_x = float(self._state_value(state, "vel_x"))
+        vel_y = float(self._state_value(state, "vel_y"))
+        pos_x = float(self._state_value(state, "pos_x"))
+        pos_y = float(self._state_value(state, "pos_y"))
+
+        with self._state_lock:
+            phase = self._phase
+            origin = self._origin
+            previous = self._previous_state
+            self._previous_state = (
+                state_monotonic,
+                pos_x,
+                pos_y,
+                roll,
+                pitch,
+                yaw,
+                alt_add,
+            )
+
+        frame_dt_s: float | None = None
+        dpos_vel_x: float | None = None
+        dpos_vel_y: float | None = None
+        roll_rate: float | None = None
+        pitch_rate: float | None = None
+        yaw_rate: float | None = None
+        alt_add_rate: float | None = None
+        if previous is not None:
+            frame_dt_s = state_monotonic - previous[0]
+            if frame_dt_s > 0:
+                dpos_vel_x = (pos_x - previous[1]) / frame_dt_s
+                dpos_vel_y = (pos_y - previous[2]) / frame_dt_s
+                roll_rate = (roll - previous[3]) / frame_dt_s
+                pitch_rate = (pitch - previous[4]) / frame_dt_s
+                yaw_delta = (yaw - previous[5] + 180.0) % 360.0 - 180.0
+                yaw_rate = yaw_delta / frame_dt_s
+                alt_add_rate = (alt_add - previous[6]) / frame_dt_s
+
+        self._position_history.append((state_monotonic, pos_x, pos_y))
+        while (
+            len(self._position_history) > 2
+            and state_monotonic - self._position_history[0][0] > 1.5
+        ):
+            self._position_history.popleft()
+        window_dt_s: float | None = None
+        window_vel_x: float | None = None
+        window_vel_y: float | None = None
+        if self._position_history:
+            window_start = self._position_history[0]
+            window_dt_s = state_monotonic - window_start[0]
+            if window_dt_s >= 0.5:
+                window_vel_x = (pos_x - window_start[1]) / window_dt_s
+                window_vel_y = (pos_y - window_start[2]) / window_dt_s
+
+        offset_x: float | None = None
+        offset_y: float | None = None
+        hold_elapsed_s: float | None = None
+        mean_origin_vel_x: float | None = None
+        mean_origin_vel_y: float | None = None
+        if origin is not None:
+            offset_x = pos_x - origin[1]
+            offset_y = pos_y - origin[2]
+            hold_elapsed_s = state_monotonic - origin[0]
+            if hold_elapsed_s > 0:
+                mean_origin_vel_x = offset_x / hold_elapsed_s
+                mean_origin_vel_y = offset_y / hold_elapsed_s
+
+        unlock_field = getattr(state, "unlock", None)
+        unlock = bool(getattr(unlock_field, "value", False))
+        flight_state = int(getattr(unlock_field, "raw_value", int(unlock)))
+        raw_state = bytes(getattr(state, "last_raw_bytes", b""))
+
+        record = self._base_record("state")
+        record.update(
+            {
+                "capture_monotonic_s": f"{capture_monotonic:.6f}",
+                "session_elapsed_s": f"{capture_monotonic - self._start_monotonic:.6f}",
+                "phase": phase,
+                "update_count": int(getattr(state, "update_count", 0)),
+                "state_monotonic_s": f"{state_monotonic:.6f}",
+                "state_age_ms": f"{max(0.0, capture_monotonic - state_monotonic) * 1000.0:.3f}",
+                "frame_dt_ms": "" if frame_dt_s is None else f"{frame_dt_s * 1000.0:.3f}",
+                "raw_state_hex": raw_state.hex(" "),
+                "roll_deg": roll,
+                "pitch_deg": pitch,
+                "yaw_deg": yaw,
+                "tilt_deg": math.hypot(roll, pitch),
+                "roll_rate_deg_s": "" if roll_rate is None else roll_rate,
+                "pitch_rate_deg_s": "" if pitch_rate is None else pitch_rate,
+                "yaw_rate_deg_s": "" if yaw_rate is None else yaw_rate,
+                # ALT_FU is captured for diagnosis only; no flight decision reads it.
+                "alt_fused_cm": alt_fused,
+                "alt_add_cm": alt_add,
+                "alt_fused_minus_add_cm": alt_fused - alt_add,
+                "alt_add_rate_cm_s": "" if alt_add_rate is None else alt_add_rate,
+                "vel_x_cm_s": vel_x,
+                "vel_y_cm_s": vel_y,
+                "vel_z_cm_s": float(self._state_value(state, "vel_z")),
+                "vel_xy_cm_s": math.hypot(vel_x, vel_y),
+                "pos_x_cm": pos_x,
+                "pos_y_cm": pos_y,
+                "origin_x_cm": "" if origin is None else origin[1],
+                "origin_y_cm": "" if origin is None else origin[2],
+                "offset_x_cm": "" if offset_x is None else offset_x,
+                "offset_y_cm": "" if offset_y is None else offset_y,
+                "drift_cm": ""
+                if offset_x is None or offset_y is None
+                else math.hypot(offset_x, offset_y),
+                "dpos_vel_x_cm_s": "" if dpos_vel_x is None else dpos_vel_x,
+                "dpos_vel_y_cm_s": "" if dpos_vel_y is None else dpos_vel_y,
+                "dpos_vel_xy_cm_s": ""
+                if dpos_vel_x is None or dpos_vel_y is None
+                else math.hypot(dpos_vel_x, dpos_vel_y),
+                "dpos_minus_fused_vel_x_cm_s": ""
+                if dpos_vel_x is None
+                else dpos_vel_x - vel_x,
+                "dpos_minus_fused_vel_y_cm_s": ""
+                if dpos_vel_y is None
+                else dpos_vel_y - vel_y,
+                "dpos_window_s": "" if window_dt_s is None else window_dt_s,
+                "dpos_window_vel_x_cm_s": ""
+                if window_vel_x is None
+                else window_vel_x,
+                "dpos_window_vel_y_cm_s": ""
+                if window_vel_y is None
+                else window_vel_y,
+                "dpos_window_vel_xy_cm_s": ""
+                if window_vel_x is None or window_vel_y is None
+                else math.hypot(window_vel_x, window_vel_y),
+                "dpos_window_minus_fused_vel_x_cm_s": ""
+                if window_vel_x is None
+                else window_vel_x - vel_x,
+                "dpos_window_minus_fused_vel_y_cm_s": ""
+                if window_vel_y is None
+                else window_vel_y - vel_y,
+                "hold_elapsed_s": "" if hold_elapsed_s is None else hold_elapsed_s,
+                "mean_from_origin_vel_x_cm_s": ""
+                if mean_origin_vel_x is None
+                else mean_origin_vel_x,
+                "mean_from_origin_vel_y_cm_s": ""
+                if mean_origin_vel_y is None
+                else mean_origin_vel_y,
+                "mean_from_origin_vel_xy_cm_s": ""
+                if mean_origin_vel_x is None or mean_origin_vel_y is None
+                else math.hypot(mean_origin_vel_x, mean_origin_vel_y),
+                "battery_v": float(self._state_value(state, "bat")),
+                "mode": int(self._state_value(state, "mode")),
+                "unlock": int(unlock),
+                "flight_state_raw": flight_state,
+                "cid": int(self._state_value(state, "cid")),
+                "cmd_0": int(self._state_value(state, "cmd_0")),
+                "cmd_1": int(self._state_value(state, "cmd_1")),
+            }
+        )
+        with self._state_lock:
+            self._latest_state_record = dict(record)
+        self._enqueue(record)
+
+    def latest_state_record(self) -> dict[str, Any]:
+        with self._state_lock:
+            return dict(self._latest_state_record)
+
+    def _write_loop(self) -> None:
+        last_flush = time.monotonic()
+        try:
+            while True:
+                record = self._queue.get()
+                if record is None:
+                    break
+                self._writer.writerow(record)
+                self._rows_written += 1
+                now = time.monotonic()
+                if now - last_flush >= 1.0:
+                    self._file.flush()
+                    last_flush = now
+            self._file.flush()
+        except Exception as exc:
+            self._worker_error = exc
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self.mark(
+            f"diagnostic logger stopping: rows={self._rows_written}, "
+            f"dropped={self._dropped_rows}, capture_errors={self._capture_errors}"
+        )
+        self._closed = True
+        if self._thread.is_alive():
+            try:
+                self._queue.put(None, timeout=2.0)
+            except queue.Full as exc:
+                raise RuntimeError("诊断日志队列已满，无法正常结束写入线程") from exc
+            self._thread.join(timeout=10.0)
+        if self._thread.is_alive():
+            raise RuntimeError("诊断日志写入线程未能在 10 秒内结束")
+        self._file.close()
+        if self._worker_error is not None:
+            raise RuntimeError(f"诊断日志写入失败：{self._worker_error}")
+
+    @property
+    def rows_written(self) -> int:
+        return self._rows_written
+
+    @property
+    def dropped_rows(self) -> int:
+        return self._dropped_rows
+
+    @property
+    def capture_errors(self) -> int:
+        return self._capture_errors
+
+
+def _default_diagnostic_path() -> Path:
+    repository_root = Path(__file__).resolve().parents[2]
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
+    return repository_root / "fc_log" / f"optical_flow_hold_{timestamp}.csv"
 
 
 def _median(values: list[float]) -> float:
@@ -118,10 +507,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--status-interval-s", type=float, default=1.0)
     parser.add_argument(
+        "--diagnostic-log",
+        type=Path,
+        default=None,
+        help="完整逐帧诊断 CSV 路径；默认自动写入 fc_log/optical_flow_hold_时间.csv。",
+    )
+    parser.add_argument(
         "--height-outlier-confirm-frames",
         type=int,
         default=3,
-        help="融合高度连续越界多少个状态帧才触发安全降落，默认 3 帧。",
+        help="ALT_ADD 连续越界多少个状态帧才触发安全降落，默认 3 帧。",
     )
     args = parser.parse_args(argv)
 
@@ -159,6 +554,8 @@ def _print_plan(args: argparse.Namespace) -> None:
         f"计划：飞控原生 HOLD_POS(mode=2)，起飞到 {args.height_cm} cm，"
         f"定点 {args.hover_s:g} s，然后降落。"
     )
+    print("任务高度源：ALT_ADD（光流模组激光测距）；ALT_FU 已禁用。")
+    print("真实执行会自动保存逐帧诊断 CSV 和飞控运行日志；ALT_FU 仅记录，不参与控制判断。")
     print("外部雷达/雷达 SLAM/相机导航/位置回灌：全部不启动。")
     print("确认场地、光流纹理与照明、桨叶和遥控接管条件后，加 --execute 执行真实飞行。")
 
@@ -206,21 +603,20 @@ def _raw_state_hex(fc: Any) -> str:
     return bytes(raw).hex(" ") if raw else "unavailable"
 
 
-def _height_values(fc: Any) -> tuple[float, float, float]:
+def _height_values(fc: Any) -> tuple[float, float]:
     state = fc.state
     return (
-        float(state.alt_fused.value),
         float(state.alt_add.value),
         float(state.vel_z.value),
     )
 
 
-def _takeoff_evidence(fc: Any, baseline_fused_cm: float) -> dict[str, bool]:
-    fused_cm, _add_cm, vertical_speed = _height_values(fc)
+def _takeoff_evidence(fc: Any, baseline_add_cm: float) -> dict[str, bool]:
+    add_cm, vertical_speed = _height_values(fc)
     return {
         "command": _command_now(fc) == TAKEOFF_COMMAND,
         "airborne_state": _flight_state_raw(fc) >= 2,
-        "height_rise": fused_cm - baseline_fused_cm >= TAKEOFF_MIN_RISE_CM,
+        "height_rise": add_cm - baseline_add_cm >= TAKEOFF_MIN_RISE_CM,
         "vertical_speed": vertical_speed >= TAKEOFF_MIN_VZ_CM_S,
     }
 
@@ -262,36 +658,27 @@ def _preflight(fc: Any, args: argparse.Namespace) -> float:
         )
     _check_tilt(fc, min(args.max_tilt_deg, 15.0))
 
-    fused_samples: list[float] = []
     add_samples: list[float] = []
     update_count = int(getattr(state, "update_count", 0))
     for _ in range(12):
         update_count = _wait_for_next_state(fc, update_count, timeout_s=1.0)
-        fused_cm, add_cm, _vertical_speed = _height_values(fc)
-        fused_samples.append(fused_cm)
+        add_cm, _vertical_speed = _height_values(fc)
         add_samples.append(add_cm)
 
-    fused_cm = _median(fused_samples)
     add_cm = _median(add_samples)
-    fused_span = max(fused_samples) - min(fused_samples)
     add_span = max(add_samples) - min(add_samples)
-    if abs(fused_cm) > 30.0 or fused_span > 10.0:
-        raise RuntimeError(
-            "起飞前融合高度不是稳定地面值："
-            f"alt_fused中值={fused_cm:.1f} cm, 范围={min(fused_samples):.1f}..{max(fused_samples):.1f} cm"
-        )
     if abs(add_cm) > 30.0 or add_span > 10.0:
         raise RuntimeError(
-            "起飞前附加测高不稳定，禁止光流起飞："
+            "起飞前 ALT_ADD 光流激光测距不是稳定地面值，禁止起飞："
             f"alt_add中值={add_cm:.1f} cm, 范围={min(add_samples):.1f}..{max(add_samples):.1f} cm, "
             f"raw={_raw_state_hex(fc)}"
         )
     print(
         "起飞前检查通过："
-        f"battery={battery_v:.2f} V, alt_fused={fused_cm:.1f} cm, alt_add={add_cm:.1f} cm, "
+        f"battery={battery_v:.2f} V, alt_add={add_cm:.1f} cm, "
         f"roll={state.rol.value:.1f}°, pitch={state.pit.value:.1f}°"
     )
-    return fused_cm
+    return add_cm
 
 
 def _wait_for_unlock(fc: Any, timeout_s: float) -> int:
@@ -305,7 +692,7 @@ def _wait_for_unlock(fc: Any, timeout_s: float) -> int:
     raise RuntimeError("飞控解锁确认超时")
 
 
-def _wait_for_takeoff_start(fc: Any, args: argparse.Namespace, baseline_fused_cm: float) -> None:
+def _wait_for_takeoff_start(fc: Any, args: argparse.Namespace, baseline_add_cm: float) -> None:
     """Require command-state or physical evidence that one-key takeoff started."""
     deadline = time.perf_counter() + args.takeoff_start_timeout_s
     update_count = int(getattr(fc.state, "update_count", 0))
@@ -313,10 +700,10 @@ def _wait_for_takeoff_start(fc: Any, args: argparse.Namespace, baseline_fused_cm
     next_status = 0.0
     while time.perf_counter() < deadline:
         update_count = _wait_for_next_state(fc, update_count, timeout_s=1.0)
-        fused_cm, add_cm, vertical_speed = _height_values(fc)
+        add_cm, vertical_speed = _height_values(fc)
         flight_state = _flight_state_raw(fc)
         command = _command_now(fc)
-        evidence = _takeoff_evidence(fc, baseline_fused_cm)
+        evidence = _takeoff_evidence(fc, baseline_add_cm)
         command_seen = command_seen or evidence["command"]
         physical_evidence = (
             evidence["airborne_state"]
@@ -327,28 +714,28 @@ def _wait_for_takeoff_start(fc: Any, args: argparse.Namespace, baseline_fused_cm
             reasons = [name for name, present in evidence.items() if present]
             print(
                 "起飞已确认："
-                f"依据={','.join(reasons)}, alt_fused={fused_cm:.1f} cm, "
-                f"alt_add={add_cm:.1f} cm, vz={vertical_speed:.1f} cm/s, "
+                f"依据={','.join(reasons)}, alt_add={add_cm:.1f} cm, "
+                f"vz={vertical_speed:.1f} cm/s, "
                 f"flight_state={flight_state}, cmd={command}"
             )
             if not command_seen:
-                print("警告：未观察到起飞命令状态，但已检测到实际离地；继续按融合高度监控。")
+                print("警告：未观察到起飞命令状态，但已检测到实际离地；继续按 ALT_ADD 监控。")
             return
 
         now = time.perf_counter()
         if now >= next_status:
             print(
                 "等待起飞确认："
-                f"alt_fused={fused_cm:.1f} cm, alt_add={add_cm:.1f} cm, "
+                f"alt_add={add_cm:.1f} cm, "
                 f"vz={vertical_speed:.1f} cm/s, flight_state={flight_state}, cmd={command}"
             )
             next_status = now + args.status_interval_s
 
-    fused_cm, add_cm, vertical_speed = _height_values(fc)
+    add_cm, vertical_speed = _height_values(fc)
     raise RuntimeError(
         "飞控未确认起飞，已停止继续等待："
-        f"takeoff_cmd_seen={command_seen}, alt_fused={fused_cm:.1f} cm, "
-        f"alt_add={add_cm:.1f} cm, vz={vertical_speed:.1f} cm/s, "
+        f"takeoff_cmd_seen={command_seen}, alt_add={add_cm:.1f} cm, "
+        f"vz={vertical_speed:.1f} cm/s, "
         f"flight_state={_flight_state_raw(fc)}, cmd={_command_now(fc)}, "
         f"raw={_raw_state_hex(fc)}"
     )
@@ -365,8 +752,6 @@ def _wait_for_takeoff_height(fc: Any, args: argparse.Namespace) -> None:
         confirm_frames=args.height_outlier_confirm_frames,
     )
     update_count = int(getattr(fc.state, "update_count", 0))
-    add_outlier_active = False
-
     while time.perf_counter() < deadline:
         update_count = _wait_for_next_state(fc, update_count, timeout_s=1.0)
         now = time.perf_counter()
@@ -376,34 +761,26 @@ def _wait_for_takeoff_height(fc: Any, args: argparse.Namespace) -> None:
             raise RuntimeError("起飞过程中飞控意外锁定")
         _check_tilt(fc, args.max_tilt_deg)
 
-        fused_cm, add_cm, vertical_speed = _height_values(fc)
-        violation = ceiling_guard.observe(fused_cm)
-        if fused_cm > hard_ceiling and ceiling_guard.high_count == 1:
+        add_cm, vertical_speed = _height_values(fc)
+        violation = ceiling_guard.observe(add_cm)
+        if add_cm > hard_ceiling and ceiling_guard.high_count == 1:
             print(
-                "警告：融合高度出现单帧越界，等待连续状态帧确认："
-                f"alt_fused={fused_cm:.1f} cm, alt_add={add_cm:.1f} cm, raw={_raw_state_hex(fc)}"
+                "警告：ALT_ADD 出现单帧越界，等待连续状态帧确认："
+                f"alt_add={add_cm:.1f} cm, raw={_raw_state_hex(fc)}"
             )
         if violation == "high":
             raise RuntimeError(
-                "融合高度连续超过安全上限："
-                f"alt_fused={fused_cm:.1f} cm > {hard_ceiling:.1f} cm, "
-                f"连续帧={ceiling_guard.high_count}, alt_add={add_cm:.1f} cm, raw={_raw_state_hex(fc)}"
+                "ALT_ADD 连续超过安全上限："
+                f"alt_add={add_cm:.1f} cm > {hard_ceiling:.1f} cm, "
+                f"连续帧={ceiling_guard.high_count}, raw={_raw_state_hex(fc)}"
             )
 
-        add_outlier = add_cm < -30.0 or add_cm > hard_ceiling
-        if add_outlier and not add_outlier_active:
-            print(
-                "警告：ALT_ADD 测距异常，本帧不用于高度安全判断："
-                f"alt_add={add_cm:.1f} cm, alt_fused={fused_cm:.1f} cm, raw={_raw_state_hex(fc)}"
-            )
-        add_outlier_active = add_outlier
-
-        if fused_cm >= minimum_height and abs(vertical_speed) <= 10.0:
+        if add_cm >= minimum_height and abs(vertical_speed) <= 10.0:
             stable_since = stable_since or now
             if now - stable_since >= args.stable_s:
                 print(
                     "已到达目标高度："
-                    f"alt_fused={fused_cm:.1f} cm, alt_add={add_cm:.1f} cm, "
+                    f"alt_add={add_cm:.1f} cm, "
                     f"vz={vertical_speed:.1f} cm/s"
                 )
                 return
@@ -412,29 +789,36 @@ def _wait_for_takeoff_height(fc: Any, args: argparse.Namespace) -> None:
 
         if now >= next_status:
             print(
-                f"起飞中：alt_fused={fused_cm:.1f} cm, alt_add={add_cm:.1f} cm, "
+                f"起飞中：alt_add={add_cm:.1f} cm, "
                 f"vz={vertical_speed:.1f} cm/s, flight_state={_flight_state_raw(fc)}, "
                 f"cmd={_command_now(fc)}, mode={fc.state.mode.value}"
             )
             next_status = now + args.status_interval_s
 
-    fused_cm, add_cm, vertical_speed = _height_values(fc)
+    add_cm, vertical_speed = _height_values(fc)
     raise RuntimeError(
         "起飞高度确认超时："
-        f"alt_fused={fused_cm:.1f} cm, alt_add={add_cm:.1f} cm, "
+        f"alt_add={add_cm:.1f} cm, "
         f"vz={vertical_speed:.1f} cm/s, 目标={args.height_cm} cm, "
         f"flight_state={_flight_state_raw(fc)}, cmd={_command_now(fc)}"
     )
 
 
-def _hold_with_fc_optical_flow(fc: Any, args: argparse.Namespace) -> tuple[float, float]:
+def _hold_with_fc_optical_flow(
+    fc: Any,
+    args: argparse.Namespace,
+    diagnostic: _DiagnosticLogger,
+) -> tuple[float, float]:
     """Monitor the hover without sending any external position or velocity data."""
+    diagnostic.set_phase("hold_transition", "switching to native HOLD_POS")
     _wait_for_mode(fc, HOLD_POS_MODE)
     fc.stablize()
     time.sleep(0.5)
 
     origin_x = float(fc.state.pos_x.value)
     origin_y = float(fc.state.pos_y.value)
+    diagnostic.set_origin(origin_x, origin_y)
+    diagnostic.set_phase("hold", "native optical-flow hold started")
     deadline = time.perf_counter() + args.hover_s
     next_status = 0.0
     max_drift = 0.0
@@ -445,8 +829,6 @@ def _hold_with_fc_optical_flow(fc: Any, args: argparse.Namespace) -> tuple[float
         confirm_frames=args.height_outlier_confirm_frames,
     )
     update_count = int(getattr(fc.state, "update_count", 0))
-    add_outlier_active = False
-
     print(
         f"进入飞控原生光流定点：mode={fc.state.mode.value}，持续 {args.hover_s:g} s；"
         "程序不发送外部位置或速度控制量。"
@@ -462,40 +844,48 @@ def _hold_with_fc_optical_flow(fc: Any, args: argparse.Namespace) -> tuple[float
             raise RuntimeError(f"定点模式丢失：当前 mode={fc.state.mode.value}")
         _check_tilt(fc, args.max_tilt_deg)
 
-        fused_cm, add_cm, _vertical_speed = _height_values(fc)
+        add_cm, _vertical_speed = _height_values(fc)
         dx = float(fc.state.pos_x.value) - origin_x
         dy = float(fc.state.pos_y.value) - origin_y
         drift_cm = math.hypot(dx, dy)
         max_drift = max(max_drift, drift_cm)
-        max_height_error = max(max_height_error, abs(fused_cm - args.height_cm))
+        max_height_error = max(max_height_error, abs(add_cm - args.height_cm))
 
         if drift_cm > args.max_drift_cm:
             raise RuntimeError(
                 f"光流定点漂移超过限制：{drift_cm:.1f} cm > {args.max_drift_cm:.1f} cm"
             )
-        height_violation = height_guard.observe(fused_cm)
+        height_violation = height_guard.observe(add_cm)
         if height_violation is not None:
             raise RuntimeError(
-                "定点融合高度连续越过安全范围："
-                f"alt_fused={fused_cm:.1f} cm, alt_add={add_cm:.1f} cm, "
+                "定点 ALT_ADD 连续越过安全范围："
+                f"alt_add={add_cm:.1f} cm, "
                 f"方向={height_violation}, 连续帧="
                 f"{height_guard.low_count if height_violation == 'low' else height_guard.high_count}, "
                 f"raw={_raw_state_hex(fc)}"
             )
 
-        add_outlier = add_cm < -30.0 or add_cm > args.height_cm + 80.0
-        if add_outlier and not add_outlier_active:
-            print(
-                "警告：定点期间 ALT_ADD 测距异常，继续使用融合高度："
-                f"alt_add={add_cm:.1f} cm, alt_fused={fused_cm:.1f} cm, raw={_raw_state_hex(fc)}"
-            )
-        add_outlier_active = add_outlier
-
         if now >= next_status:
             remaining = max(0.0, deadline - now)
+            current_x = float(fc.state.pos_x.value)
+            current_y = float(fc.state.pos_y.value)
+            vel_x = float(fc.state.vel_x.value)
+            vel_y = float(fc.state.vel_y.value)
+            latest = diagnostic.latest_state_record()
+            dpos_vel_x = latest.get("dpos_window_vel_x_cm_s", "")
+            dpos_vel_y = latest.get("dpos_window_vel_y_cm_s", "")
+            dpos_text = (
+                "n/a"
+                if dpos_vel_x == "" or dpos_vel_y == ""
+                else f"({float(dpos_vel_x):5.1f},{float(dpos_vel_y):5.1f})"
+            )
             print(
-                f"定点中：剩余={remaining:4.1f} s, alt_fused={fused_cm:5.1f} cm, "
-                f"alt_add={add_cm:5.1f} cm, drift={drift_cm:5.1f} cm, mode={fc.state.mode.value}"
+                f"定点中：剩余={remaining:4.1f} s, alt_add={add_cm:5.1f} cm, "
+                f"pos=({current_x:6.1f},{current_y:6.1f}) cm, "
+                f"offset=({dx:5.1f},{dy:5.1f}) cm, drift={drift_cm:5.1f} cm, "
+                f"vel=({vel_x:5.1f},{vel_y:5.1f}) cm/s, dpos_vel={dpos_text} cm/s, "
+                f"rpy=({float(fc.state.rol.value):4.1f},{float(fc.state.pit.value):4.1f},"
+                f"{float(fc.state.yaw.value):5.1f})°, mode={fc.state.mode.value}"
             )
             next_status = now + args.status_interval_s
 
@@ -517,7 +907,7 @@ def _land_and_wait_for_lock(fc: Any, args: argparse.Namespace) -> bool:
 
         while time.perf_counter() < deadline:
             now = time.perf_counter()
-            fused_cm, add_cm, _vertical_speed = _height_values(fc)
+            add_cm, _vertical_speed = _height_values(fc)
             unlocked = bool(fc.state.unlock.value)
             if not unlocked:
                 print("降落完成：飞控已锁定。")
@@ -530,7 +920,7 @@ def _land_and_wait_for_lock(fc: Any, args: argparse.Namespace) -> bool:
                 next_request = now + 2.0
             if now >= next_status:
                 print(
-                    f"降落中：alt_fused={fused_cm:.1f} cm, alt_add={add_cm:.1f} cm, "
+                    f"降落中：alt_add={add_cm:.1f} cm, "
                     f"flight_state={_flight_state_raw(fc)}, unlock={unlocked}"
                 )
                 next_status = now + args.status_interval_s
@@ -552,28 +942,50 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     _setup_path()
-    from FlightController import FC_Controller
+    from FlightController import FC_Controller, logger
 
-    fc = FC_Controller()
+    diagnostic_path = args.diagnostic_log or _default_diagnostic_path()
+    diagnostic = _DiagnosticLogger(diagnostic_path)
+    runtime_log_path = diagnostic.path.with_suffix(".runtime.log")
+    print(f"逐帧诊断日志：{diagnostic.path}")
+    print(f"飞控运行日志：{runtime_log_path}")
+
+    fc: Any = None
+    runtime_log_sink: int | None = None
     flight_owned = False
     result = 1
     mission_ok = False
     landed_ok = True
     try:
+        runtime_log_sink = logger.add(
+            str(runtime_log_path),
+            level="DEBUG",
+            enqueue=True,
+            backtrace=True,
+            diagnose=True,
+            format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | "
+            "{name}:{function}:{line} - {message}",
+        )
+        fc = FC_Controller()
+        diagnostic.set_phase("connecting", "opening FC serial connection")
         print("连接飞控（本程序不会打开任何雷达设备）……")
         fc.start_listen_serial(
             serial_dev=args.port,
+            callback=diagnostic.capture_state,
             block_until_connected=True,
             open_timeout_s=args.connection_timeout_s,
         )
         if not fc.wait_for_connection(timeout_s=args.connection_timeout_s):
             raise RuntimeError("飞控连接超时")
+        diagnostic.set_phase("preflight", "FC connected; starting preflight checks")
         _preflight(fc, args)
 
         # One-key takeoff is most reliable in PROGRAM mode. Once the target
         # height is stable, mode=2 hands horizontal hold to the FC optical flow.
+        diagnostic.set_phase("program_mode", "requesting PROGRAM mode")
         _wait_for_mode(fc, PROGRAM_MODE)
         print("请求飞控解锁……")
+        diagnostic.set_phase("unlock", "requesting FC unlock")
         fc.unlock()
         flight_owned = True
         flight_state = _wait_for_unlock(fc, args.unlock_timeout_s)
@@ -581,22 +993,32 @@ def main(argv: list[str] | None = None) -> int:
             f"解锁状态已确认：flight_state={flight_state}；"
             f"等待 {args.post_unlock_delay_s:.1f} s 让飞控和电机状态稳定……"
         )
+        diagnostic.set_phase("post_unlock_delay")
         time.sleep(args.post_unlock_delay_s)
         if not fc.connected:
             raise RuntimeError("解锁稳定等待期间飞控断开")
         if not bool(fc.state.unlock.value):
             raise RuntimeError("解锁稳定等待期间飞控重新锁定")
 
-        takeoff_baseline_fused = float(fc.state.alt_fused.value)
+        takeoff_baseline_add = float(fc.state.alt_add.value)
         print(
             "发送飞控一键起飞命令："
-            f"target={args.height_cm} cm, baseline_alt_fused={takeoff_baseline_fused:.1f} cm"
+            f"target={args.height_cm} cm, baseline_alt_add={takeoff_baseline_add:.1f} cm"
+        )
+        diagnostic.set_phase(
+            "takeoff_start",
+            f"one-key takeoff requested: target={args.height_cm} cm",
         )
         fc.take_off(args.height_cm)
-        _wait_for_takeoff_start(fc, args, takeoff_baseline_fused)
+        _wait_for_takeoff_start(fc, args, takeoff_baseline_add)
+        diagnostic.set_phase("takeoff_climb", "takeoff confirmed; monitoring climb")
         _wait_for_takeoff_height(fc, args)
 
-        max_drift, max_height_error = _hold_with_fc_optical_flow(fc, args)
+        max_drift, max_height_error = _hold_with_fc_optical_flow(
+            fc,
+            args,
+            diagnostic,
+        )
         print(
             f"{args.hover_s:g} 秒定点测试完成：最大水平漂移={max_drift:.1f} cm，"
             f"最大高度误差={max_height_error:.1f} cm。"
@@ -604,18 +1026,48 @@ def main(argv: list[str] | None = None) -> int:
         mission_ok = True
         result = 0
     except KeyboardInterrupt:
+        logger.warning("[OPTICAL_FLOW_TEST] Mission interrupted by Ctrl+C")
+        diagnostic.mark("mission interrupted by Ctrl+C")
         print("收到 Ctrl+C，中止测试并请求降落。")
         result = 130
     except Exception as exc:
+        logger.exception(f"[OPTICAL_FLOW_TEST] Mission failed: {type(exc).__name__}: {exc}")
+        diagnostic.mark(f"mission failed: {type(exc).__name__}: {exc}")
         print(f"测试失败：{type(exc).__name__}: {exc}")
         result = 1
     finally:
-        if flight_owned:
+        if flight_owned and fc is not None:
+            diagnostic.set_phase("landing", "requesting native FC landing")
             landed_ok = _land_and_wait_for_lock(fc, args)
+            diagnostic.mark(f"landing finished: locked={landed_ok}")
+        if fc is not None:
+            try:
+                diagnostic.set_phase("closing", "closing FC connection")
+                fc.close()
+            except Exception as exc:
+                diagnostic.mark(f"FC close failed: {type(exc).__name__}: {exc}")
+                print(f"关闭飞控连接时出现异常：{exc}")
+        diagnostic.mark(
+            f"mission summary: mission_ok={mission_ok}, landed_ok={landed_ok}, "
+            f"result={result}"
+        )
+        if runtime_log_sink is not None:
+            try:
+                logger.remove(runtime_log_sink)
+            except Exception as exc:
+                diagnostic.mark(
+                    f"runtime log close failed: {type(exc).__name__}: {exc}"
+                )
         try:
-            fc.close()
+            diagnostic.close()
+            print(
+                f"诊断日志已保存：CSV={diagnostic.path}，运行日志={runtime_log_path} "
+                f"（记录={diagnostic.rows_written}，丢弃={diagnostic.dropped_rows}，"
+                f"采集错误={diagnostic.capture_errors}）"
+            )
         except Exception as exc:
-            print(f"关闭飞控连接时出现异常：{exc}")
+            print(f"错误：诊断日志关闭失败：{type(exc).__name__}: {exc}")
+            result = 1
 
     if mission_ok and not landed_ok:
         return 1

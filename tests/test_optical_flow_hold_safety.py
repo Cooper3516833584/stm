@@ -1,10 +1,16 @@
+import csv
+from pathlib import Path
 import struct
 from types import SimpleNamespace
 
+import pytest
+
+from FlightController.Application import FC_Application
 from FlightController.Base import Byte_Var, FC_State_Struct
 from FlightController.tools.test_optical_flow_hold import (
     TAKEOFF_COMMAND,
     _ConsecutiveRangeGuard,
+    _DiagnosticLogger,
     _median,
     _takeoff_evidence,
     parse_args,
@@ -61,6 +67,47 @@ def test_fc_state_records_update_metadata_and_raw_payload():
     assert state.unlock.raw_value == 1
 
 
+def test_diagnostic_logger_records_full_state_and_derived_position_velocity(tmp_path):
+    log_path = tmp_path / "optical-flow.csv"
+    diagnostic = _DiagnosticLogger(log_path)
+    state = FC_State_Struct()
+    first_values = (100, -200, 300, 184, 9, 0, 0, 0, 0, 0, 1230, 2, 1, 0, 0, 0)
+    second_values = (100, -200, 300, 184, 9, 4, 3, 0, 4, 3, 1230, 2, 1, 0, 0, 0)
+    base_time = diagnostic._start_monotonic + 0.1
+
+    diagnostic.set_phase("hold")
+    diagnostic.set_origin(0, 0)
+    state.update_from_bytes(struct.pack(state._fmt_string, *first_values))
+    state.last_update_monotonic = base_time
+    diagnostic.capture_state(state)
+    state.update_from_bytes(struct.pack(state._fmt_string, *second_values))
+    state.last_update_monotonic = base_time + 1.0
+    diagnostic.capture_state(state)
+    diagnostic.close()
+
+    with log_path.open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    state_rows = [row for row in rows if row["record_type"] == "state"]
+
+    assert len(state_rows) == 2
+    latest = state_rows[-1]
+    assert latest["phase"] == "hold"
+    assert latest["raw_state_hex"]
+    assert float(latest["alt_fused_cm"]) == 184
+    assert float(latest["alt_add_cm"]) == 9
+    assert float(latest["alt_fused_minus_add_cm"]) == 175
+    assert float(latest["offset_x_cm"]) == 4
+    assert float(latest["offset_y_cm"]) == 3
+    assert float(latest["drift_cm"]) == 5
+    assert float(latest["dpos_window_vel_x_cm_s"]) == 4
+    assert float(latest["dpos_window_vel_y_cm_s"]) == 3
+    assert float(latest["dpos_window_vel_xy_cm_s"]) == 5
+    assert float(latest["dpos_window_minus_fused_vel_x_cm_s"]) == 0
+    assert float(latest["dpos_window_minus_fused_vel_y_cm_s"]) == 0
+    assert diagnostic.dropped_rows == 0
+    assert diagnostic.capture_errors == 0
+
+
 def test_height_guard_requires_consecutive_distinct_observations():
     guard = _ConsecutiveRangeGuard(maximum=160, confirm_frames=3)
 
@@ -74,7 +121,7 @@ def test_height_guard_requires_consecutive_distinct_observations():
 def test_takeoff_command_alone_is_not_physical_takeoff_evidence():
     fc = _fake_fc(command=TAKEOFF_COMMAND)
 
-    evidence = _takeoff_evidence(fc, baseline_fused_cm=10)
+    evidence = _takeoff_evidence(fc, baseline_add_cm=10)
 
     assert evidence == {
         "command": True,
@@ -84,13 +131,57 @@ def test_takeoff_command_alone_is_not_physical_takeoff_evidence():
     }
 
 
-def test_takeoff_evidence_accepts_fused_height_rise():
-    fc = _fake_fc(fused=19, command=TAKEOFF_COMMAND)
+def test_takeoff_evidence_accepts_alt_add_height_rise():
+    fc = _fake_fc(add=19, command=TAKEOFF_COMMAND)
 
-    evidence = _takeoff_evidence(fc, baseline_fused_cm=10)
+    evidence = _takeoff_evidence(fc, baseline_add_cm=10)
 
     assert evidence["command"] is True
     assert evidence["height_rise"] is True
+
+
+def test_takeoff_evidence_ignores_disabled_fused_height_rise():
+    fc = _fake_fc(fused=500, add=10, command=TAKEOFF_COMMAND)
+
+    evidence = _takeoff_evidence(fc, baseline_add_cm=10)
+
+    assert evidence["height_rise"] is False
+
+
+def test_application_rejects_disabled_fused_height_source():
+    with pytest.raises(ValueError, match="ALT_FU"):
+        FC_Application.set_height(SimpleNamespace(), 0, 100, 20)
+
+
+def test_application_height_control_uses_alt_add_source_one():
+    calls = []
+    fake = SimpleNamespace(
+        state=SimpleNamespace(
+            alt_add=_Value(10),
+            update_event=SimpleNamespace(clear=lambda: None, wait=lambda: True),
+        ),
+        _action_log=lambda *args: None,
+        go_up=lambda distance, speed: calls.append(("up", distance, speed)),
+        go_down=lambda distance, speed: calls.append(("down", distance, speed)),
+    )
+
+    FC_Application.set_height(fake, 1, 100, 20)
+
+    assert calls == [("up", 90, 20)]
+
+
+def test_runtime_code_does_not_read_disabled_alt_fused():
+    repository_root = Path(__file__).resolve().parents[1]
+    violations = []
+    for path in repository_root.rglob("*.py"):
+        if path == repository_root / "FlightController" / "Base.py":
+            continue
+        if "tests" in path.parts:
+            continue
+        if ".alt_fused" in path.read_text(encoding="utf-8"):
+            violations.append(str(path.relative_to(repository_root)))
+
+    assert violations == []
 
 
 def test_new_safety_defaults_are_enabled():
@@ -99,3 +190,9 @@ def test_new_safety_defaults_are_enabled():
     assert args.post_unlock_delay_s == 2.0
     assert args.takeoff_start_timeout_s == 8.0
     assert args.height_outlier_confirm_frames == 3
+
+
+def test_diagnostic_log_path_can_be_overridden():
+    args = parse_args(["--diagnostic-log", "custom-flight.csv"])
+
+    assert args.diagnostic_log == Path("custom-flight.csv")

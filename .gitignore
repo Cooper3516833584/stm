@@ -21,6 +21,9 @@ dist/
 
 /venv_activate.txt
 
+# Runtime flight-controller logs
+/fc_log/
+
 /cam9_wb5000.jpg
 /cam9_wb6500.jpg
 /upper_road.jpg

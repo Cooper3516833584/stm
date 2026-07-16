@@ -51,7 +51,7 @@ def main() -> None:
         logger.info(f"mode  = {s.mode.value} ({'定高' if s.mode.value == 1 else '定点' if s.mode.value == 2 else '程控' if s.mode.value == 3 else '未知'})")
         logger.info(f"unlock = {s.unlock.value}")
         logger.info(f"bat   = {s.bat.value:.1f}V")
-        logger.info(f"alt   = {s.alt_add.value}cm (add) / {s.alt_fused.value}cm (fused)")
+        logger.info(f"alt   = {s.alt_add.value}cm (add, 光流激光测距)")
         logger.info(f"姿态  = roll={s.rol.value:.1f} pit={s.pit.value:.1f} yaw={s.yaw.value:.1f}")
         logger.info(f"速度  = vx={s.vel_x.value} vy={s.vel_y.value} vz={s.vel_z.value}")
         logger.info(f"位置  = x={s.pos_x.value} y={s.pos_y.value}")

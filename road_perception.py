@@ -10,7 +10,6 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, List, Tuple
 
 import cv2
@@ -39,7 +38,7 @@ class RoadBranch:
 class RoadPerceptionResult:
     is_road_found: bool
 
-    # single / fork / intersection / ambiguous / lost
+    # single / lost
     road_state: str
 
     # Selected path result.
@@ -51,10 +50,12 @@ class RoadPerceptionResult:
     # V1 keeps this equal to pixel_error.
     corrected_pixel_error: float
 
-    # Candidate branches around a fork/intersection.
+    # Primary centerline. Branch fields remain as an empty compatibility shim
+    # for older log/overlay consumers; branch detection is intentionally disabled.
+    centerline_points: List[Tuple[float, float]] = field(default_factory=list)
     branches: List[RoadBranch] = field(default_factory=list)
     selected_branch: RoadBranch | None = None
-    branch_decision: str = "none"
+    branch_decision: str = "disabled"
 
     debug_msg: str = ""
     debug_mask: np.ndarray | None = field(default=None, repr=False, compare=False)
@@ -167,13 +168,6 @@ def compute_meters_per_pixel(
     return 2.0 * d_ground * math.tan(hfov_half) / float(geom.img_w)
 
 
-class BranchPreference(str, Enum):
-    AUTO = "auto"
-    STRAIGHT = "straight"
-    LEFT = "left"
-    RIGHT = "right"
-
-
 @dataclass
 class RoadInstance:
     mask: np.ndarray
@@ -183,7 +177,6 @@ class RoadInstance:
     bottom_touch_px: int
     bottom_cx: float
     centerline_points: List[CenterPoint] = field(default_factory=list)
-    row_intervals: List[Tuple[int, List[Tuple[int, int]]]] = field(default_factory=list)
 
 
 # Existing lightweight YOLO segmentation model (CPU / XNNPACK fallback).
@@ -205,8 +198,9 @@ _CPU_ONLY = True
 POSTPROCESS_FAST_MAIN = "fast-main"
 POSTPROCESS_FULL = "full"
 POSTPROCESS_MODES = {POSTPROCESS_FAST_MAIN, POSTPROCESS_FULL}
-# The NPU semantic path uses the low-resolution main-road-only profile by
-# default.  The legacy CPU YOLO decoder always keeps its full implementation.
+# Both modes are single-road only. ``fast-main`` uses a sparse low-resolution
+# semantic mask; ``full`` keeps full-resolution mask geometry without fork
+# detection for compatibility and offline diagnostics.
 _POSTPROCESS_MODE = POSTPROCESS_FAST_MAIN
 
 FAST_MASK_WIDTH = 192
@@ -230,10 +224,6 @@ CONTROL_ANGLE_Y_MAX_RATIO = 0.98
 CENTERLINE_SCAN_Y_MAX_RATIO = 0.97
 MIN_FIT_PTS = 5
 
-FORK_INTERVAL_ROWS_MIN = 8
-FORK_WIDTH_GROWTH_RATIO = 1.6
-WIDE_INTERVAL_RATIO = 0.45
-WIDTH_JUMP_LOCK_RATIO = 1.45
 CENTER_SMOOTH_ALPHA = 0.65
 
 
@@ -261,9 +251,10 @@ def _lost_result(reason: str) -> RoadPerceptionResult:
         path_width_px=0.0,
         confidence=0.0,
         corrected_pixel_error=0.0,
+        centerline_points=[],
         branches=[],
         selected_branch=None,
-        branch_decision="no_branch",
+        branch_decision="disabled",
         debug_msg=reason,
     )
 
@@ -311,58 +302,6 @@ def apply_camera_offset_compensation(
     correction_px = _clamp(correction_px, -config.max_correction_px, config.max_correction_px)
     corrected = float(pixel_error) - correction_px
     return corrected, correction_px
-
-
-def classify_branch_label(branch: RoadBranch, *, turn_threshold_deg: float = 20.0) -> str:
-    heading_error = normalize_angle_deg(branch.centerline_angle - 90.0)
-    if heading_error > turn_threshold_deg:
-        return "left"
-    if heading_error < -turn_threshold_deg:
-        return "right"
-    return "straight"
-
-
-def choose_branch(
-    branches: List[RoadBranch],
-    *,
-    preference: str = "auto",
-    previous_branch_label: str | None = None,
-) -> tuple[RoadBranch | None, str]:
-    if not branches:
-        return None, "no_branch"
-
-    normalized_preference = str(preference or "auto").lower()
-    valid_preferences = {item.value for item in BranchPreference}
-    if normalized_preference not in valid_preferences:
-        normalized_preference = BranchPreference.AUTO.value
-
-    by_label: dict[str, List[RoadBranch]] = {}
-    for branch in branches:
-        by_label.setdefault(branch.label, []).append(branch)
-
-    if normalized_preference in {"left", "right", "straight"}:
-        labeled = by_label.get(normalized_preference, [])
-        if labeled:
-            return max(labeled, key=_branch_quality), f"preferred_{normalized_preference}"
-        normalized_preference = BranchPreference.AUTO.value
-
-    if previous_branch_label:
-        previous = by_label.get(previous_branch_label, [])
-        if previous:
-            return max(previous, key=lambda branch: _branch_quality(branch) + 0.08), (
-                f"hold_{previous_branch_label}"
-            )
-
-    straight = by_label.get("straight", [])
-    if straight:
-        return min(straight, key=lambda branch: (abs(branch.pixel_error), -branch.confidence)), "auto_straight"
-
-    return max(branches, key=_branch_quality), "auto_best"
-
-
-def _branch_quality(branch: RoadBranch) -> float:
-    error_penalty = abs(float(branch.pixel_error)) / 320.0
-    return float(branch.confidence) - 0.25 * error_penalty
 
 
 def _resolve_model_path() -> tuple[str, bool]:
@@ -1180,15 +1119,12 @@ def _find_intervals(
 def _extract_centerline_and_intervals(clean_mask: np.ndarray) -> Tuple[List[CenterPoint], RowIntervals]:
     h, w = clean_mask.shape[:2]
     points: List[CenterPoint] = []
-    all_row_intervals: RowIntervals = []
 
     last_cx = w / 2.0
-    last_width: float | None = None
     bottom_y = min(h - 1, int(h * CENTERLINE_SCAN_Y_MAX_RATIO))
 
     for y in range(bottom_y, h // 2, -1):
         intervals = _find_intervals(clean_mask[y, :], MIN_ROAD_PX_PER_ROW)
-        all_row_intervals.append((y, intervals))
 
         if not intervals:
             continue
@@ -1208,10 +1144,10 @@ def _extract_centerline_and_intervals(clean_mask: np.ndarray) -> Tuple[List[Cent
 
         points.append((float(cx), int(y), width))
         last_cx = cx
-        last_width = width
 
-    points = _smooth_centerline_through_junction(points, all_row_intervals, w)
-    return _trim_bottom_centerline_outliers(points, w), all_row_intervals
+    # Keep the historical tuple return shape while avoiding the row-interval
+    # accumulation that was only consumed by fork/intersection detection.
+    return _trim_bottom_centerline_outliers(points, w), []
 
 
 def _extract_fast_main_centerline(
@@ -1255,98 +1191,6 @@ def _extract_fast_main_centerline(
         last_cx = center_x
 
     return _trim_bottom_centerline_outliers(points, orig_w)
-
-
-def _smooth_centerline_through_junction(
-    points: List[CenterPoint],
-    all_row_intervals: RowIntervals,
-    w: int,
-) -> List[CenterPoint]:
-    if len(points) < MIN_FIT_PTS * 3:
-        return points
-
-    widths = np.array([p[2] for p in points], dtype=np.float32)
-    narrow_ref = float(np.percentile(widths, 25))
-    if narrow_ref <= 0.0:
-        return points
-
-    wide_threshold = max(w * WIDE_INTERVAL_RATIO, narrow_ref * FORK_WIDTH_GROWTH_RATIO)
-    intervals_by_y = {y: intervals for y, intervals in all_row_intervals}
-
-    junction_flags = []
-    for cx, y, width in points:
-        intervals = intervals_by_y.get(int(y), [])
-        is_wide = width >= wide_threshold
-        has_multiple_intervals = len(intervals) >= 2
-        junction_flags.append(is_wide or has_multiple_intervals)
-
-    blocks: List[Tuple[int, int]] = []
-    block_start: int | None = None
-    for idx, is_junction in enumerate(junction_flags):
-        if is_junction and block_start is None:
-            block_start = idx
-        elif not is_junction and block_start is not None:
-            if idx - block_start >= FORK_INTERVAL_ROWS_MIN:
-                blocks.append((block_start, idx - 1))
-            block_start = None
-    if block_start is not None and len(junction_flags) - block_start >= FORK_INTERVAL_ROWS_MIN:
-        blocks.append((block_start, len(junction_flags) - 1))
-
-    if not blocks:
-        return points
-
-    start, end = max(blocks, key=lambda item: item[1] - item[0])
-    jump_limit = max(25.0, w * 0.06)
-    center_lag_limit = max(25.0, w * 0.05)
-    while end + MIN_FIT_PTS + 1 < len(points):
-        prev_x = float(points[end][0])
-        next_x = float(points[end + 1][0])
-        next_y = int(points[end + 1][1])
-        intervals = intervals_by_y.get(next_y, [])
-        center_lag = 0.0
-        if len(intervals) == 1:
-            left, right = intervals[0]
-            interval_mid = (left + right) / 2.0
-            center_lag = abs(next_x - interval_mid)
-
-        if abs(next_x - prev_x) <= jump_limit and center_lag <= center_lag_limit:
-            break
-        end += 1
-
-    if end + MIN_FIT_PTS >= len(points):
-        return points
-
-    lower_anchor = points[start - 1] if start > 0 else points[start]
-    upper_candidates = points[end + 1 : min(len(points), end + 1 + 80)]
-    upper_pts = [p for p in upper_candidates if p[2] < wide_threshold]
-    if len(upper_pts) < MIN_FIT_PTS:
-        upper_pts = upper_candidates
-    if len(upper_pts) < MIN_FIT_PTS:
-        return points
-
-    try:
-        arr = np.array([(p[0], p[1]) for p in upper_pts], dtype=np.float32)
-        coeffs = np.polyfit(arr[:, 1], arr[:, 0], deg=1)
-        guide_a = float(coeffs[0])
-        guide_b = float(coeffs[1])
-    except Exception:
-        return points
-
-    lower_x = float(lower_anchor[0])
-    lower_y = float(lower_anchor[1])
-    upper_y = float(points[end + 1][1])
-    denom = max(1.0, lower_y - upper_y)
-
-    smoothed = list(points)
-    for idx in range(start, end + 1):
-        x, y, width = points[idx]
-        t = max(0.0, min(1.0, (lower_y - float(y)) / denom))
-        s = t * t * (3.0 - 2.0 * t)
-        guide_x = guide_a * float(y) + guide_b
-        new_x = (1.0 - s) * lower_x + s * guide_x
-        smoothed[idx] = (float(new_x), int(y), float(width))
-
-    return smoothed
 
 
 def _trim_bottom_centerline_outliers(
@@ -1408,13 +1252,7 @@ def _compute_path_width(points: List[CenterPoint], h: int) -> float:
     if not pts:
         return 0.0
 
-    widths = sorted(float(p[2]) for p in pts)
-    if len(widths) >= MIN_FIT_PTS * 2:
-        # Intersections create many extra-wide scan rows. Estimate the current
-        # usable path width from the narrower near-path rows instead.
-        narrow_count = max(MIN_FIT_PTS, len(widths) // 10)
-        widths = widths[:narrow_count]
-    return float(np.median(widths))
+    return float(np.median([p[2] for p in pts]))
 
 
 def _compute_centerline_angle(points: List[CenterPoint], h: int) -> float:
@@ -1444,39 +1282,6 @@ def _compute_centerline_angle(points: List[CenterPoint], h: int) -> float:
         return float(angle_deg)
     except Exception:
         return 90.0
-
-
-def _detect_road_state(
-    points: List[CenterPoint],
-    all_row_intervals: RowIntervals,
-    h: int,
-) -> Tuple[str, int, bool]:
-    if not points:
-        return "lost", 0, False
-
-    multi_interval_rows = sum(
-        1 for _, intervals in all_row_intervals if len(intervals) >= 2
-    )
-
-    bottom_pts = _bottom_points(points, h)
-    mid_pts = [
-        p
-        for p in points
-        if int(0.55 * h) <= p[1] <= int(0.75 * h)
-    ]
-
-    bottom_width = float(np.mean([p[2] for p in bottom_pts])) if bottom_pts else 0.0
-    mid_width = float(np.mean([p[2] for p in mid_pts])) if mid_pts else 0.0
-    width_growth = (
-        bottom_width > 0.0
-        and mid_width > bottom_width * FORK_WIDTH_GROWTH_RATIO
-    )
-
-    if multi_interval_rows >= FORK_INTERVAL_ROWS_MIN:
-        return "fork", multi_interval_rows, width_growth
-    if width_growth:
-        return "intersection", multi_interval_rows, width_growth
-    return "single", multi_interval_rows, width_growth
 
 
 def _select_current_instance(
@@ -1520,164 +1325,6 @@ def _select_current_instance(
         )
 
     return max(bottom_candidates, key=score_instance)
-
-
-def _detect_road_state_from_instances(
-    current: RoadInstance,
-    instances: List[RoadInstance],
-    w: int,
-    h: int,
-) -> str:
-    others = [inst for inst in instances if inst is not current]
-    if not others:
-        return "single"
-
-    current_angle = _compute_centerline_angle(current.centerline_points, h)
-    cur_error, _ = _compute_pixel_error(current.centerline_points, w, h)
-    min_area = w * h * MIN_AREA_RATIO * 0.3
-
-    branch_like_count = 0
-    for inst in others:
-        if len(inst.centerline_points) < MIN_FIT_PTS:
-            continue
-        if inst.area < min_area:
-            continue
-
-        angle = _compute_centerline_angle(inst.centerline_points, h)
-        angle_diff = abs(angle - current_angle)
-        angle_diff = min(angle_diff, 360.0 - angle_diff)
-
-        inst_error, _ = _compute_pixel_error(inst.centerline_points, w, h)
-        error_diff = abs(inst_error - cur_error)
-
-        if angle_diff > 20.0 or error_diff > w * 0.15:
-            branch_like_count += 1
-
-    if branch_like_count >= 2:
-        return "intersection"
-    if branch_like_count >= 1:
-        return "fork"
-    return "single"
-
-
-def _branch_from_points(
-    points: List[CenterPoint],
-    w: int,
-    h: int,
-    score: float,
-) -> RoadBranch:
-    pixel_error, _ = _compute_pixel_error(points, w, h)
-    angle = _compute_centerline_angle(points, h)
-    width = _compute_path_width(points, h)
-    return RoadBranch(
-        pixel_error=float(pixel_error),
-        centerline_angle=float(angle),
-        path_width_px=float(width),
-        score=float(score),
-        confidence=float(score),
-        points=[(float(p[0]), float(p[1])) for p in points],
-    )
-
-
-def _instance_to_branch(inst: RoadInstance, w: int, h: int) -> RoadBranch:
-    return _branch_from_points(inst.centerline_points, w, h, inst.score)
-
-
-def _build_branches_from_instances(
-    current: RoadInstance,
-    instances: List[RoadInstance],
-    w: int,
-    h: int,
-    confidence: float,
-) -> List[RoadBranch]:
-    _ = confidence
-    branches: List[RoadBranch] = [_instance_to_branch(current, w, h)]
-    min_area = w * h * MIN_AREA_RATIO * 0.3
-
-    for inst in instances:
-        if inst is current:
-            continue
-        if len(inst.centerline_points) < MIN_FIT_PTS:
-            continue
-        if inst.area < min_area:
-            continue
-
-        branch = _instance_to_branch(inst, w, h)
-        duplicated = False
-        for existing in branches:
-            angle_diff = abs(branch.centerline_angle - existing.centerline_angle)
-            angle_diff = min(angle_diff, 360.0 - angle_diff)
-            error_diff = abs(branch.pixel_error - existing.pixel_error)
-            if angle_diff < 12.0 and error_diff < w * 0.08:
-                duplicated = True
-                break
-
-        if not duplicated:
-            branches.append(branch)
-
-    if len(branches) > 1:
-        current_branch = branches[0]
-        rest = sorted(branches[1:], key=lambda branch: branch.pixel_error)
-        branches = [current_branch] + rest
-
-    return branches
-
-
-def _build_branches(
-    points: List[CenterPoint],
-    all_row_intervals: RowIntervals,
-    w: int,
-    h: int,
-    confidence: float,
-    road_state: str,
-) -> List[RoadBranch]:
-    main_branch = _branch_from_points(points, w, h, confidence)
-    branches = [main_branch]
-
-    if road_state not in {"fork", "intersection"}:
-        return branches
-
-    grouped: dict[str, List[CenterPoint]] = {"left": [], "center": [], "right": []}
-    for y, intervals in all_row_intervals:
-        if len(intervals) < 2:
-            continue
-
-        for left, right in intervals:
-            cx = (left + right) / 2.0
-            width = float(right - left + 1)
-            if cx < w * 0.40:
-                grouped["left"].append((float(cx), int(y), width))
-            elif cx > w * 0.60:
-                grouped["right"].append((float(cx), int(y), width))
-            else:
-                grouped["center"].append((float(cx), int(y), width))
-
-    extra_branches: List[RoadBranch] = []
-    for bucket_points in grouped.values():
-        if len(bucket_points) < MIN_FIT_PTS:
-            continue
-        extra_branches.append(_branch_from_points(bucket_points, w, h, confidence))
-
-    extra_branches.sort(key=lambda branch: branch.pixel_error)
-    for branch in extra_branches:
-        is_duplicate = any(
-            abs(branch.pixel_error - existing.pixel_error) < MIN_ROAD_PX_PER_ROW
-            and abs(branch.centerline_angle - existing.centerline_angle) < 5.0
-            for existing in branches
-        )
-        if not is_duplicate:
-            branches.append(branch)
-
-    return branches
-
-
-def _label_and_number_branches(branches: List[RoadBranch]) -> List[RoadBranch]:
-    for idx, branch in enumerate(branches):
-        branch.branch_id = idx
-        branch.label = classify_branch_label(branch)
-        if branch.confidence <= 0.0 and branch.score > 0.0:
-            branch.confidence = float(branch.score)
-    return branches
 
 
 def _normalize_frame(frame: np.ndarray) -> np.ndarray:
@@ -1731,53 +1378,7 @@ def _save_debug_image(
             1,
         )
 
-        if result.branches:
-            branch_colors = [
-                (0, 0, 255),
-                (0, 255, 255),
-                (255, 0, 255),
-                (0, 165, 255),
-                (255, 255, 255),
-            ]
-            for idx, branch in enumerate(result.branches):
-                color = branch_colors[idx % len(branch_colors)]
-                is_selected = branch is result.selected_branch or (
-                    result.selected_branch is not None
-                    and branch.branch_id == result.selected_branch.branch_id
-                )
-                thickness = 5 if is_selected else (3 if idx == 0 else 2)
-                _draw_polyline(debug_img, branch.points, color, thickness)
-                if branch.points:
-                    label_idx = min(len(branch.points) - 1, max(0, len(branch.points) // 2))
-                    lx, ly = branch.points[label_idx]
-                    label = (
-                        f"B{branch.branch_id} {branch.label} "
-                        f"err={branch.pixel_error:.0f} "
-                        f"angle={branch.centerline_angle:.0f} "
-                        f"conf={branch.confidence:.2f}"
-                    )
-                    if is_selected:
-                        label = f"SELECTED {label}"
-                    cv2.putText(
-                        debug_img,
-                        label,
-                        (int(round(lx)) + 6, int(round(ly)) - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.45,
-                        (0, 0, 0),
-                        3,
-                        cv2.LINE_AA,
-                    )
-                    cv2.putText(
-                        debug_img,
-                        label,
-                        (int(round(lx)) + 6, int(round(ly)) - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.45,
-                        color,
-                        1,
-                        cv2.LINE_AA,
-                    )
+        _draw_polyline(debug_img, result.centerline_points, (0, 0, 255), 4)
 
         cx_bottom = int(round(w / 2.0 + result.pixel_error))
         cx_bottom = max(0, min(w - 1, cx_bottom))
@@ -1801,7 +1402,7 @@ def _save_debug_image(
             f"state={result.road_state} found={result.is_road_found}",
             f"error={result.pixel_error:.1f}px corrected={result.corrected_pixel_error:.1f}px",
             f"angle={result.centerline_angle:.1f}deg width={result.path_width_px:.1f}px",
-            f"conf={result.confidence:.2f} branches={len(result.branches)}",
+            f"conf={result.confidence:.2f} mode=single-road",
         ]
         if result.debug_msg:
             text_lines.append(result.debug_msg[:72])
@@ -1883,16 +1484,6 @@ def _build_fast_main_result(
     pixel_error, _ = _compute_pixel_error(points, orig_w, orig_h)
     centerline_angle = _compute_centerline_angle(points, orig_h)
     path_width_px = _compute_path_width(points, orig_h)
-    branch = RoadBranch(
-        pixel_error=float(pixel_error),
-        centerline_angle=float(centerline_angle),
-        path_width_px=float(path_width_px),
-        score=float(confidence),
-        confidence=float(confidence),
-        branch_id=0,
-        points=[(float(point[0]), float(point[1])) for point in points],
-    )
-    branch.label = classify_branch_label(branch)
 
     config = offset_comp_config or CameraOffsetCompensationConfig(
         enabled=False,
@@ -1913,12 +1504,14 @@ def _build_fast_main_result(
         path_width_px=float(path_width_px),
         confidence=float(confidence),
         corrected_pixel_error=float(corrected_error),
-        branches=[branch],
-        selected_branch=branch,
-        branch_decision="fast_main",
+        centerline_points=[(float(point[0]), float(point[1])) for point in points],
+        branches=[],
+        selected_branch=None,
+        branch_decision="disabled",
         debug_msg=(
             f"postprocess={POSTPROCESS_FAST_MAIN}, points={len(points)}, "
             f"work_mask={FAST_MASK_WIDTH}x{FAST_MASK_HEIGHT}, "
+            "branch_detection=disabled, "
             f"offset_corr_px={correction_px:.1f}, corrected_error={corrected_error:.1f}"
         ),
         debug_mask=debug_mask,
@@ -1955,7 +1548,13 @@ def get_road_perception(
     previous_branch_label: str | None = None,
     wb_config: CameraWhiteBalanceConfig | None = None,
 ) -> RoadPerceptionResult:
-    """Run one-frame visual road perception on an OpenCV BGR frame."""
+    """Run one-frame, single-road perception on an OpenCV BGR frame.
+
+    ``branch_preference`` and ``previous_branch_label`` are retained only so
+    older callers do not fail; the single-road pipeline intentionally ignores
+    them.
+    """
+    _ = branch_preference, previous_branch_label
     frame_error = _validate_frame(frame)
     if frame_error is not None:
         return _lost_result(frame_error)
@@ -2036,14 +1635,8 @@ def get_road_perception(
             if inst_clean.size == 0 or np.count_nonzero(inst_clean) == 0:
                 continue
 
-            points, row_intervals = _extract_centerline_and_intervals(inst_clean)
-            if len(points) < MIN_FIT_PTS:
-                continue
-
             inst.mask = inst_clean
             _refresh_instance_geometry(inst, orig_w, orig_h)
-            inst.centerline_points = points
-            inst.row_intervals = row_intervals
             valid_instances.append(inst)
 
         if not valid_instances:
@@ -2061,78 +1654,31 @@ def get_road_perception(
                 _save_debug_image(frame_bgr, merged_mask, result, debug_save_path)
             return result
 
+        points, _ = _extract_centerline_and_intervals(current.mask)
+        if len(points) < MIN_FIT_PTS:
+            result = _lost_result("selected road has too few centerline points")
+            result.debug_mask = merged_mask
+            if debug_save_path:
+                _save_debug_image(frame_bgr, merged_mask, result, debug_save_path)
+            return result
+        current.centerline_points = points
+
         pixel_error, _ = _compute_pixel_error(
-            current.centerline_points,
+            points,
             orig_w,
             orig_h,
         )
-        centerline_angle = _compute_centerline_angle(current.centerline_points, orig_h)
-        path_width_px = _compute_path_width(current.centerline_points, orig_h)
-
-        road_state = _detect_road_state_from_instances(
-            current,
-            valid_instances,
-            orig_w,
-            orig_h,
-        )
-        fallback_msg = ""
-        if len(valid_instances) == 1:
-            all_row_intervals = current.row_intervals
-            fallback_state, multi_rows, width_growth = _detect_road_state(
-                current.centerline_points,
-                all_row_intervals,
-                orig_h,
-            )
-            fallback_msg = (
-                f", fallback={fallback_state}, "
-                f"multi_interval_rows={multi_rows}, "
-                f"width_growth={bool(width_growth)}"
-            )
-            if fallback_state in {"fork", "intersection"}:
-                road_state = fallback_state
-
-        branches = _build_branches_from_instances(
-            current,
-            valid_instances,
-            orig_w,
-            orig_h,
-            confidence,
-        )
-        if len(branches) <= 1 and road_state in {"fork", "intersection"}:
-            all_row_intervals = current.row_intervals
-            branches = _build_branches(
-                current.centerline_points,
-                all_row_intervals,
-                orig_w,
-                orig_h,
-                confidence,
-                road_state,
-            )
-        branches = _label_and_number_branches(branches)
-        selected_branch, branch_decision = choose_branch(
-            branches,
-            preference=branch_preference,
-            previous_branch_label=previous_branch_label,
-        )
+        centerline_angle = _compute_centerline_angle(points, orig_h)
+        path_width_px = _compute_path_width(points, orig_h)
 
         cfg = offset_comp_config or CameraOffsetCompensationConfig(
             enabled=False,
             cam_forward_offset_m=cam_offset_m,
         )
         _ = flight_height_m
-        control_pixel_error = (
-            float(selected_branch.pixel_error)
-            if selected_branch is not None
-            else float(pixel_error)
-        )
-        control_angle = (
-            float(selected_branch.centerline_angle)
-            if selected_branch is not None
-            else float(centerline_angle)
-        )
         corrected_pixel_error, correction_px = apply_camera_offset_compensation(
-            pixel_error=control_pixel_error,
-            centerline_angle_deg=control_angle,
+            pixel_error=float(pixel_error),
+            centerline_angle_deg=float(centerline_angle),
             image_width=orig_w,
             config=cfg,
             yaw_rate_deg_s=yaw_rate_deg_s,
@@ -2140,23 +1686,21 @@ def get_road_perception(
 
         result = RoadPerceptionResult(
             is_road_found=True,
-            road_state=road_state,
+            road_state="single",
             pixel_error=float(pixel_error),
             centerline_angle=float(centerline_angle),
             path_width_px=float(path_width_px),
             confidence=float(confidence),
             corrected_pixel_error=float(corrected_pixel_error),
-            branches=branches,
-            selected_branch=selected_branch,
-            branch_decision=branch_decision,
+            centerline_points=[(float(p[0]), float(p[1])) for p in points],
+            branches=[],
+            selected_branch=None,
+            branch_decision="disabled",
             debug_msg=(
                 f"instances={len(valid_instances)}, "
-                f"branches={len(branches)}, "
-                f"selected={getattr(selected_branch, 'label', 'none')}, "
-                f"decision={branch_decision}, "
+                "branch_detection=disabled, "
                 f"offset_corr_px={correction_px:.1f}, "
                 f"corrected_error={corrected_pixel_error:.1f}"
-                f"{fallback_msg}"
             ),
             debug_mask=merged_mask,
         )
@@ -2186,7 +1730,6 @@ def _parse_cli_args():
         default=POSTPROCESS_FAST_MAIN,
     )
     parser.add_argument("--debug-out", default=None, help="Optional debug image output path")
-    parser.add_argument("--branch-preference", choices=["auto", "straight", "left", "right"], default="auto")
     parser.add_argument("--enable-offset-comp", action="store_true")
     parser.add_argument("--cam-forward-offset-m", type=float, default=-0.0787)
     parser.add_argument("--meters-per-pixel-x", type=float, default=None)
@@ -2235,48 +1778,29 @@ def _main_cli() -> int:
         yaw_rate_deg_s=args.yaw_rate_deg_s,
         debug_save_path=args.debug_out,
         offset_comp_config=offset_cfg,
-        branch_preference=args.branch_preference,
     )
-    selected = result.selected_branch
-    selected_label = selected.label if selected is not None else "none"
     print(
         "road_state={} found={} conf={:.3f} error={:.1f} corrected={:.1f} "
-        "angle={:.1f} branches={} selected={} decision={} debug={}".format(
+        "angle={:.1f} debug={}".format(
             result.road_state,
             result.is_road_found,
             result.confidence,
             result.pixel_error,
             result.corrected_pixel_error,
             result.centerline_angle,
-            len(result.branches),
-            selected_label,
-            result.branch_decision,
             result.debug_msg,
         )
     )
-    for branch in result.branches:
-        print(
-            "branch id={} label={} err={:.1f} angle={:.1f} conf={:.3f}".format(
-                branch.branch_id,
-                branch.label,
-                branch.pixel_error,
-                branch.centerline_angle,
-                branch.confidence,
-            )
-        )
     return 0
 
 
 __all__ = [
-    "BranchPreference",
     "CameraGeometry",
     "CameraOffsetCompensationConfig",
     "RoadBranch",
     "RoadInstance",
     "RoadPerceptionResult",
     "apply_camera_offset_compensation",
-    "choose_branch",
-    "classify_branch_label",
     "compute_meters_per_pixel",
     "configure_model",
     "get_model_io_info",

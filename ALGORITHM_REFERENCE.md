@@ -18,7 +18,7 @@
 7. [势场法路径规划](#7-势场法路径规划)
 8. [五次多项式轨迹生成](#8-五次多项式轨迹生成)
 9. [PID 闭环导航与传感器融合](#9-pid-闭环导航与传感器融合)
-10. [道路分叉检测与分支选择](#10-道路分叉检测与分支选择)
+10. [单主路后处理](#10-单主路后处理)
 11. [摄像头几何标定与偏移补偿](#11-摄像头几何标定与偏移补偿)
 12. [D500 雷达数据包解析](#12-d500-雷达数据包解析)
 13. [异步数据记录系统](#13-异步数据记录系统)
@@ -193,9 +193,9 @@ function update(obstacles_body_cm):
 
 给定 640×480 BGR 图像帧，默认使用 `new_road_seg_v3_final_fp32.nb`
 在 VIP9000 NPU 上进行二类语义分割，从道路 mask 中提取中线点序列，输出
-像素偏差 $e_{\text{px}}$、中线角度 $\alpha$ 及道路状态。默认 `fast-main`
-只输出当前主路和 `single` 状态；`--road-postprocess-mode full` 恢复 fork /
-intersection 候选。原 YOLO11n-seg 128×128 ONNX 实例分割实现保留为 CPU 回退。
+像素偏差 $e_{\text{px}}$、中线角度 $\alpha$ 及道路状态。系统只输出当前主路和
+`single` 状态；`fast-main` 使用稀疏低分辨率 mask，`full` 保留全分辨率主路几何。
+原 YOLO11n-seg 128×128 ONNX 实例分割实现保留为 CPU 回退，但同样不做分叉处理。
 
 ### 2.2 数学模型
 
@@ -208,13 +208,13 @@ intersection 候选。原 YOLO11n-seg 128×128 ONNX 实例分割实现保留为 
    192×144，使用 3×3 单次闭运算和连通域保留底部主路
 5. **稀疏中线**：仅扫描 mask 下半部分，垂直步长为 2；中线点、宽度和误差按
    原图/工作 mask 比例恢复到 640×480 像素坐标
-6. **单主路输出**：误差、角度和宽度只拟合一次，输出一个 `selected_branch`；
-   不执行分叉检测、候选分支构造和第二次 mask 清理
+6. **单主路输出**：误差、角度和宽度只拟合一次，直接输出 `centerline_points`；
+   `branches` 保持为空，不执行分叉检测、候选分支构造和第二次 mask 清理
 
 实现时必须将 `transpose` 后的 NCHW 输入转为 C-contiguous 数组；`stai_mpu`
 按连续内存读取应用缓冲，不处理 NumPy strides。道路 mask 的逐行区间采用 NumPy
-向量化提取。`full` 模式仍在 `RoadInstance` 中缓存中线/区间结果供路口判断和
-分支构造复用；CPU YOLO 路径不受 `fast-main` 影响。
+向量化提取。`full` 模式仅提高 mask 几何分辨率，不恢复路口判断或分支构造；
+CPU YOLO 路径也使用相同的单主路输出契约。
 
 #### CPU 回退 YOLO 管线
 
@@ -261,15 +261,10 @@ $$\begin{bmatrix} y_1 & 1 \\ \vdots & \vdots \\ y_n & 1 \end{bmatrix} \begin{bma
 
 $$e_{\text{px}} = c_x^{\text{bottom}} - \frac{W}{2}$$
 
-### 2.3 假连接穿越平滑
+### 2.3 单主路约束
 
-当检测到分叉/交叉路口时，对分叉区间内的中线点使用 S-curve（smoothstep）插值：
-
-$$s(t) = t^2(3 - 2t), \quad t \in [0, 1]$$
-
-$$x_{\text{smoothed}} = (1 - s) \cdot x_{\text{lower}} + s \cdot x_{\text{guide}}$$
-
-其中 $x_{\text{guide}}$ 由分叉区间上方的中线点线性外推得到。
+实验道路无分叉，中心线扫描逐行选择与上一行中心最近的有效区间。该约束避免保存
+全量行区间、路口宽度增长判断、S-curve 穿越平滑以及候选分支拟合。
 
 ### 2.4 推荐参考文献
 
@@ -638,51 +633,21 @@ $$\|\mathbf{p}_{\text{current}} - \mathbf{p}_{\text{target}}\|^2 \leq \epsilon_{
 
 ---
 
-## 10. 道路分叉检测与分支选择
+## 10. 单主路后处理
 
-**实现位置**：[road_perception.py](road_perception.py) 函数 `_detect_road_state()`, `choose_branch()`
+**实现位置**：[road_perception.py](road_perception.py) 函数
+`_extract_centerline_and_intervals()`、`_extract_fast_main_centerline()`。
 
-### 10.1 分叉/交叉口检测
+实验道路没有分叉，因此感知结果固定为 `single`：
 
-**多区间检测**：若连续 $\geq 8$ 行每行有 $\geq 2$ 个连通区间 → 判定为 fork。
+1. 清理道路 mask，并从候选实例中选择与画面底部中心最相关的主路；
+2. 仅对选中的主路提取一次中心线；
+3. 直接计算像素误差、中线角度和道路宽度；
+4. `branches=[]`、`selected_branch=None`、`branch_decision="disabled"`；
+5. `RoadFollower` 直接使用 `corrected_pixel_error` 和 `centerline_angle`。
 
-**宽度暴增检测**：
-
-$$\frac{\text{width}_{\text{mid}}}{\text{width}_{\text{bottom}}} > 1.6 \quad\Rightarrow\quad \text{intersection}$$
-
-综合两种检测，支持多实例（多 mask）和单实例两种分析路径。
-
-### 10.2 分支构建
-
-当检测到 fork/intersection，在每行多区间的基础上，按中线的像素横坐标分为三组：
-
-- `left`: $c_x < 0.40W$
-- `center`: $0.40W \leq c_x \leq 0.60W$
-- `right`: $c_x > 0.60W$
-
-每组独立拟合中线 → 去重（角度差 < 12° 且误差差 < 8% 帧宽 → 视为相同分支） → 标签分类。
-
-### 10.3 分支分类
-
-$$h = \text{normalize}(\alpha - 90°), \quad \text{label} = \begin{cases}
-\text{left}, & h > 20° \\
-\text{right}, & h < -20° \\
-\text{straight}, & \text{otherwise}
-\end{cases}$$
-
-### 10.4 分支选择策略
-
-1. **偏好优先**：若用户指定 left/right/straight → 选该标签中 quality 最高的
-2. **保持优先**：若上次选中的标签仍存在 → 选上次标签 + 0.08 加成
-3. **直行优先**：选 pixel_error 最小的 straight 分支
-4. **自动最优**：选综合 quality 最高的
-
-Quality = confidence − 0.25 × |pixel_error| / 320
-
-### 10.5 推荐参考文献
-
-- **Road junction detection**: Aly, M. (2008). Real Time Detection of Lane Markers in Urban Streets. *IEEE Intelligent Vehicles Symposium*.
-- **Branch classification**: Kong, H. et al. (2010). General Road Detection from a Single Image. *IEEE Trans. ITS*, 11(3), 606–616.
+该流程删除了逐帧路口检测、分支构建、去重、分类、历史分支保持和二次 mask 扫描。
+兼容字段仍保留在结果结构中，避免旧日志或外部读取器因字段缺失而崩溃。
 
 ---
 

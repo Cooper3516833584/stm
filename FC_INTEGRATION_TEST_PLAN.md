@@ -181,7 +181,7 @@ PYTHONPATH=. python road_perception.py \
 通过标准：
 
 - 单路中心线稳定。
-- 岔路 `branches` 数量合理。
+- 单主路结果满足 `branches=[]`、`selected_branch=None`，且 `centerline_points` 数量合理。
 - `branch_preference=left/right/straight` 能改变 `selected_branch`。
 - 无模型时返回 `lost`，不导致主程序崩溃。
 

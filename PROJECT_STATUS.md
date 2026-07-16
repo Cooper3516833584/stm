@@ -7,13 +7,13 @@
 ## 0. 2026-07-17 新道路语义分割 NPU 模型接入
 
 - 默认后端：`--road-model-backend npu`
-- 默认后处理：`--road-postprocess-mode fast-main`；只跟随当前主路，`full` 可恢复分叉/路口候选
+- 默认后处理：`--road-postprocess-mode fast-main`；始终只跟随当前主路，`full` 仅保留全分辨率几何
 - 实测道路全宽固定为 50cm：巡线前向雷达走廊、道路半宽和侵入判断默认均为 ±25cm；
   25cm 机体/边缘余量下不规划道路内横向绕行，遇中心障碍物使用 no-gap 减速逻辑
 - 默认 NPU 模型：`FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb`
 - 输入契约：RGB float32 `[0,1]`，NCHW `[1,3,256,256]`
 - 输出契约：`logits [1,2,256,256]`，类别 0 为背景、类别 1 为道路
-- CPU 回退：`--road-model-backend cpu`，继续使用 `road_yolo11n_seg_128.onnx` 及原 YOLO 实例分割后处理
+- CPU 回退：`--road-model-backend cpu`，继续使用 `road_yolo11n_seg_128.onnx`，后处理同样为单主路
 - 板端验收：冷启动 65.09ms，100 轮稳态平均 25.27ms，已记录 `/dev/galcore` 成功 ioctl
 - 生产代码板测：`NBGraphSession` 3 次平均 37.62ms；静态道路图 5/5 找到道路；
   生产 Python 路径 `strace` 记录 105 次成功 `/dev/galcore` ioctl

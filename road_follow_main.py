@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
         "--road-postprocess-mode",
         choices=["fast-main", "full"],
         default="fast-main",
-        help="NPU semantic postprocess: fast main-road-only path (default) or full fork detection",
+        help="Road postprocess: fast sparse main road (default) or full-resolution main road",
     )
     parser.add_argument(
         "--model",
@@ -67,9 +67,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--enable-flight", action="store_true")
     parser.add_argument("--loop-hz", type=float, default=10.0)
-    parser.add_argument("--branch", choices=["auto", "straight", "left", "right"], default="auto")
-    parser.add_argument("--branch-preference", choices=["auto", "straight", "left", "right"], default=None)
-    parser.add_argument("--branch-policy", choices=["center", "left", "right"], default=None, help="Deprecated alias")
     parser.add_argument("--wb-enable", action="store_true",
                         help="Enable software white balance correction for camera color cast")
     parser.add_argument("--wb-r", type=float, default=1.00,
@@ -221,7 +218,6 @@ def main() -> None:
             image_width=args.camera_width,
             max_vx_cm_s=args.max_vx_cm_s,
             max_yaw_rate_deg_s=args.max_yaw_rate_deg_s,
-            branch_preference=args.branch,
         )
     )
     bypass_planner = RoadObstacleBypassPlanner(
@@ -291,7 +287,6 @@ def main() -> None:
             inference_backend=args.road_model_backend,
             postprocess_mode=args.road_postprocess_mode,
             flight_height_m=args.flight_height_m,
-            branch_preference=args.branch,
             wb_enable=bool(args.wb_enable),
             wb_r=args.wb_r,
             wb_g=args.wb_g,
@@ -300,11 +295,10 @@ def main() -> None:
         pipeline.start()
 
         logger.info(
-            "[ROAD] started dry_run={} no_radar={} branch={} camera={} "
+            "[ROAD] started dry_run={} no_radar={} mode=single-road camera={} "
             "backend={} model={} postprocess={}".format(
                 actual_dry_run,
                 args.no_radar,
-                args.branch,
                 args.camera_index,
                 args.road_model_backend,
                 selected_model,
@@ -456,12 +450,6 @@ def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.debug_dir = args.debug_image_dir
     if args.debug_image_every is not None:
         args.debug_every_n = args.debug_image_every
-    if args.branch_policy == "center":
-        args.branch = "straight"
-    elif args.branch_policy in {"left", "right"}:
-        args.branch = args.branch_policy
-    elif args.branch_preference:
-        args.branch = args.branch_preference
     if args.camera is not None:
         try:
             args.camera_index = int(args.camera)
@@ -512,8 +500,6 @@ def _log_road_summary(
     fc,
     bypass_planner=None,
 ) -> None:
-    selected = getattr(perception, "selected_branch", None)
-    branch = getattr(selected, "label", "none")
     state = getattr(perception, "road_state", "lost")
     err = float(getattr(perception, "pixel_error", 0.0)) if perception is not None else 0.0
     corr = float(getattr(perception, "corrected_pixel_error", 0.0)) if perception is not None else 0.0
@@ -527,11 +513,10 @@ def _log_road_summary(
     )
     bypass_y = getattr(bypass_planner, "last_target_y_cm", None) if bypass_planner is not None else None
     logger.info(
-        "[ROAD] state={} branch={} err={:.0f} corr={:.0f} angle={:.0f} conf={:.2f} "
+        "[ROAD] state={} mode=single-road err={:.0f} corr={:.0f} angle={:.0f} conf={:.2f} "
         "desired=(vx={} yaw={}) planned=(vx={} yaw={}) safe=(vx={} yaw={}) "
         "bypass={} bypass_y={} safety={} sent={} radar_fresh={} fc_mode={}".format(
             state,
-            branch if branch != "none" else args.branch,
             err,
             corr,
             angle,
@@ -553,12 +538,10 @@ def _log_road_summary(
 
 
 def _road_record_extra(perception, camera_ok: bool, planned=None, bypass_planner=None) -> dict[str, object]:
-    selected = getattr(perception, "selected_branch", None)
-    branch = getattr(selected, "label", "none")
     extra = {
         "camera_ok": bool(camera_ok),
         "road_state": getattr(perception, "road_state", "lost") if perception is not None else "lost",
-        "branch": branch,
+        "branch": "disabled",
         "pixel_error": _float_or_none(getattr(perception, "pixel_error", None)),
         "corrected_pixel_error": _float_or_none(getattr(perception, "corrected_pixel_error", None)),
         "centerline_angle": _float_or_none(getattr(perception, "centerline_angle", None)),

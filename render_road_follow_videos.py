@@ -55,10 +55,6 @@ def make_perception(
             bottom_cx=0.0,
         )
         road._refresh_instance_geometry(instance, w, h)
-        points, _ = road._extract_centerline_and_intervals(mask)
-        if len(points) < road.MIN_FIT_PTS:
-            continue
-        instance.centerline_points = points
         instances.append(instance)
         merged_mask = cv2.bitwise_or(merged_mask, mask)
 
@@ -69,41 +65,27 @@ def make_perception(
     if current is None:
         return road._lost_result("no current road instance selected"), merged_mask
 
-    pixel_error, _ = road._compute_pixel_error(current.centerline_points, w, h)
-    angle = road._compute_centerline_angle(current.centerline_points, h)
-    path_width = road._compute_path_width(current.centerline_points, h)
-    state = road._detect_road_state_from_instances(current, instances, w, h)
-    all_points, row_intervals = road._extract_centerline_and_intervals(current.mask)
-    fallback_state, _, _ = road._detect_road_state(all_points, row_intervals, h)
-    if len(instances) == 1 and fallback_state in {"fork", "intersection"}:
-        state = fallback_state
-
-    branches = road._build_branches_from_instances(
-        current, instances, w, h, float(np.mean(confidences))
-    )
-    if len(branches) <= 1 and state in {"fork", "intersection"}:
-        branches = road._build_branches(
-            current.centerline_points, row_intervals, w, h, float(np.mean(confidences)), state
-        )
-    branches = road._label_and_number_branches(branches)
-    selected, decision = road.choose_branch(branches, preference="auto")
-    if selected is not None:
-        pixel_error = selected.pixel_error
-        angle = selected.centerline_angle
-        path_width = selected.path_width_px
+    points, _ = road._extract_centerline_and_intervals(current.mask)
+    if len(points) < road.MIN_FIT_PTS:
+        return road._lost_result("selected road has too few centerline points"), merged_mask
+    current.centerline_points = points
+    pixel_error, _ = road._compute_pixel_error(points, w, h)
+    angle = road._compute_centerline_angle(points, h)
+    path_width = road._compute_path_width(points, h)
 
     return road.RoadPerceptionResult(
         is_road_found=True,
-        road_state=state,
+        road_state="single",
         pixel_error=float(pixel_error),
         centerline_angle=float(angle),
         path_width_px=float(path_width),
         confidence=float(np.mean(confidences)),
         corrected_pixel_error=float(pixel_error),
-        branches=branches,
-        selected_branch=selected,
-        branch_decision=decision,
-        debug_msg=f"PT masks={len(instances)} selected={getattr(selected, 'label', 'none')}",
+        centerline_points=[(float(p[0]), float(p[1])) for p in points],
+        branches=[],
+        selected_branch=None,
+        branch_decision="disabled",
+        debug_msg=f"PT masks={len(instances)} branch_detection=disabled",
     ), merged_mask
 
 
@@ -117,17 +99,7 @@ def draw_debug(frame: np.ndarray, mask: np.ndarray | None, result: road.RoadPerc
         image = cv2.addWeighted(image, 1.0, overlay, 0.35, 0.0)
     cv2.line(image, (w // 2, 0), (w // 2, h - 1), (0, 255, 0), 1)
 
-    colors = [(0, 0, 255), (0, 255, 255), (255, 0, 255), (0, 165, 255)]
-    for index, branch in enumerate(result.branches):
-        color = colors[index % len(colors)]
-        selected = branch is result.selected_branch or (
-            result.selected_branch is not None and branch.branch_id == result.selected_branch.branch_id
-        )
-        road._draw_polyline(image, branch.points, color, 5 if selected else 2)
-        if branch.points:
-            x, y = branch.points[len(branch.points) // 2]
-            label = f"{'SELECTED ' if selected else ''}B{branch.branch_id} {branch.label}"
-            cv2.putText(image, label, (int(x) + 6, int(y) - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+    road._draw_polyline(image, result.centerline_points, (0, 0, 255), 4)
 
     base_x = max(0, min(w - 1, int(round(w / 2 + result.pixel_error))))
     base_y = h - 12
@@ -140,7 +112,7 @@ def draw_debug(frame: np.ndarray, mask: np.ndarray | None, result: road.RoadPerc
     info = [
         f"state={result.road_state} found={result.is_road_found}",
         f"error={result.pixel_error:.1f}px angle={result.centerline_angle:.1f}deg",
-        f"conf={result.confidence:.2f} branches={len(result.branches)}",
+        f"conf={result.confidence:.2f} mode=single-road",
         result.debug_msg[:72],
     ]
     for index, text in enumerate(info):
@@ -163,7 +135,6 @@ def render_video(model: YOLO, source: Path, destination: Path) -> None:
         raise RuntimeError(f"Cannot create {destination}")
 
     started = time.perf_counter()
-    previous_label: str | None = None
     try:
         for frame_number in range(count):
             ok, frame = capture.read()
@@ -174,8 +145,6 @@ def render_video(model: YOLO, source: Path, destination: Path) -> None:
             confidences = prediction.boxes.conf.detach().cpu().numpy() if prediction.boxes is not None else np.empty(0)
             boxes = prediction.boxes.xyxy.detach().cpu().numpy() if prediction.boxes is not None else np.empty((0, 4))
             perception, merged_mask = make_perception(frame, masks, confidences, boxes)
-            if perception.selected_branch is not None:
-                previous_label = perception.selected_branch.label
             writer.write(draw_debug(frame, merged_mask, perception))
             if (frame_number + 1) % 60 == 0 or frame_number + 1 == count:
                 elapsed = max(time.perf_counter() - started, 1e-6)

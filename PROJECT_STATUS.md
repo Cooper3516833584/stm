@@ -8,6 +8,8 @@
 
 - 默认后端：`--road-model-backend npu`
 - 默认后处理：`--road-postprocess-mode fast-main`；只跟随当前主路，`full` 可恢复分叉/路口候选
+- 实测道路全宽固定为 50cm：巡线前向雷达走廊、道路半宽和侵入判断默认均为 ±25cm；
+  25cm 机体/边缘余量下不规划道路内横向绕行，遇中心障碍物使用 no-gap 减速逻辑
 - 默认 NPU 模型：`FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb`
 - 输入契约：RGB float32 `[0,1]`，NCHW `[1,3,256,256]`
 - 输出契约：`logits [1,2,256,256]`，类别 0 为背景、类别 1 为道路

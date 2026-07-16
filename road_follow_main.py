@@ -19,6 +19,10 @@ from loguru import logger
 from perception_pipeline import PerceptionPipeline
 
 
+ROAD_WIDTH_CM = 50.0
+ROAD_HALF_WIDTH_CM = ROAD_WIDTH_CM / 2.0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Road-following dry-run / flight entry")
     parser.add_argument("--camera-index", type=int, default=7,
@@ -91,16 +95,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-distance-cm", type=float, default=300.0)
     parser.add_argument("--body-x-half-cm", type=float, default=25.0)
     parser.add_argument("--body-y-half-cm", type=float, default=25.0)
-    parser.add_argument("--corridor-half-width-cm", type=float, default=50.0)
+    parser.add_argument(
+        "--corridor-half-width-cm",
+        type=float,
+        default=ROAD_HALF_WIDTH_CM,
+        help="Radar forward corridor half-width (default: 25cm for a 50cm road)",
+    )
     parser.add_argument("--max-vx-cm-s", type=float, default=25.0)
     parser.add_argument("--max-yaw-rate-deg-s", type=float, default=25.0)
     parser.add_argument("--road-bypass-enable", action="store_true",
                         help="Enable radar-assisted in-road bypass for branches/vines intruding into the road center")
-    parser.add_argument("--road-half-width-cm", type=float, default=120.0)
+    parser.add_argument(
+        "--road-half-width-cm",
+        type=float,
+        default=ROAD_HALF_WIDTH_CM,
+        help="Physical road half-width (default: 25cm, i.e. 50cm full width)",
+    )
     parser.add_argument("--road-edge-margin-cm", type=float, default=25.0)
     parser.add_argument("--road-bypass-lookahead-cm", type=float, default=180.0)
     parser.add_argument("--road-bypass-min-x-cm", type=float, default=40.0)
-    parser.add_argument("--road-bypass-intrusion-half-width-cm", type=float, default=80.0)
+    parser.add_argument(
+        "--road-bypass-intrusion-half-width-cm",
+        type=float,
+        default=ROAD_HALF_WIDTH_CM,
+        help="Obstacle intrusion half-width (default: the 25cm road half-width)",
+    )
     parser.add_argument("--road-bypass-clearance-cm", type=float, default=75.0)
     parser.add_argument("--road-bypass-speed-cm-s", type=float, default=12.0)
     parser.add_argument("--road-bypass-lateral-step-cm", type=float, default=10.0)
@@ -171,6 +190,11 @@ def main() -> None:
         logger.warning("[SAFETY] dry-run mode: no non-zero velocity will be sent. Add --enable-flight to allow real output")
     if args.no_radar:
         logger.warning("[SAFETY] no-radar mode, ground vision debug only; not recommended for flight")
+    if args.road_bypass_enable and args.road_half_width_cm <= args.road_edge_margin_cm:
+        logger.warning(
+            "[ROAD] 50cm road leaves no safe lateral bypass corridor after the "
+            "25cm body/edge margin; bypass will use its no-gap slowdown behavior"
+        )
 
     fc = None
     multi_radar = None

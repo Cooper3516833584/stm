@@ -3,6 +3,8 @@ from argparse import Namespace
 import numpy as np
 
 from FlightController.Solutions.RoadObstacleBypassPlanner import (
+    ROAD_HALF_WIDTH_CM,
+    ROAD_WIDTH_CM,
     RoadBypassConfig,
     RoadBypassState,
     RoadObstacleBypassPlanner,
@@ -38,9 +40,42 @@ def _desired():
 
 
 def _planner(**overrides):
-    values = {"enabled": True}
+    # Behavioral bypass tests use an explicitly wide synthetic road.  The
+    # production default is the measured 50cm road, which intentionally has
+    # no lateral bypass room after the 25cm body/edge margin.
+    values = {
+        "enabled": True,
+        "road_half_width_cm": 120.0,
+        "intrusion_half_width_cm": 80.0,
+    }
     values.update(overrides)
     return RoadObstacleBypassPlanner(RoadBypassConfig(**values))
+
+
+def test_default_road_geometry_uses_50cm_full_width():
+    config = RoadBypassConfig()
+
+    assert ROAD_WIDTH_CM == 50.0
+    assert ROAD_HALF_WIDTH_CM == 25.0
+    assert config.road_half_width_cm == 25.0
+    assert config.intrusion_half_width_cm == 25.0
+    assert config.road_half_width_cm - config.road_edge_margin_cm == 0.0
+
+
+def test_default_50cm_road_uses_no_gap_slowdown_for_center_obstacle():
+    planner = RoadObstacleBypassPlanner(
+        RoadBypassConfig(enabled=True, activate_frames=1)
+    )
+    output = planner.update(
+        desired=_desired(),
+        perception=_perception(),
+        radar_field=_field([[100.0, 0.0]]),
+        now_s=0.0,
+    )
+
+    assert output.vx_cm_s <= RoadBypassConfig().bypass_speed_cm_s
+    assert output.vy_cm_s == 0.0
+    assert "road_bypass_no_gap" in output.reason
 
 
 def test_disabled_does_not_modify_command():

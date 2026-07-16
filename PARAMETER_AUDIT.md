@@ -152,6 +152,10 @@ def get_road_perception(
 NPU 默认使用 `--road-postprocess-mode fast-main`，在 192×144 工作 mask 上只提取
 当前主路；板端三轮 100 帧综合平均 74.4ms。需要分叉/路口候选时显式使用
 `--road-postprocess-mode full`，该参数不改变 CPU YOLO 后处理。
+道路物理全宽固定为 50cm，因此 `road_follow_main.py` 的
+`--road-half-width-cm`、`--corridor-half-width-cm` 和
+`--road-bypass-intrusion-half-width-cm` 默认均为 25cm。由于机体/边缘余量也是
+25cm，默认道路内绕障没有安全横向候选，只允许减速而不会规划出道路边界。
 
 ---
 

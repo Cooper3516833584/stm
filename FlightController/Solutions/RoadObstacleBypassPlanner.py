@@ -16,6 +16,10 @@ import numpy as np
 from .Safety import Command, RadarObstacleField
 
 
+ROAD_WIDTH_CM = 50.0
+ROAD_HALF_WIDTH_CM = ROAD_WIDTH_CM / 2.0
+
+
 class RoadBypassState(str, Enum):
     NORMAL = "normal"
     BYPASS_LEFT = "bypass_left"
@@ -27,12 +31,12 @@ class RoadBypassState(str, Enum):
 class RoadBypassConfig:
     enabled: bool = False
 
-    road_half_width_cm: float = 120.0
+    road_half_width_cm: float = ROAD_HALF_WIDTH_CM
     road_edge_margin_cm: float = 25.0
 
     min_x_cm: float = 40.0
     lookahead_cm: float = 180.0
-    intrusion_half_width_cm: float = 80.0
+    intrusion_half_width_cm: float = ROAD_HALF_WIDTH_CM
     bypass_clearance_cm: float = 75.0
 
     lateral_step_cm: float = 10.0
@@ -299,4 +303,10 @@ def _append_reason(reason: str, suffix: str) -> str:
     return f"{reason}+{suffix}" if reason else suffix
 
 
-__all__ = ["RoadBypassConfig", "RoadBypassState", "RoadObstacleBypassPlanner"]
+__all__ = [
+    "ROAD_WIDTH_CM",
+    "ROAD_HALF_WIDTH_CM",
+    "RoadBypassConfig",
+    "RoadBypassState",
+    "RoadObstacleBypassPlanner",
+]

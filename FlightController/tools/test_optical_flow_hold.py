@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import math
 from pathlib import Path
-import statistics
 import sys
 import time
 from typing import Any
@@ -24,6 +23,17 @@ PROGRAM_MODE = 3
 TAKEOFF_COMMAND = (0x10, 0x00, 0x05)
 TAKEOFF_MIN_RISE_CM = 8.0
 TAKEOFF_MIN_VZ_CM_S = 4.0
+
+
+def _median(values: list[float]) -> float:
+    """Small dependency-free median helper for split Yocto Python images."""
+    if not values:
+        raise ValueError("median requires at least one value")
+    ordered = sorted(float(value) for value in values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
 
 
 class _ConsecutiveRangeGuard:
@@ -261,8 +271,8 @@ def _preflight(fc: Any, args: argparse.Namespace) -> float:
         fused_samples.append(fused_cm)
         add_samples.append(add_cm)
 
-    fused_cm = float(statistics.median(fused_samples))
-    add_cm = float(statistics.median(add_samples))
+    fused_cm = _median(fused_samples)
+    add_cm = _median(add_samples)
     fused_span = max(fused_samples) - min(fused_samples)
     add_span = max(add_samples) - min(add_samples)
     if abs(fused_cm) > 30.0 or fused_span > 10.0:

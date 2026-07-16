@@ -5,6 +5,7 @@ from FlightController.Base import Byte_Var, FC_State_Struct
 from FlightController.tools.test_optical_flow_hold import (
     TAKEOFF_COMMAND,
     _ConsecutiveRangeGuard,
+    _median,
     _takeoff_evidence,
     parse_args,
 )
@@ -38,6 +39,11 @@ def test_bool_byte_var_preserves_raw_flight_state():
 
     assert value.value is True
     assert value.raw_value == 2
+
+
+def test_dependency_free_median_supports_even_and_odd_samples():
+    assert _median([3, 1, 2]) == 2
+    assert _median([4, 1, 3, 2]) == 2.5
 
 
 def test_fc_state_records_update_metadata_and_raw_payload():

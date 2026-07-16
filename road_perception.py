@@ -62,8 +62,15 @@ class RoadPerceptionResult:
 
 @dataclass
 class CameraOffsetCompensationConfig:
+    """Signed road-camera body-frame offset used by yaw compensation.
+
+    ``cam_forward_offset_m`` follows the body frame: +X is forward and -X is
+    rearward.  The downward-facing road camera is mounted at X=-0.0787m,
+    Y=0m.  The current compensation model only needs X because Y is zero.
+    """
+
     enabled: bool = False
-    cam_forward_offset_m: float = 0.10
+    cam_forward_offset_m: float = -0.0787
     meters_per_pixel_x: float | None = None
     correction_sign: float = 1.0
     max_correction_px: float = 120.0
@@ -75,7 +82,9 @@ class CameraGeometry:
     """摄像头几何标定参数。
 
     可通过标尺法实测反推，无需厂商文档。
-    默认值来自路径识别摄像头 (cam#7) 在飞行高度 17cm 时的标定数据。
+    现有默认值来自功能互换前的路径识别摄像头（/dev/video9）在飞行高度
+    17cm 时的标定数据。当前路径识别摄像头为垂直向下的 /dev/video7，
+    旧的倾斜投影模型不再适用；在重新标定前，不应对它启用偏移补偿。
     """
 
     height_m: float = 0.17
@@ -95,7 +104,9 @@ class CameraWhiteBalanceConfig:
     """软件白平衡修正配置。
 
     BGR 三通道系数，均以 G 通道为基准。
-    例如 cam#9 实测偏青 (R/G=0.36, B/G=0.79)，系数为 R×2.78 B×1.26 G×1.00。
+    例如 /dev/video9 实测偏青 (R/G=0.36, B/G=0.79)，系数为
+    R×2.78、B×1.26、G×1.00。该相机现用于障碍物识别；/dev/video7
+    用于道路识别时应先单独测量其白平衡系数。
     """
 
     enabled: bool = False
@@ -255,7 +266,12 @@ def apply_camera_offset_compensation(
     config: CameraOffsetCompensationConfig,
     yaw_rate_deg_s: float = 0.0,
 ) -> tuple[float, float]:
-    """Return (corrected_pixel_error, correction_px)."""
+    """Return (corrected_pixel_error, correction_px).
+
+    ``cam_forward_offset_m`` is signed in the body frame, so the configured
+    rearward camera position (``-0.0787m``) naturally reverses the correction
+    compared with a forward-mounted camera.
+    """
     _ = image_width
     if not config.enabled:
         return float(pixel_error), 0.0
@@ -1541,8 +1557,8 @@ def get_model_io_info() -> dict[str, Any]:
 def get_road_perception(
     frame: np.ndarray,
     yaw_rate_deg_s: float = 0.0,
-    cam_offset_m: float = 0.10,
-    flight_height_m: float = 2.0,
+    cam_offset_m: float = -0.0787,
+    flight_height_m: float = 1.0,
     debug_save_path: str | None = None,
     offset_comp_config: CameraOffsetCompensationConfig | None = None,
     branch_preference: str = "auto",
@@ -1749,7 +1765,7 @@ def _parse_cli_args():
     parser.add_argument("--debug-out", default=None, help="Optional debug image output path")
     parser.add_argument("--branch-preference", choices=["auto", "straight", "left", "right"], default="auto")
     parser.add_argument("--enable-offset-comp", action="store_true")
-    parser.add_argument("--cam-forward-offset-m", type=float, default=0.10)
+    parser.add_argument("--cam-forward-offset-m", type=float, default=-0.0787)
     parser.add_argument("--meters-per-pixel-x", type=float, default=None)
     parser.add_argument("--offset-correction-sign", type=float, default=1.0)
     parser.add_argument("--offset-max-correction-px", type=float, default=120.0)

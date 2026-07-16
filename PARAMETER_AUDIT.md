@@ -48,12 +48,12 @@ class ObstacleClassifierConfig:
 **文件**: [road_follow_main.py:22](road_follow_main.py#L22)
 
 ```python
-parser.add_argument("--camera-index", type=int, default=9)  # OpenSTLinux: 原 Debian=7
+parser.add_argument("--camera-index", type=int, default=7)  # OpenSTLinux: 功能互换后的道路摄像头
 ```
 
-**OpenSTLinux 实际硬件**: 路径识别摄像头 = `/dev/video9` (cv2 index 9)，障碍物摄像头 = `/dev/video7` (cv2 index 7)。USB 枚举顺序与 Debian 12 互换。
+**当前功能映射**: 路径识别摄像头 = `/dev/video7` (cv2 index 7)，障碍物摄像头 = `/dev/video9` (cv2 index 9)。这是项目内的人工功能互换，与 USB 枚举顺序无关。
 
-**处理**: 默认值从 `7` 改为 `9`。
+**处理**: 功能互换后默认值设为 `7`。
 
 ---
 
@@ -70,7 +70,7 @@ parser.add_argument("--goal-x-cm", type=float, default=200.0,
 
 ---
 
-### 2.4 `get_road_perception(flight_height_m=1.5)` — 参数未使用 ✅ 已修复
+### 2.4 `get_road_perception(flight_height_m=1.0)` — 参数当前未接入实时高度
 
 **文件**: [road_perception.py:1311](road_perception.py#L1311)
 
@@ -78,7 +78,7 @@ parser.add_argument("--goal-x-cm", type=float, default=200.0,
 ```python
 def get_road_perception(
     ...
-    flight_height_m: float = 1.5,   # ← 被显式丢弃 (_ = flight_height_m)
+    flight_height_m: float = 1.0,   # ← 当前被显式丢弃 (_ = flight_height_m)
     ...
 ):
     ...
@@ -87,11 +87,11 @@ def get_road_perception(
 
 两个调用方均未传入该参数，`compute_meters_per_pixel()` 已有但未接入。
 
-**处理**:
-1. `flight_height_m` 默认值改为 **2.0m**（典型飞行高度）
-2. 函数内 `_ = flight_height_m` 替换为：当 `cfg.meters_per_pixel_x is None` 时，调用 `compute_meters_per_pixel(row_from_bottom=120, height_m=flight_height_m)` 自动计算
-3. `compute_meters_per_pixel()` 新增 `height_m` 覆盖参数，支持飞行时高度与标定高度不同
-4. `road_follow_main.py` 新增 `--flight-height-m` (default=2.0) 参数并传入 `get_road_perception()`
+**当前实现**:
+1. `flight_height_m` 默认值为 **1.0m**，并由 `road_follow_main.py` 传入感知管线。
+2. `get_road_perception()` 当前仍以 `_ = flight_height_m` 显式丢弃该参数；巡线实时控制未使用它。
+3. `compute_meters_per_pixel()` 支持 `height_m` 覆盖参数，但当前巡线感知管线传入的 `offset_comp_config=None`，因此不会使用该换算。
+4. 飞控遥测高度尚未接入此参数，不能把 1.0m 默认值视为实时测得高度。
 
 ---
 
@@ -214,7 +214,7 @@ IMPLEMENTATION_PLAN §4 仅记录了道路循线的 `pixel_kp_yaw=0.08` 和 `ang
 | 上雷达安装位姿 | (0,0)cm, yaw=0°, mirror=N | HARDWARE §3.4 |
 | 下雷达安装位姿 | (0.96,0.15)cm, yaw=0°, mirror=Y | HARDWARE §3.4 |
 | 摄像头分辨率 | 640×480 | HARDWARE §5.2 |
-| 前向偏移 | 10cm | HARDWARE §5.4 |
+| 道路相机纵向偏移 | -78.7mm | HARDWARE §5.4（+X 向前，负值表示机身中心后方） |
 | 光轴倾角 α | 30.27° | HARDWARE §5.4 |
 | VFOV/2 (β) | 27.54° | HARDWARE §5.4 |
 | HFOV | 68° | HARDWARE §5.4 |
@@ -245,4 +245,4 @@ IMPLEMENTATION_PLAN §4 仅记录了道路循线的 `pixel_kp_yaw=0.08` 和 `ang
 
 1. **视觉算法超参**（18 个阈值）未文档化，但这属于算法调优范畴，偏低优先级
 2. **偏移补偿**的 `correction_sign` 和 `pipeline_latency_s` 需实飞后标定
-3. **摄像头 index 默认值已修正为 7**（原为 0），但障碍物识别摄像头 `/dev/video9` (index=9) 无对应入口参数
+3. **摄像头功能映射**：道路循线默认使用 `/dev/video7`；障碍物相机默认使用 `/dev/video9`（`record_data.py`）

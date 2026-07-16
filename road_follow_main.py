@@ -21,7 +21,8 @@ from perception_pipeline import PerceptionPipeline
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Road-following dry-run / flight entry")
-    parser.add_argument("--camera-index", type=int, default=9)
+    parser.add_argument("--camera-index", type=int, default=7,
+                        help="Road-following camera index (default: 7 on OpenSTLinux)")
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
     parser.add_argument("--camera-fps", type=int, default=30)
@@ -48,12 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--branch-policy", choices=["center", "left", "right"], default=None, help="Deprecated alias")
     parser.add_argument("--wb-enable", action="store_true",
                         help="Enable software white balance correction for camera color cast")
-    parser.add_argument("--wb-r", type=float, default=2.78,
-                        help="White balance R channel gain (default: 2.78 for cam#9 cyan cast)")
+    parser.add_argument("--wb-r", type=float, default=1.00,
+                        help="White balance R channel gain (default: 1.00; calibrate cam#7 before enabling)")
     parser.add_argument("--wb-g", type=float, default=1.00,
                         help="White balance G channel gain (default: 1.00)")
-    parser.add_argument("--wb-b", type=float, default=1.26,
-                        help="White balance B channel gain (default: 1.26 for cam#9 cyan cast)")
+    parser.add_argument("--wb-b", type=float, default=1.00,
+                        help="White balance B channel gain (default: 1.00; calibrate cam#7 before enabling)")
     parser.add_argument("--debug-dir", default=None)
     parser.add_argument("--debug-every-n", type=int, default=30)
     parser.add_argument("--debug-image-dir", default=None, help="Deprecated alias for --debug-dir")
@@ -94,9 +95,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--road-bypass-return-pixel-deadband-px", type=float, default=35.0)
     parser.add_argument("--offset-comp-enable", action="store_true")
     parser.add_argument("--enable-offset-comp", action="store_true", help="Deprecated alias for --offset-comp-enable")
-    parser.add_argument("--flight-height-m", type=float, default=2.0,
+    parser.add_argument("--flight-height-m", type=float, default=1.0,
                         help="飞行高度 (m), 用于计算该高度的 meters-per-pixel")
-    parser.add_argument("--cam-forward-offset-m", type=float, default=0.10)
+    parser.add_argument(
+        "--cam-forward-offset-m",
+        type=float,
+        default=-0.0787,
+        help="Road camera body-frame X offset in metres (default: -0.0787; rear of body centre)",
+    )
     parser.add_argument("--meters-per-pixel-x", type=float, default=None)
     parser.add_argument("--offset-correction-sign", type=float, default=1.0)
     parser.add_argument("--offset-max-correction-px", type=float, default=120.0)

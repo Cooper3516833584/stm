@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
                         help="0 means run until no-path or Ctrl+C")
     parser.add_argument("--no-auto-land", action="store_true",
                         help="Do not auto-land on mission exit after a real takeoff")
-    parser.add_argument("--takeoff-height-cm", type=float, default=150.0)
+    parser.add_argument("--takeoff-height-cm", type=float, default=100.0)
     parser.add_argument("--climb-speed-cm-s", type=float, default=20.0)
     parser.add_argument("--first-lift-cm", type=float, default=60.0)
     parser.add_argument("--landing-timeout-s", type=float, default=20.0)
@@ -110,7 +110,7 @@ def parse_args() -> argparse.Namespace:
                         help="Save one radar metadata/point snapshot every N control loops")
     parser.add_argument("--record-jpeg-quality", type=int, default=85)
     parser.add_argument("--record-camera-index", type=int, default=9,
-                        help="Camera index used only for goal-nav recording")
+                        help="Obstacle-camera index used only for goal-nav recording (default: 9)")
     parser.add_argument("--record-camera-width", type=int, default=640)
     parser.add_argument("--record-camera-height", type=int, default=480)
     parser.add_argument("--record-camera-fps", type=int, default=30)

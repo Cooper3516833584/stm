@@ -681,11 +681,11 @@ $$\text{m/px}(r) = \frac{2 \cdot D_{\text{ground}} \cdot \tan(\text{HFOV}/2)}{W}
 
 ### 11.2 摄像头前向偏移补偿
 
-摄像头安装于机体前方距离 $d_{\text{off}}$ 处，导致航向偏差时路面中线产生视差：
+摄像头相对机体中心的纵向位置为带符号的 $d_{\text{off}}$（机体前方为正、后方为负），导致航向偏差时路面中线产生视差：
 
 $$\Delta e = \text{sign} \cdot \frac{d_{\text{off}}}{\text{m/px}} \cdot \tan(\psi_{\text{error}})$$
 
-补偿值钳位于 $\pm 120\text{px}$。修正后的像素误差 $e' = e - \Delta e$ 用于控制。
+补偿值钳位于 $\pm 120\text{px}$。当前道路摄像头垂直向下安装，机体坐标为 $(x,y)=(-0.0787, 0)\text{m}$，故 $d_{\text{off}}=-0.0787\text{m}$。修正后的像素误差 $e' = e - \Delta e$ 用于控制；仍须提供实测 `meters_per_pixel_x` 才会启用该补偿。
 
 ### 11.3 软件白平衡
 

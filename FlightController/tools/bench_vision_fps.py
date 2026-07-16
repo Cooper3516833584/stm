@@ -28,8 +28,8 @@ def main() -> int:
                         help="ONNX model path (default: auto)")
     parser.add_argument("--model-npu", default=None,
                         help=".nb NPU compiled model path")
-    parser.add_argument("--flight-height-m", type=float, default=2.0,
-                        help="flight height for m/px calc (default: 2.0)")
+    parser.add_argument("--flight-height-m", type=float, default=1.0,
+                        help="flight height for m/px calc (default: 1.0)")
     parser.add_argument("--no-offset-comp", action="store_true",
                         help="disable offset compensation")
     args = parser.parse_args()
@@ -70,7 +70,7 @@ def main() -> int:
     if not args.no_offset_comp:
         offset_cfg = CameraOffsetCompensationConfig(
             enabled=True,
-            cam_forward_offset_m=0.10,
+            cam_forward_offset_m=-0.0787,
         )
 
     # --- warmup (3 frames, exclude from stats) ---

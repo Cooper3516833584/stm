@@ -82,14 +82,14 @@
 
 | 项目 | 路径识别摄像头 (上/道路) | 障碍物识别摄像头 (下/障碍物) |
 |------|--------------|-----------------|
-| 设备路径 | `/dev/video9` | `/dev/video7` |
+| 设备路径 | `/dev/video7` | `/dev/video9` |
 | USB 位置 | `usb-1.1` | `usb-1.2.3` |
-| cv2 index | **9** (OpenSTLinux) / 7 (Debian) | **7** (OpenSTLinux) / 9 (Debian) |
+| cv2 index | **7** (OpenSTLinux) | **9** (OpenSTLinux) |
 | 型号 | `USB 2.0 Camera` | `USB Camera` |
 
-> ⚠️ **摄像头 index 在 OpenSTLinux 上互换了**。Debian 12 上道路摄像头为 cam#7，OpenSTLinux 上为 cam#9。`road_follow_main.py` 默认值已改为 9。
+> ⚠️ **当前功能映射已人工互换**：道路摄像头为 cam#7，障碍物摄像头为 cam#9；`road_follow_main.py` 默认值为 7。
 
-**已知问题**: 路径识别摄像头 (cam#9) 存在偏青色彩问题 (R/G=0.36, B/G=0.79)，V4L2 手动白平衡控制力有限。已实现软件白平衡修正 (`road_perception.py` `_apply_white_balance()`)，默认系数 R×2.78 / G×1.00 / B×1.26，通过 `road_follow_main.py --wb-enable` 启用。
+**已知问题**: 原 cam#9 存在偏青色彩问题 (R/G=0.36, B/G=0.79)，现作为障碍物摄像头。路径摄像头 cam#7 垂直向下安装，机体坐标为 (-78.7mm, 0)；其白平衡、离地高度、视场角和 `meters_per_pixel_x` 尚未按道路场景重测。在完成前不要启用 `road_follow_main.py --wb-enable` 或 `--offset-comp-enable`。
 
 ## 5. M3 阶段：雷达点火与离线算法验证 (Milestone Reached)
 底层物理链路与上层 SLAM 算法已成功打通，完成两级探活：
@@ -713,7 +713,7 @@ strings /usr/lib/libonnxruntime.so.1.19.2 | grep -i vsinpu
 | onnxruntime | 1.25.1 (CPU) | 1.19.2 (NPU) |
 | 串口设备映射 | `/dev/ttySTM4`, `/dev/ttySTM9` | 完全一致 ✅ |
 | 飞控 | `/dev/ttyACM0` | `/dev/ttyACM0` ✅ |
-| 摄像头 | cam#7(道路), cam#9(障碍) | **cam#9(道路), cam#7(障碍)** ⚠️ 互换 |
+| 摄像头 | cam#7(道路), cam#9(障碍) | **历史 OpenSTLinux 枚举：cam#9(道路), cam#7(障碍)**；当前已人工切回 cam#7(道路)、cam#9(障碍) |
 
 ### 11.2 NPU 状态
 

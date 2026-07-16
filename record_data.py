@@ -27,8 +27,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Record radar + camera data to SD card")
     parser.add_argument("--upper-port", default="/dev/ttySTM4")
     parser.add_argument("--lower-port", default="/dev/ttySTM9")
-    parser.add_argument("--camera-index", type=int, default=7,
-                        help="cv2.VideoCapture index, default 7 (obstacle cam on OpenSTLinux)")
+    parser.add_argument("--camera-index", type=int, default=9,
+                        help="cv2.VideoCapture index, default 9 (obstacle camera on OpenSTLinux)")
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
     parser.add_argument("--camera-fps", type=int, default=30)

@@ -68,7 +68,7 @@ def main() -> None:
     rg_ratio = r_mean / g_mean if g_mean > 0 else 0
     bg_ratio = b_mean / g_mean if g_mean > 0 else 0
 
-    print(f"=== 前视摄像头 /dev/video{args.index} 色彩分析 ===")
+    print(f"=== 摄像头 /dev/video{args.index} 色彩分析 ===")
     print(f"分析区域: {crop_w}×{crop_h} (画面中心 60%)")
     print(f"采样帧数: {len(frames)}")
     print()

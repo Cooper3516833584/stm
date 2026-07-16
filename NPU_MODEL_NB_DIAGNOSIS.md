@@ -264,5 +264,5 @@ m.run()
 # 实际: 0 → NPU 未使用
 
 # ONNX 路径回退
-PYTHONPATH=. python3 road_follow_main.py --camera-index 9 --no-fc --no-radar
+PYTHONPATH=. python3 road_follow_main.py --camera-index 7 --no-fc --no-radar
 ```

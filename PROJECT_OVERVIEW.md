@@ -15,7 +15,7 @@
 ## 硬件拓扑
 
 - **双雷达**：上雷达（`/dev/ttySTM4`, 水平安装 360° 扫描）与下雷达（`/dev/ttySTM9`, 下倾覆盖前下方盲区），均为 LDROBOT D500，转速 ~600 RPM，230400 baud
-- **双摄像头**：道路识别摄像头（`/dev/video9`）与障碍物识别摄像头（`/dev/video7`），均 640×480，OpenCV V4L2 读取；已实现软件白平衡修正
+- **双摄像头**：道路识别摄像头（`/dev/video7`）与障碍物识别摄像头（`/dev/video9`），均 640×480，OpenCV V4L2 读取；道路相机的白平衡与几何偏移补偿需按新设备重新标定
 - **飞控通信**：凌霄飞控 UART 500000 baud，二进制协议栈（Base → Protocal → Application）
 - **存储**：SD 卡 30G 系统盘 + eMMC 7.3G 备用，日志写入 `/media/sdcard` 严禁占用 RAM
 

@@ -17,9 +17,9 @@ Architecture::
 Usage::
 
     pipeline = PerceptionPipeline(
-        camera_index=9,
+        camera_index=7,
         model_path="FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
-        flight_height_m=2.0,
+        flight_height_m=1.0,
         branch_preference="auto",
     )
     pipeline.start()
@@ -103,7 +103,7 @@ class CameraThread:
 
     def __init__(
         self,
-        camera_index: int = 9,
+        camera_index: int = 7,
         width: int = 640,
         height: int = 480,
         fps: int = 30,
@@ -224,7 +224,7 @@ class YOLOInferenceThread:
         self,
         camera_thread: CameraThread,
         model_path: str,
-        flight_height_m: float = 2.0,
+        flight_height_m: float = 1.0,
         branch_preference: str = "auto",
         wb_enable: bool = False,
         wb_r: float = 2.78,
@@ -386,17 +386,17 @@ class PerceptionPipeline:
 
     def __init__(
         self,
-        camera_index: int = 9,
+        camera_index: int = 7,
         camera_width: int = 640,
         camera_height: int = 480,
         camera_fps: int = 30,
         model_path: str = "FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
-        flight_height_m: float = 2.0,
+        flight_height_m: float = 1.0,
         branch_preference: str = "auto",
         wb_enable: bool = False,
-        wb_r: float = 2.78,
+        wb_r: float = 1.00,
         wb_g: float = 1.00,
-        wb_b: float = 1.26,
+        wb_b: float = 1.00,
     ) -> None:
         self.camera = CameraThread(
             camera_index=camera_index,

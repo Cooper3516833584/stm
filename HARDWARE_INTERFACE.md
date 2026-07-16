@@ -159,29 +159,29 @@ VCC (5V)            →    Pin 4  (5V)
 
 ```
 开发板 USB Host
-  ├── 1-1.1    → /dev/video7, /dev/video8    (障碍物识别摄像头)
-  └── 1-1.2.3  → /dev/video9, /dev/video10   (路径识别摄像头)
+  ├── 1-1.1    → /dev/video7, /dev/video8    (路径识别摄像头，功能互换后)
+  └── 1-1.2.3  → /dev/video9, /dev/video10   (障碍物识别摄像头，功能互换后)
 ```
 
 各摄像头对应两个 `/dev/videoN` 节点：主节点为图像流，次节点通常为元数据（忽略）。
 
-> ⚠️ **摄像头 index 在 OpenSTLinux 上与 Debian 12 互换了**。USB 枚举顺序因内核版本差异导致。`road_follow_main.py` 默认值已改为 `--camera-index 9`。
+> ⚠️ **当前功能映射**：`road_follow_main.py` 默认使用 `--camera-index 7`，障碍物录制默认使用 index 9。这是项目内的功能互换；设备节点本身仍由 OpenSTLinux 的 USB 枚举决定。
 
 ### 5.2 设备映射
 
 | 项目 | 路径识别摄像头 (上/前视) | 障碍物识别摄像头 (下/前下视) |
 |------|-----------|-----------|
-| 设备路径 | `/dev/video9` | `/dev/video7` |
+| 设备路径 | `/dev/video7` | `/dev/video9` |
 | USB 物理位置 | `usb-1.1` | `usb-1.2.3` |
 | 型号标识 | `USB 2.0 Camera: USB Camera` | `USB Camera: USB Camera` |
 | 分辨率 | 640×480 | 640×480 |
 | 驱动 | V4L2 (cv2.CAP_V4L2) | V4L2 (cv2.CAP_V4L2) |
-| cv2 index (OpenSTLinux) | **9** | **7** |
+| cv2 index (OpenSTLinux) | **7** | **9** |
 | cv2 index (Debian 旧) | 7 | 9 |
 | **功能用途** | **道路路径识别** | **障碍物类型识别** |
-| **色彩问题** | 偏青 (R/G=0.36, B/G=0.79) | 正常 |
-| **白平衡** | 软件修正: `--wb-enable --wb-r 2.78 --wb-g 1.0 --wb-b 1.26` | 不需要 |
-| **色彩诊断工具** | `FlightController/tools/diagnose_camera_color.py --index 9` | — |
+| **色彩问题** | 未重新诊断（功能互换前记录为正常） | 偏青 (R/G=0.36, B/G=0.79) |
+| **白平衡** | 重新标定前保持关闭 | 需要时可用 R×2.78 / G×1.0 / B×1.26 |
+| **色彩诊断工具** | `FlightController/tools/diagnose_camera_color.py --index 7` | `FlightController/tools/diagnose_camera_color.py --index 9` |
 
 ### 5.3 验证命令
 
@@ -189,7 +189,7 @@ VCC (5V)            →    Pin 4  (5V)
 # 基本连通性
 python3 -c "
 import cv2
-for idx, name in [(7, 'cam_front'), (9, 'cam_down')]:
+for idx, name in [(7, 'road_camera'), (9, 'obstacle_camera')]:
     cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
     ok, frame = cap.read()
     cap.release()
@@ -199,7 +199,7 @@ for idx, name in [(7, 'cam_front'), (9, 'cam_down')]:
 # 拍摄测试照片
 python3 -c "
 import cv2
-for idx, name in [(7, 'cam_front'), (9, 'cam_down')]:
+for idx, name in [(7, 'road_camera'), (9, 'obstacle_camera')]:
     cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
     ok, frame = cap.read()
     cap.release()
@@ -212,6 +212,25 @@ for idx, name in [(7, 'cam_front'), (9, 'cam_down')]:
 ---
 
 ### 5.4 路径识别摄像头几何标定
+
+#### 当前道路相机安装位姿（/dev/video7）
+
+道路相机光轴垂直向下。以机体中心为原点、前方为 +X、左侧为 +Y（与匿名飞控
+坐标系相同），相机投影中心在水平面的坐标为：
+
+| 参数 | 值 | 说明 |
+|------|----|------|
+| 光轴方向 | 垂直向下 | 不再使用旧的前向倾角安装 |
+| `cam_forward_offset_m` | **-0.0787 m** | X=-78.7mm，位于机体中心后方 |
+| 横向偏移 Y | **0 m** | 位于机体中心线 |
+
+代码中的 `cam_forward_offset_m` 已使用该带符号的 X 值。偏移补偿仍需
+`meters_per_pixel_x`；在重新测量相机离地高度、视场角和比例尺前，不要启用
+`--offset-comp-enable`。
+
+#### 历史标定（功能互换前的 /dev/video9 路径相机）
+
+以下数据仅保留作历史参考，不能用于当前垂直向下的 `/dev/video7` 道路相机。
 
 实测标定数据（标尺法，飞行高度 17cm，倾角 25° 安装）：
 

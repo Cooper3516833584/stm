@@ -11,6 +11,7 @@ dist/
 /.claude/
 
 # Local road perception videos
+*.mp4
 /road2.mp4
 /road2_*.mp4
 /temp/

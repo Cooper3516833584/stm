@@ -118,10 +118,6 @@ def get_road_perception(
 | `CONTROL_ANGLE_Y_MAX_RATIO` | 0.98 | 控制角度窗口上界 |
 | `CENTERLINE_SCAN_Y_MAX_RATIO` | 0.97 | 中线扫描上限 |
 | `MIN_FIT_PTS` | 5 | 线拟合最小点数 |
-| `FORK_INTERVAL_ROWS_MIN` | 8 | 岔路检测最小行数 |
-| `FORK_WIDTH_GROWTH_RATIO` | 1.6 | 岔路宽度增长比 |
-| `WIDE_INTERVAL_RATIO` | 0.45 | 宽路段判定比 |
-| `WIDTH_JUMP_LOCK_RATIO` | 1.45 | 宽度跳变锁定比 |
 | `CENTER_SMOOTH_ALPHA` | 0.65 | 中线平滑系数 |
 
 **状态**: 均无文档记录来源，无离线测试图片集验证。这些值可能是从 YOLO11-seg 示例代码继承或经验调参得出，但缺少调参记录。
@@ -150,8 +146,8 @@ def get_road_perception(
 `--road-model-backend cpu` 可切回现有 `road_yolo11n_seg_128.onnx` 小模型。
 两个模型文件均随仓库部署，启动时按所选后端检查文件是否存在。
 NPU 默认使用 `--road-postprocess-mode fast-main`，在 192×144 工作 mask 上只提取
-当前主路；板端三轮 100 帧综合平均 74.4ms。需要分叉/路口候选时显式使用
-`--road-postprocess-mode full`，该参数不改变 CPU YOLO 后处理。
+当前主路；板端三轮 100 帧综合平均 74.4ms。`full` 仅切换为全分辨率主路几何，
+不会恢复分叉处理；CPU YOLO 后处理同样只输出主路。
 道路物理全宽固定为 50cm，因此 `road_follow_main.py` 的
 `--road-half-width-cm`、`--corridor-half-width-cm` 和
 `--road-bypass-intrusion-half-width-cm` 默认均为 25cm。由于机体/边缘余量也是

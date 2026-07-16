@@ -22,7 +22,6 @@ Usage::
         npu_model_path="FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb",
         inference_backend="npu",
         flight_height_m=1.0,
-        branch_preference="auto",
     )
     pipeline.start()
     try:
@@ -230,7 +229,6 @@ class YOLOInferenceThread:
         inference_backend: str = "npu",
         postprocess_mode: str = "fast-main",
         flight_height_m: float = 1.0,
-        branch_preference: str = "auto",
         wb_enable: bool = False,
         wb_r: float = 2.78,
         wb_g: float = 1.00,
@@ -244,7 +242,6 @@ class YOLOInferenceThread:
         self._inference_backend = inference_backend
         self._postprocess_mode = postprocess_mode
         self._flight_height_m = flight_height_m
-        self._branch_preference = branch_preference
         self._wb_enable = wb_enable
         self._wb_r = wb_r
         self._wb_g = wb_g
@@ -364,8 +361,6 @@ class YOLOInferenceThread:
                     flight_height_m=self._flight_height_m,
                     debug_save_path=None,
                     offset_comp_config=None,
-                    branch_preference=self._branch_preference,
-                    previous_branch_label=None,
                     wb_config=wb_config,
                 )
             except Exception as exc:
@@ -417,7 +412,6 @@ class PerceptionPipeline:
         inference_backend: str = "npu",
         postprocess_mode: str = "fast-main",
         flight_height_m: float = 1.0,
-        branch_preference: str = "auto",
         wb_enable: bool = False,
         wb_r: float = 1.00,
         wb_g: float = 1.00,
@@ -436,7 +430,6 @@ class PerceptionPipeline:
             inference_backend=inference_backend,
             postprocess_mode=postprocess_mode,
             flight_height_m=flight_height_m,
-            branch_preference=branch_preference,
             wb_enable=wb_enable,
             wb_r=wb_r,
             wb_g=wb_g,

@@ -262,9 +262,10 @@ def test_semantic_mask_flows_through_existing_geometry(monkeypatch) -> None:
 
     assert result.is_road_found
     assert result.road_state == "single"
-    assert result.branch_decision == "fast_main"
-    assert len(result.branches) == 1
-    assert result.selected_branch is result.branches[0]
+    assert result.branch_decision == "disabled"
+    assert result.branches == []
+    assert result.selected_branch is None
+    assert len(result.centerline_points) >= road.MIN_FIT_PTS
     assert abs(result.pixel_error) < 5.0
     assert result.confidence > 0.9
     assert result.debug_mask is not None
@@ -273,6 +274,9 @@ def test_semantic_mask_flows_through_existing_geometry(monkeypatch) -> None:
     monkeypatch.setattr(road, "_POSTPROCESS_MODE", road.POSTPROCESS_FULL)
     full_result = road.get_road_perception(frame, branch_preference="left")
     assert full_result.is_road_found
-    assert full_result.branch_decision != "fast_main"
+    assert full_result.branch_decision == "disabled"
+    assert full_result.branches == []
+    assert full_result.selected_branch is None
+    assert len(full_result.centerline_points) >= road.MIN_FIT_PTS
     assert full_result.debug_mask is not None
     assert full_result.debug_mask.shape == (480, 640)

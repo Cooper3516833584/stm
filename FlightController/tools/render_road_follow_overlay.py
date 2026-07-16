@@ -88,7 +88,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=ROOT / "FlightController/Solutions/model/road_yolo11n_seg.onnx",
     )
-    parser.add_argument("--branch", choices=["auto", "straight", "left", "right"], default="auto")
     parser.add_argument("--output-width", type=int, default=1920)
     parser.add_argument("--perception-width", type=int, default=960)
     parser.add_argument(
@@ -139,7 +138,6 @@ def render_video(video_path: Path, args: argparse.Namespace) -> None:
     follower = RoadFollower(
         RoadFollowerConfig(
             image_width=percep_w,
-            branch_preference=args.branch,
         )
     )
     wb_config = CameraWhiteBalanceConfig(
@@ -176,8 +174,6 @@ def render_video(video_path: Path, args: argparse.Namespace) -> None:
                 percep_frame = cv2.resize(frame, (percep_w, percep_h), interpolation=cv2.INTER_AREA)
                 last_perception = road_perception.get_road_perception(
                     percep_frame,
-                    branch_preference=args.branch,
-                    previous_branch_label=follower.previous_branch_label(),
                     wb_config=wb_config,
                 )
                 last_command = follower.update(last_perception, now_s=frame_idx / max(fps, 1e-6))
@@ -235,17 +231,10 @@ def draw_overlay(
         color_layer[mask_scaled > 0] = (255, 155, 35)
         out = cv2.addWeighted(out, 1.0, color_layer, 0.30, 0.0)
 
-    branches = list(getattr(perception, "branches", []) or [])
-    selected = getattr(perception, "selected_branch", None)
-    for idx, branch in enumerate(branches):
-        is_selected = _is_selected_branch(branch, selected)
-        color = (0, 245, 255) if is_selected else (235, 235, 235)
-        thickness = max(4, out_w // 360) if is_selected else max(2, out_w // 700)
-        _draw_polyline(out, _scale_points(getattr(branch, "points", []), sx, sy), color, thickness)
-
-    active_branch = selected or (branches[0] if branches else None)
-    if active_branch is not None:
-        arrow_points = _scale_points(getattr(active_branch, "points", []), sx, sy)
+    path_points = _scale_points(getattr(perception, "centerline_points", []), sx, sy)
+    if path_points:
+        _draw_polyline(out, path_points, (0, 245, 255), max(4, out_w // 360))
+        arrow_points = path_points
         _draw_path_arrow(out, arrow_points)
     else:
         _draw_search_arrow(out, command)
@@ -284,7 +273,6 @@ def _draw_hud(out: np.ndarray, perception, command, frame_idx: int, fps: float) 
     h, w = out.shape[:2]
     state = str(getattr(perception, "road_state", "lost"))
     found = bool(getattr(perception, "is_road_found", False))
-    branch = getattr(getattr(perception, "selected_branch", None), "label", "none")
     conf = float(getattr(perception, "confidence", 0.0) or 0.0)
     err = float(getattr(perception, "corrected_pixel_error", getattr(perception, "pixel_error", 0.0)) or 0.0)
     angle = float(getattr(perception, "centerline_angle", 90.0) or 90.0)
@@ -294,15 +282,16 @@ def _draw_hud(out: np.ndarray, perception, command, frame_idx: int, fps: float) 
     timestamp = frame_idx / max(fps, 1e-6)
 
     lines = [
-        f"road={state} found={int(found)} branch={branch} conf={conf:.2f}",
-        f"error={err:+.0f}px angle={angle:.1f}deg cmd_vx={vx:.1f} cmd_yaw={yaw:+.1f}deg/s",
+        f"road={state} found={int(found)} conf={conf:.2f}",
+        f"error={err:+.0f}px angle={angle:.1f}deg",
+        f"cmd vx={vx:.1f} yaw={yaw:+.1f}deg/s",
         f"t={timestamp:.1f}s {reason}",
     ]
-    x, y = 28, 42
+    x, y = max(12, w // 70), max(24, h // 15)
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = max(0.7, min(1.1, w / 1920.0))
-    line_h = int(34 * scale)
-    pad = int(14 * scale)
+    scale = max(0.42, min(1.1, w / 1700.0))
+    line_h = max(20, int(34 * scale))
+    pad = max(8, int(14 * scale))
     max_text_w = 0
     for line in lines:
         (tw, _), _baseline = cv2.getTextSize(line, font, scale, 2)
@@ -355,12 +344,6 @@ def _draw_polyline(
         return
     pts = np.array(points, dtype=np.int32)
     cv2.polylines(img, [pts], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
-
-
-def _is_selected_branch(branch, selected) -> bool:
-    if selected is None:
-        return False
-    return branch is selected or getattr(branch, "branch_id", None) == getattr(selected, "branch_id", None)
 
 
 if __name__ == "__main__":

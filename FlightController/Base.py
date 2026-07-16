@@ -71,6 +71,7 @@ class Byte_Var:
             raise ValueError(f"Invalid var_type: {py_var_type}")
         self._var_type = py_var_type
         self._multiplier = value_multiplier
+        self._raw_value = init_value
         self._value = self._var_type(init_value)
         return self
 
@@ -80,10 +81,17 @@ class Byte_Var:
 
     @value.setter
     def value(self, value):
+        self._raw_value = value
         self._value = self._var_type(value)
 
     def update_value_with_mul(self, value):
+        self._raw_value = value
         self._value = self._var_type(value * self._multiplier)
+
+    @property
+    def raw_value(self):
+        """Last unpacked value before Python type conversion or scaling."""
+        return self._raw_value
 
     @property
     def bytes(self):
@@ -97,9 +105,10 @@ class Byte_Var:
     @bytes.setter
     def bytes(self, value):
         if self._float:
-            self._value = self._var_type(struct.unpack("<f", value)[0] * self._multiplier)
+            raw_value = struct.unpack("<f", value)[0]
         else:
-            self._value = self._var_type(int.from_bytes(value, "little", signed=self._signed) * self._multiplier)
+            raw_value = int.from_bytes(value, "little", signed=self._signed)
+        self.update_value_with_mul(raw_value)
 
     @property
     def byte_length(self):
@@ -154,6 +163,9 @@ class FC_State_Struct:
         self._fmt_string = "<" + "".join([i.struct_fmt_type for i in self.RECV_ORDER])
         self._fmt_length = struct.calcsize(self._fmt_string)
         self.update_event = Event()
+        self.update_count = 0
+        self.last_update_monotonic = 0.0
+        self.last_raw_bytes = bytes()
         self._low_bat_warn_threshold = 3.5 * 3  # V
         self._low_bat_warn_last_time = 0
 
@@ -163,6 +175,9 @@ class FC_State_Struct:
         vals = struct.unpack(self._fmt_string, bytes)
         for i, val in enumerate(vals):
             self.RECV_ORDER[i].update_value_with_mul(val)
+        self.last_raw_bytes = bytes
+        self.last_update_monotonic = time.perf_counter()
+        self.update_count += 1
         self.update_event.set()
         if 1 < self.bat.value < self._low_bat_warn_threshold:
             if time.perf_counter() - self._low_bat_warn_last_time > 1:

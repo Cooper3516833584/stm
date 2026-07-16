@@ -1,12 +1,21 @@
 # 🚁 Cooper_drone 伴随计算机系统配置与开发进度纪要
 
 **项目名称**: Cooper_drone (基于 MYiR 开发板的无人机机载/伴随计算机开发)
-**当前阶段**: M7 阶段 — OS 迁移完成 (OpenSTLinux v6.0) + 全子系统验证通过 + Yaw 符号 Bug 修复 + NPU INT8 `.nb` 工具链经验总结完成
-**最后更新**: 2026年7月9日 (官方 DeepLab 256 `.nb` 已证明板端 NPU 路径可跑；新训练的 `road_fastseg_256_fp32.onnx` 可生成 `.nb` 但结果为 float16/约167ms；QDQ ONNX 云端 Generate 无输出；当前暂停重复转换并归档失败经验)
+**当前阶段**: M8 阶段 — 新道路语义分割模型已通过板端 NPU 验收并接入默认寻路链路
+**最后更新**: 2026年7月17日 (`new_road_seg_v3_final_fp32.nb` 已在 VIP9000 上实测稳态 25.27ms，并作为道路循线默认模型；原 128×128 YOLO ONNX CPU 实现保留为显式回退)
+
+## 0. 2026-07-17 新道路语义分割 NPU 模型接入
+
+- 默认后端：`--road-model-backend npu`
+- 默认 NPU 模型：`FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb`
+- 输入契约：RGB float32 `[0,1]`，NCHW `[1,3,256,256]`
+- 输出契约：`logits [1,2,256,256]`，类别 0 为背景、类别 1 为道路
+- CPU 回退：`--road-model-backend cpu`，继续使用 `road_yolo11n_seg_128.onnx` 及原 YOLO 实例分割后处理
+- 板端验收：冷启动 65.09ms，100 轮稳态平均 25.27ms，已记录 `/dev/galcore` 成功 ioctl
 
 ---
 
-## 0. 2026-07-09 NPU/ST Cloud 当前结论
+## 0.1 2026-07-09 NPU/ST Cloud 历史结论
 
 完整记录见 [NPU_ST_CLOUD_20260709_FINDINGS.md](NPU_ST_CLOUD_20260709_FINDINGS.md)，旧转换计划修正见 [NPU_MODEL_CONVERSION_PLAN.md](NPU_MODEL_CONVERSION_PLAN.md)，`.nb` 板端诊断见 [NPU_MODEL_NB_DIAGNOSIS.md](NPU_MODEL_NB_DIAGNOSIS.md)。
 

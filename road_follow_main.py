@@ -1,4 +1,4 @@
-"""YOLO road-following entry point.
+"""Segmentation-based road-following entry point.
 
 Default behavior is dry-run. Non-zero FC commands are sent only when
 --enable-flight is explicitly provided. This file does not unlock, take off,
@@ -30,9 +30,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=None, help="Deprecated alias for --camera-width")
     parser.add_argument("--height", type=int, default=None, help="Deprecated alias for --camera-height")
     parser.add_argument("--fps", type=int, default=None, help="Deprecated alias for --camera-fps")
-    parser.add_argument("--model", default="FlightController/Solutions/model/road_yolo11n_seg.onnx")
-    parser.add_argument("--model-npu", default=None,
-                        help=".nb NPU compiled model path (overrides --model)")
+    parser.add_argument(
+        "--road-model-backend",
+        choices=["npu", "cpu"],
+        default="npu",
+        help="Road inference backend (default: npu; cpu keeps the legacy small YOLO model)",
+    )
+    parser.add_argument(
+        "--model",
+        default="FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
+        help="Legacy lightweight YOLO ONNX path used by --road-model-backend cpu",
+    )
+    parser.add_argument(
+        "--model-npu",
+        default="FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb",
+        help="Semantic segmentation .nb path used by --road-model-backend npu",
+    )
     parser.add_argument("--model-path", default=None, help="Deprecated alias for --model")
     parser.add_argument("--require-model", action="store_true")
     parser.add_argument("--fc-port", default=None)
@@ -116,7 +129,6 @@ def main() -> None:
     args = _normalize_args(args)
     _setup_logging(args.log_file)
 
-    import road_perception
     from road_perception import CameraOffsetCompensationConfig, CameraWhiteBalanceConfig
     from FlightController.Components import MultiRadar, RadarConfig
     from FlightController.Components.FCConnector import FCConnectConfig, connect_fc
@@ -138,13 +150,12 @@ def main() -> None:
         send_command_safely,
     )
 
-    road_perception.MODEL_PATH = args.model
-    if args.model_npu:
-        road_perception.MODEL_PATH_NPU = args.model_npu
-        road_perception._AUTO_USE_NPU = True
-        logger.info("NPU .nb model configured: {}", args.model_npu)
-    if not os.path.isfile(args.model):
-        msg = f"[ROAD] model missing, perception lost: {args.model}"
+    selected_model = args.model_npu if args.road_model_backend == "npu" else args.model
+    if not os.path.isfile(selected_model):
+        msg = (
+            f"[ROAD] {args.road_model_backend} model missing, "
+            f"perception lost: {selected_model}"
+        )
         if args.require_model:
             raise FileNotFoundError(msg)
         logger.warning(msg)
@@ -246,6 +257,8 @@ def main() -> None:
             camera_height=args.camera_height,
             camera_fps=args.camera_fps,
             model_path=args.model,
+            npu_model_path=args.model_npu,
+            inference_backend=args.road_model_backend,
             flight_height_m=args.flight_height_m,
             branch_preference=args.branch,
             wb_enable=bool(args.wb_enable),
@@ -256,12 +269,14 @@ def main() -> None:
         pipeline.start()
 
         logger.info(
-            "[ROAD] started dry_run={} no_radar={} branch={} camera={} model={}".format(
+            "[ROAD] started dry_run={} no_radar={} branch={} camera={} "
+            "backend={} model={}".format(
                 actual_dry_run,
                 args.no_radar,
                 args.branch,
                 args.camera_index,
-                args.model,
+                args.road_model_backend,
+                selected_model,
             )
         )
         loop_count = 0
@@ -404,6 +419,7 @@ def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.camera_fps = args.fps
     if args.model_path:
         args.model = args.model_path
+        args.road_model_backend = "cpu"
     if args.debug_image_dir:
         args.debug_dir = args.debug_image_dir
     if args.debug_image_every is not None:

@@ -108,9 +108,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    road_perception.MODEL_PATH = str(args.model)
     if not args.model.is_file():
         raise FileNotFoundError(f"ONNX model not found: {args.model}")
+    road_perception.configure_model(backend="cpu", cpu_model_path=str(args.model))
 
     videos = args.videos or sorted((ROOT / "temp").glob("video*.mp4"))
     if not videos:

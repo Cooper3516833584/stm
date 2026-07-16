@@ -1,7 +1,7 @@
 """Measure actual road perception frame rate.
 
 Captures frames from the road-following camera and runs the full perception
-pipeline (preprocess → ONNX inference → mask decode → centerline extraction →
+pipeline (preprocess → segmentation inference → mask decode → centerline extraction →
 offset compensation) to report the realistic processing speed.
 
 Usage:
@@ -51,12 +51,12 @@ def main() -> int:
 
     # --- import road perception (triggers model session load) ---
     import road_perception
-    if args.model:
-        road_perception.MODEL_PATH = args.model
-        road_perception._AUTO_USE_NPU = False
     if args.model_npu:
-        road_perception.MODEL_PATH_NPU = args.model_npu
-        road_perception._AUTO_USE_NPU = True
+        road_perception.configure_model(backend="npu", npu_model_path=args.model_npu)
+    elif args.model:
+        road_perception.configure_model(backend="cpu", cpu_model_path=args.model)
+    else:
+        road_perception.configure_model(backend="npu")
 
     t0 = time.perf_counter()
     from road_perception import (

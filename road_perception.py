@@ -1,4 +1,4 @@
-"""Road perception module for YOLO segmentation based visual line following.
+"""Road perception module for segmentation-based visual line following.
 
 The only required public entry point is ``get_road_perception(frame, ...)``.
 This module does not implement flight control, route selection, MAVLink, or
@@ -185,13 +185,15 @@ class RoadInstance:
     centerline_points: List[CenterPoint] = field(default_factory=list)
 
 
-# ONNX model (CPU / XNNPACK fallback)
+# Existing lightweight YOLO segmentation model (CPU / XNNPACK fallback).
 MODEL_PATH = "FlightController/Solutions/model/road_yolo11n_seg_128.onnx"
-# Compiled .nb from ST Edge AI Cloud for the 128×128 model — 5.9× faster
-# than the ONNX equivalent on STM32MP257 CPU (59 ms vs 346 ms).
-MODEL_PATH_NPU = "FlightController/Solutions/model/road_yolo11n_seg_128_1.nb"
+# New semantic road segmentation model compiled for the STM32MP257 VIP9000.
+# Contract: RGB float32 [0, 1], NCHW [1, 3, 256, 256] -> logits
+# [1, 2, 256, 256], where class 0 is background and class 1 is road.
+MODEL_PATH_NPU = "FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb"
 
-# Prefer the 128 .nb when both 128 ONNX and .nb are available.
+# Prefer the NPU semantic model by default.  Set this to False (or call
+# configure_model(..., backend="cpu")) to retain the existing CPU YOLO path.
 _AUTO_USE_NPU = True
 
 # Force CPU-only inference.  The lightweight 128×128 model contains ops
@@ -227,6 +229,10 @@ _SESSION: Any | None = None
 _INPUT_NAME: str | None = None
 _MODEL_INPUT_SIZE: int | None = None
 _SESSION_PROVIDER: str = "unknown"
+_MODEL_KIND: str = "unknown"
+
+MODEL_KIND_YOLO = "yolo_instance_seg"
+MODEL_KIND_SEMANTIC = "semantic_seg"
 
 
 CenterPoint = Tuple[float, int, float]  # center_x, y, width
@@ -382,6 +388,45 @@ def _resolve_model_path() -> tuple[str, bool]:
     return MODEL_PATH, False
 
 
+def configure_model(
+    *,
+    backend: str = "npu",
+    cpu_model_path: str | None = None,
+    npu_model_path: str | None = None,
+) -> None:
+    """Configure the road model and reset the cached inference session.
+
+    ``backend="npu"`` selects the compiled semantic ``.nb`` model, while
+    ``backend="cpu"`` selects the existing lightweight YOLO ONNX model.  The
+    reset matters for tests and long-running launchers that reconfigure the
+    module before starting their inference thread.
+    """
+    normalized = str(backend).strip().lower()
+    if normalized not in {"npu", "cpu"}:
+        raise ValueError(f"unsupported road inference backend: {backend!r}")
+
+    global MODEL_PATH, MODEL_PATH_NPU, _AUTO_USE_NPU, _CPU_ONLY
+    global _SESSION, _INPUT_NAME, _MODEL_INPUT_SIZE, _SESSION_PROVIDER
+    global _MODEL_KIND, _USE_CROP_PREPROCESS
+
+    if cpu_model_path is not None:
+        MODEL_PATH = str(cpu_model_path)
+    if npu_model_path is not None:
+        MODEL_PATH_NPU = str(npu_model_path)
+
+    _AUTO_USE_NPU = normalized == "npu"
+    # ONNX inference is deliberately CPU-only.  The legacy YOLO graph contains
+    # operators that are known to crash the board's VSINPU execution provider.
+    _CPU_ONLY = True
+
+    _SESSION = None
+    _INPUT_NAME = None
+    _MODEL_INPUT_SIZE = None
+    _SESSION_PROVIDER = "unknown"
+    _MODEL_KIND = "unknown"
+    _USE_CROP_PREPROCESS = False
+
+
 def _select_providers() -> list[str]:
     import onnxruntime as ort
 
@@ -433,7 +478,8 @@ def _make_session(model_path: str, is_nb: bool = False):
 
 
 def _get_session():
-    global _SESSION, _INPUT_NAME, _MODEL_INPUT_SIZE, _SESSION_PROVIDER, _USE_CROP_PREPROCESS
+    global _SESSION, _INPUT_NAME, _MODEL_INPUT_SIZE, _SESSION_PROVIDER
+    global _MODEL_KIND, _USE_CROP_PREPROCESS
 
     if _SESSION is None:
         model_path, is_nb = _resolve_model_path()
@@ -445,14 +491,16 @@ def _get_session():
         input_meta = _SESSION.get_inputs()[0]
         _INPUT_NAME = input_meta.name
         _MODEL_INPUT_SIZE = _input_size_from_meta(input_meta.shape)
+        _MODEL_KIND = _model_kind_from_output_meta(_SESSION.get_outputs())
 
         if not is_nb:
             _log_low_resolution_warning(model_path, _MODEL_INPUT_SIZE)
 
-        # At low resolutions letterbox wastes too much canvas on gray
-        # padding — switch to center-crop preprocessing automatically.
+        # At low resolutions letterbox wastes too much canvas on gray padding
+        # for the legacy YOLO model.  The semantic model was trained by direct
+        # full-frame resize and must never use the crop path.
         resolved_size = _MODEL_INPUT_SIZE or INP_SIZE
-        if resolved_size <= 160:
+        if _MODEL_KIND == MODEL_KIND_YOLO and resolved_size <= 160:
             _USE_CROP_PREPROCESS = True
 
         if is_nb:
@@ -482,9 +530,10 @@ def _log_npu_info(model_path: str) -> None:
     try:
         from loguru import logger
         logger.info(
-            "NPU model loaded: {}  |  backend={}  |  input={} shape=[{}]",
+            "NPU model loaded: {}  |  backend={}  |  kind={}  |  input={} shape=[{}]",
             os.path.basename(model_path),
             _SESSION_PROVIDER,
+            _MODEL_KIND,
             _INPUT_NAME,
             "x".join(str(d) for d in (_SESSION.get_inputs()[0].shape or [])),
         )
@@ -496,10 +545,30 @@ def _input_size_from_meta(shape: Any) -> int:
     if shape and len(shape) >= 4:
         h_value = shape[2]
         w_value = shape[3]
-        if isinstance(h_value, int) and isinstance(w_value, int):
+        if isinstance(h_value, (int, np.integer)) and isinstance(w_value, (int, np.integer)):
             if h_value > 0 and h_value == w_value:
                 return int(h_value)
     return INP_SIZE
+
+
+def _model_kind_from_output_meta(outputs: Any) -> str:
+    """Identify the decoder from the model's output tensor contract."""
+    output_list = list(outputs or [])
+    if len(output_list) == 1:
+        shape = list(getattr(output_list[0], "shape", []) or [])
+        if (
+            len(shape) == 4
+            and isinstance(shape[1], (int, np.integer))
+            and int(shape[1]) == 2
+        ):
+            return MODEL_KIND_SEMANTIC
+        raise ValueError(
+            "unsupported single-output road model; expected logits "
+            f"[1, 2, H, W], got shape={shape}"
+        )
+    if len(output_list) >= 2:
+        return MODEL_KIND_YOLO
+    raise ValueError("road model exposes no output tensors")
 
 
 def _letterbox(frame: np.ndarray, new_size: int = INP_SIZE):
@@ -531,6 +600,15 @@ def _preprocess(frame: np.ndarray, input_size: int):
     img = np.transpose(img, (2, 0, 1))
     img = np.expand_dims(img, axis=0).astype(np.float32)
     return img, scale, pad_x, pad_y
+
+
+def _preprocess_semantic(frame: np.ndarray, input_size: int) -> np.ndarray:
+    """Match the V3 training contract: full-frame resize, RGB, float [0, 1]."""
+    resized = cv2.resize(frame, (input_size, input_size), interpolation=cv2.INTER_LINEAR)
+    image_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+    blob = image_rgb.astype(np.float32) / 255.0
+    blob = np.transpose(blob, (2, 0, 1))
+    return np.expand_dims(blob, axis=0).astype(np.float32, copy=False)
 
 
 def _preprocess_crop(frame: np.ndarray, input_size: int):
@@ -805,6 +883,69 @@ def _decode_yolo_segmentation(
         return None, [], 0.0, "decoded road instances are empty"
 
     return merged_mask, instances, float(np.mean(selected_scores)), "ok"
+
+
+def _decode_semantic_segmentation(
+    outputs: List[np.ndarray],
+    orig_w: int,
+    orig_h: int,
+) -> Tuple[np.ndarray | None, List[RoadInstance], float, str]:
+    """Decode background/road logits from the NPU semantic model."""
+    if len(outputs) != 1:
+        return None, [], 0.0, f"expected 1 semantic output, got {len(outputs)}"
+
+    logits = np.asarray(outputs[0], dtype=np.float32)
+    if logits.ndim != 4 or logits.shape[0] != 1 or logits.shape[1] != 2:
+        return None, [], 0.0, (
+            "semantic logits must be [1, 2, H, W], "
+            f"got shape={logits.shape}"
+        )
+    if not np.all(np.isfinite(logits)):
+        return None, [], 0.0, "semantic logits contain non-finite values"
+
+    # For a two-class softmax, P(road) = sigmoid(road_logit-bg_logit).  A
+    # strict positive delta matches argmax semantics, including background on
+    # exact ties.
+    delta = logits[0, 1] - logits[0, 0]
+    road_small = delta > 0.0
+    if not np.any(road_small):
+        return None, [], 0.0, "semantic model predicted no road pixels"
+
+    road_probability = _sigmoid(delta)
+    confidence = float(np.mean(road_probability[road_small]))
+    mask_small = road_small.astype(np.uint8) * 255
+    final_mask = cv2.resize(
+        mask_small,
+        (orig_w, orig_h),
+        interpolation=cv2.INTER_NEAREST,
+    )
+    final_mask = (final_mask > 0).astype(np.uint8) * 255
+    # Semantic models can emit small disconnected false-positive islands.
+    # Keep the plausible bottom-connected road component while preserving any
+    # connected fork/intersection geometry inside it.
+    final_mask = _clean_mask(final_mask)
+    area = int(np.count_nonzero(final_mask))
+    if area <= 0:
+        return None, [], 0.0, "semantic road mask became empty after resize"
+
+    x, y, width, height = cv2.boundingRect(final_mask)
+    bottom_y_start = int(orig_h * 0.85)
+    bottom_cols = np.where(final_mask[bottom_y_start:, :] > 0)[1]
+    bottom_touch_px = int(len(bottom_cols))
+    bottom_cx = (
+        float(np.mean(bottom_cols))
+        if bottom_touch_px > 0
+        else float(x + width / 2.0)
+    )
+    instance = RoadInstance(
+        mask=final_mask.copy(),
+        score=confidence,
+        box_xywh=(float(x), float(y), float(width), float(height)),
+        area=area,
+        bottom_touch_px=bottom_touch_px,
+        bottom_cx=bottom_cx,
+    )
+    return final_mask, [instance], confidence, "ok"
 
 
 def _clean_mask(mask: np.ndarray) -> np.ndarray:
@@ -1542,6 +1683,7 @@ def get_model_io_info() -> dict[str, Any]:
     session, _ = _get_session()
     return {
         "provider": _SESSION_PROVIDER,
+        "model_kind": _MODEL_KIND,
         "input_size": _MODEL_INPUT_SIZE or INP_SIZE,
         "inputs": [
             {"name": item.name, "shape": item.shape, "type": item.type}
@@ -1580,26 +1722,37 @@ def get_road_perception(
 
         session, input_name = _get_session()
         input_size = _MODEL_INPUT_SIZE or INP_SIZE
-        if _USE_CROP_PREPROCESS:
+        if _MODEL_KIND == MODEL_KIND_SEMANTIC:
+            blob = _preprocess_semantic(frame_bgr, input_size)
+            pad_x = 0.0
+            pad_y = 0.0
+        elif _USE_CROP_PREPROCESS:
             blob, _scale, pad_x, pad_y = _preprocess_crop(frame_bgr, input_size)
         else:
             blob, _scale, pad_x, pad_y = _preprocess(frame_bgr, input_size)
         outputs = session.run(None, {input_name: blob})
 
-        merged_mask, instances, confidence, decode_msg = _decode_yolo_segmentation(
-            outputs,
-            orig_w=orig_w,
-            orig_h=orig_h,
-            input_size=input_size,
-            pad_x=pad_x,
-            pad_y=pad_y,
-        )
+        if _MODEL_KIND == MODEL_KIND_SEMANTIC:
+            merged_mask, instances, confidence, decode_msg = _decode_semantic_segmentation(
+                outputs,
+                orig_w=orig_w,
+                orig_h=orig_h,
+            )
+        else:
+            merged_mask, instances, confidence, decode_msg = _decode_yolo_segmentation(
+                outputs,
+                orig_w=orig_w,
+                orig_h=orig_h,
+                input_size=input_size,
+                pad_x=pad_x,
+                pad_y=pad_y,
+            )
 
         # Crop-mode preprocessing produces masks that are horizontally
         # stretched because the decode step resizes from a square crop to a
         # non-square frame.  Fix the geometry here so that downstream
         # centerline extraction sees the correct pixel coordinates.
-        if _USE_CROP_PREPROCESS:
+        if _MODEL_KIND == MODEL_KIND_YOLO and _USE_CROP_PREPROCESS:
             if merged_mask is not None:
                 merged_mask = _fix_mask_for_crop(merged_mask)
             for inst in instances:
@@ -1776,14 +1929,12 @@ def _parse_cli_args():
 
 def _main_cli() -> int:
     args = _parse_cli_args()
-    global MODEL_PATH, MODEL_PATH_NPU, _AUTO_USE_NPU
-    if args.model:
-        MODEL_PATH = args.model
-        _AUTO_USE_NPU = False  # explicit ONNX path disables NPU auto-detect
     if args.model_npu:
-        MODEL_PATH_NPU = args.model_npu
-        MODEL_PATH = args.model_npu  # override so _resolve_model_path picks it
-        _AUTO_USE_NPU = True
+        configure_model(backend="npu", npu_model_path=args.model_npu)
+    elif args.model:
+        configure_model(backend="cpu", cpu_model_path=args.model)
+    else:
+        configure_model(backend="npu")
 
     frame = cv2.imread(args.image, cv2.IMREAD_COLOR)
     if frame is None:
@@ -1846,6 +1997,7 @@ __all__ = [
     "choose_branch",
     "classify_branch_label",
     "compute_meters_per_pixel",
+    "configure_model",
     "get_model_io_info",
     "get_road_perception",
     "normalize_angle_deg",

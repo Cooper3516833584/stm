@@ -1,12 +1,12 @@
-"""Road perception pipeline with camera capture and YOLO inference threads.
+"""Road perception pipeline with camera capture and segmentation inference threads.
 
-Replaces the single-threaded blocking ``cap.read() → YOLO inference``
+Replaces the single-threaded blocking ``cap.read() → segmentation inference``
 sequence with separate parallel threads, so the main control loop only
 reads the latest results without blocking.
 
 Architecture::
 
-    CameraThread ──frame──→ YOLOInferenceThread ──result──→ Control Loop
+    CameraThread ──frame──→ Segmentation thread ──result──→ Control Loop
        (独立)                  (独立)                        (主线程, 10Hz)
 
     SharedLatest buffers decouple producers from consumers with a
@@ -19,6 +19,8 @@ Usage::
     pipeline = PerceptionPipeline(
         camera_index=7,
         model_path="FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
+        npu_model_path="FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb",
+        inference_backend="npu",
         flight_height_m=1.0,
         branch_preference="auto",
     )
@@ -209,7 +211,7 @@ class CameraThread:
 # ── YOLOInferenceThread ─────────────────────────────────────────────────
 
 class YOLOInferenceThread:
-    """Independent YOLO inference thread.
+    """Independent road segmentation inference thread.
 
     Polls ``CameraThread.frame_buffer`` for the latest frame, runs
     ``road_perception.get_road_perception()``, and publishes the result
@@ -224,6 +226,8 @@ class YOLOInferenceThread:
         self,
         camera_thread: CameraThread,
         model_path: str,
+        npu_model_path: str = "FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb",
+        inference_backend: str = "npu",
         flight_height_m: float = 1.0,
         branch_preference: str = "auto",
         wb_enable: bool = False,
@@ -235,6 +239,8 @@ class YOLOInferenceThread:
     ) -> None:
         self._camera = camera_thread
         self._model_path = model_path
+        self._npu_model_path = npu_model_path
+        self._inference_backend = inference_backend
         self._flight_height_m = flight_height_m
         self._branch_preference = branch_preference
         self._wb_enable = wb_enable
@@ -261,19 +267,31 @@ class YOLOInferenceThread:
         if self._running:
             return
 
-        # Pre-load the ONNX session inside road_perception's module-level
-        # globals so that the first inference is not cold-start.
+        # Configure road_perception's module-level session before the worker
+        # starts.  NPU is the production default; CPU retains the legacy
+        # lightweight YOLO implementation.
         import road_perception
-        road_perception.MODEL_PATH = self._model_path
-        road_perception._AUTO_USE_NPU = True       # prefer .nb if available
-        road_perception._CPU_ONLY = True           # skip VSINPU EP
+        road_perception.configure_model(
+            backend=self._inference_backend,
+            cpu_model_path=self._model_path,
+            npu_model_path=self._npu_model_path,
+        )
+        io_info = road_perception.get_model_io_info()
 
         self._running = True
         self._thread = threading.Thread(
             target=self._inference_task, name="yolo", daemon=True
         )
         self._thread.start()
-        self._log(f"started model={self._model_path}")
+        selected_model = (
+            self._npu_model_path
+            if self._inference_backend == "npu"
+            else self._model_path
+        )
+        self._log(
+            f"started backend={self._inference_backend} model={selected_model} "
+            f"provider={io_info['provider']} kind={io_info['model_kind']}"
+        )
 
     def stop(self) -> None:
         """Signal the thread to stop and join it."""
@@ -391,6 +409,8 @@ class PerceptionPipeline:
         camera_height: int = 480,
         camera_fps: int = 30,
         model_path: str = "FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
+        npu_model_path: str = "FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb",
+        inference_backend: str = "npu",
         flight_height_m: float = 1.0,
         branch_preference: str = "auto",
         wb_enable: bool = False,
@@ -407,6 +427,8 @@ class PerceptionPipeline:
         self.yolo = YOLOInferenceThread(
             camera_thread=self.camera,
             model_path=model_path,
+            npu_model_path=npu_model_path,
+            inference_backend=inference_backend,
             flight_height_m=flight_height_m,
             branch_preference=branch_preference,
             wb_enable=wb_enable,

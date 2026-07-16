@@ -142,15 +142,13 @@ def get_road_perception(
 
 ---
 
-### 3.3 YOLO 模型路径 — 文件是否存在未确认
+### 3.3 道路分割模型路径与后端
 
 **多处引用**: `road_perception.py:141`, `road_follow_main.py:30`
 
-```python
-MODEL_PATH = "FlightController/Solutions/model/road_yolo11n_seg.onnx"
-```
-
-IMPLEMENTATION_PLAN §7 标记为 🔴 高风险——模型文件未确认存在。若不存在，整个视觉链路无法测试。
+默认使用 `new_road_seg_v3_final_fp32.nb` 在 VIP9000 NPU 上执行；通过
+`--road-model-backend cpu` 可切回现有 `road_yolo11n_seg_128.onnx` 小模型。
+两个模型文件均随仓库部署，启动时按所选后端检查文件是否存在。
 
 ---
 

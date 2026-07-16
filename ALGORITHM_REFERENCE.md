@@ -185,21 +185,32 @@ function update(obstacles_body_cm):
 
 ---
 
-## 2. YOLO11-seg 道路分割与中线提取
+## 2. 道路语义分割与中线提取
 
 **实现位置**：[road_perception.py](road_perception.py)
 
 ### 2.1 问题建模
 
-给定 640×480 BGR 图像帧，使用 YOLO11n-seg ONNX 模型进行实例分割，从道路实例 mask 中提取中线点序列，输出像素偏差 $e_{\text{px}}$、中线角度 $\alpha$ 及道路状态（single / fork / intersection / ambiguous / lost）。
+给定 640×480 BGR 图像帧，默认使用 `new_road_seg_v3_final_fp32.nb`
+在 VIP9000 NPU 上进行二类语义分割，从道路 mask 中提取中线点序列，输出
+像素偏差 $e_{\text{px}}$、中线角度 $\alpha$ 及道路状态（single / fork /
+intersection / ambiguous / lost）。原 YOLO11n-seg 128×128 ONNX 实例分割实现
+保留为 CPU 回退。
 
 ### 2.2 数学模型
 
-#### ONNX 推理管线
+#### 默认 NPU 语义分割管线
+
+1. **直接缩放**：整帧缩放至 $256 \times 256$，与训练变换保持一致
+2. **归一化**：`BGR → RGB`，`[0,255] → [0,1]` float32，NCHW
+3. **推理**：STAI MPU 加载 `.nb`，使用 VIP9000 NPU
+4. **后处理**：解析 `logits [1,2,256,256]`，`argmax` 后将 class 1 道路 mask 缩放回原图
+
+#### CPU 回退 YOLO 管线
 
 1. **Letterbox 预处理**：保持宽高比的缩放 + 灰色填充至 $320 \times 320$
 2. **归一化**：`BGR → RGB`，`[0,255] → [0,1]` 浮点
-3. **推理**：ONNX Runtime，Provider 优先级 VSINPU > XNNPACK > CPU
+3. **推理**：ONNX Runtime，固定 XNNPACK/CPU，避免旧 YOLO 图触发 VSINPU 已知崩溃
 4. **后处理**：解析输出张量 `output0 [1, C, N]`（检测头）+ `output1 [1, M, H, W]`（mask prototype）
 
 #### Mask 解码

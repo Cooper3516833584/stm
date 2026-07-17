@@ -8,8 +8,12 @@
 
 - 默认后端：`--road-model-backend npu`
 - 默认后处理：`--road-postprocess-mode fast-main`；始终只跟随当前主路，`full` 仅保留全分辨率几何
-- 实测道路全宽固定为 50cm：巡线前向雷达走廊、道路半宽和侵入判断默认均为 ±25cm；
-  25cm 机体/边缘余量下不规划道路内横向绕行，遇中心障碍物使用 no-gap 减速逻辑
+- 演示地图道路全宽固定为 50cm（物理半宽 ±25cm）；障碍侵入和前向安全走廊按
+  `max(道路半宽, 安全间距)` 扩至 ±75cm，避免漏判道路外但已进入安全包络的树木。
+  已确认树木只在一侧且另一侧无障碍，因此演示绕障允许机体中心在道路中心 ±90cm
+  范围活动，候选与障碍距离必须严格大于 75cm。当前左侧树地图默认
+  `--road-bypass-known-clear-side right`，只在右侧选路并忽略该已确认空侧的杂散回波；
+  非演示环境必须改为 `auto`
 - 默认 NPU 模型：`FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb`
 - V4 模型 SHA-256：`1172334fd1e24d597add9cb7d982493c1a59a2d09e740977875fe42d1c18a386`
 - V4 相对 V3：结构、输入输出合同和后处理保持不变；两折基础道路 Road IoU 平均 0.8629，

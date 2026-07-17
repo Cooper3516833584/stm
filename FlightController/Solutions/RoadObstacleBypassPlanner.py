@@ -18,6 +18,8 @@ from .Safety import Command, RadarObstacleField
 
 ROAD_WIDTH_CM = 50.0
 ROAD_HALF_WIDTH_CM = ROAD_WIDTH_CM / 2.0
+OBSTACLE_SAFETY_DISTANCE_CM = 75.0
+BYPASS_ACTIVITY_HALF_WIDTH_CM = 90.0
 
 
 class RoadBypassState(str, Enum):
@@ -33,11 +35,20 @@ class RoadBypassConfig:
 
     road_half_width_cm: float = ROAD_HALF_WIDTH_CM
     road_edge_margin_cm: float = 25.0
+    # Demo map: the tree is present on only one side and the other side is
+    # known clear, so the vehicle centre may temporarily leave the painted
+    # 50cm road during avoidance.
+    bypass_activity_half_width_cm: float | None = BYPASS_ACTIVITY_HALF_WIDTH_CM
+    # Optional controlled-demo prior.  When one side is physically verified
+    # clear, radar returns on that side are ignored by this bypass helper and
+    # all candidates are constrained to the verified-clear side.  The global
+    # SafetyArbiter still receives the complete point cloud.
+    known_clear_side: str | None = None
 
     min_x_cm: float = 40.0
     lookahead_cm: float = 180.0
     intrusion_half_width_cm: float = ROAD_HALF_WIDTH_CM
-    bypass_clearance_cm: float = 75.0
+    bypass_clearance_cm: float = OBSTACLE_SAFETY_DISTANCE_CM
 
     lateral_step_cm: float = 10.0
     guide_distance_cm: float = 150.0
@@ -46,7 +57,9 @@ class RoadBypassConfig:
     bypass_yaw_kp: float = 0.75
     max_bypass_yaw_bias_deg_s: float = 15.0
     max_yaw_rate_deg_s: float = 25.0
-    bypass_yaw_sign: float = 1.0
+    # Body +Y is left, while the FC command API uses yaw>0 for a clockwise
+    # right turn.  Therefore a right-side target (negative Y) needs +yaw.
+    bypass_yaw_sign: float = -1.0
 
     activate_frames: int = 2
     release_s: float = 0.5
@@ -57,6 +70,27 @@ class RoadBypassConfig:
     w_center: float = 1.0
     w_switch: float = 0.25
     side_switch_penalty: float = 40.0
+
+    @property
+    def effective_intrusion_half_width_cm(self) -> float:
+        """Road plus safety envelope used to decide obstacle intrusion."""
+        return max(
+            abs(float(self.road_half_width_cm)),
+            abs(float(self.bypass_clearance_cm)),
+            abs(float(self.intrusion_half_width_cm)),
+        )
+
+    @property
+    def normalized_known_clear_side(self) -> str | None:
+        side = self.known_clear_side
+        if side is None:
+            return None
+        normalized = str(side).strip().lower()
+        if normalized in {"", "auto", "none"}:
+            return None
+        if normalized not in {"left", "right"}:
+            raise ValueError("known_clear_side must be 'left', 'right', or None")
+        return normalized
 
 
 class RoadObstacleBypassPlanner:
@@ -170,21 +204,42 @@ class RoadObstacleBypassPlanner:
         if points.size == 0:
             return np.empty((0, 2), dtype=float)
 
-        return points[
+        intrusion_half_width = cfg.effective_intrusion_half_width_cm
+        intrusion = points[
             (points[:, 0] >= cfg.min_x_cm)
             & (points[:, 0] <= cfg.lookahead_cm)
-            & (np.abs(points[:, 1]) <= cfg.intrusion_half_width_cm)
+            & (np.abs(points[:, 1]) <= intrusion_half_width)
         ]
+        clear_side = cfg.normalized_known_clear_side
+        if clear_side == "right":
+            # Body +Y is left: only the known obstacle/left side can trigger.
+            intrusion = intrusion[intrusion[:, 1] >= 0.0]
+        elif clear_side == "left":
+            intrusion = intrusion[intrusion[:, 1] <= 0.0]
+        return intrusion
 
     def _choose_bypass_target(self, points: np.ndarray) -> float | None:
         cfg = self.config
-        y_min = -cfg.road_half_width_cm + cfg.road_edge_margin_cm
-        y_max = cfg.road_half_width_cm - cfg.road_edge_margin_cm
+        if cfg.bypass_activity_half_width_cm is None:
+            lateral_limit = max(
+                0.0,
+                float(cfg.road_half_width_cm) - float(cfg.road_edge_margin_cm),
+            )
+        else:
+            lateral_limit = max(0.0, float(cfg.bypass_activity_half_width_cm))
+        y_min = -lateral_limit
+        y_max = lateral_limit
         if y_min > y_max:
             return None
 
         step = max(1.0, float(cfg.lateral_step_cm))
         candidates = np.arange(y_min, y_max + 1e-6, step)
+
+        clear_side = cfg.normalized_known_clear_side
+        if clear_side == "right":
+            candidates = candidates[candidates <= 0.0]
+        elif clear_side == "left":
+            candidates = candidates[candidates >= 0.0]
 
         if points.size:
             ahead = points[
@@ -193,6 +248,15 @@ class RoadObstacleBypassPlanner:
             ]
         else:
             ahead = np.empty((0, 2), dtype=float)
+
+        # In the controlled demo the opposite side has been physically
+        # verified clear.  Filter out its radar/ground returns here so they do
+        # not create a false no-gap result.  This is deliberately not applied
+        # in the generic/auto mode.
+        if clear_side == "right":
+            ahead = ahead[ahead[:, 1] >= 0.0]
+        elif clear_side == "left":
+            ahead = ahead[ahead[:, 1] <= 0.0]
 
         safe: list[tuple[float, float]] = []
         for target_y in candidates:
@@ -219,7 +283,7 @@ class RoadObstacleBypassPlanner:
         if ahead.size == 0:
             return False
         lateral_dist = np.abs(ahead[:, 1] - target_y_cm)
-        return bool(np.any(lateral_dist < self.config.bypass_clearance_cm))
+        return bool(np.any(lateral_dist <= self.config.bypass_clearance_cm))
 
     def _set_bypass_state(self, target_y_cm: float) -> None:
         self._last_target_y_cm = float(target_y_cm)
@@ -306,6 +370,8 @@ def _append_reason(reason: str, suffix: str) -> str:
 __all__ = [
     "ROAD_WIDTH_CM",
     "ROAD_HALF_WIDTH_CM",
+    "OBSTACLE_SAFETY_DISTANCE_CM",
+    "BYPASS_ACTIVITY_HALF_WIDTH_CM",
     "RoadBypassConfig",
     "RoadBypassState",
     "RoadObstacleBypassPlanner",

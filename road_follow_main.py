@@ -25,6 +25,8 @@ from perception_pipeline import PerceptionPipeline
 
 ROAD_WIDTH_CM = 50.0
 ROAD_HALF_WIDTH_CM = ROAD_WIDTH_CM / 2.0
+OBSTACLE_SAFETY_DISTANCE_CM = 75.0
+BYPASS_ACTIVITY_HALF_WIDTH_CM = 90.0
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -148,8 +150,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--corridor-half-width-cm",
         type=float,
-        default=ROAD_HALF_WIDTH_CM,
-        help="Radar forward corridor half-width (default: 25cm for a 50cm road)",
+        default=OBSTACLE_SAFETY_DISTANCE_CM,
+        help="Radar forward safety corridor half-width (default: 75cm)",
     )
     parser.add_argument("--max-vx-cm-s", type=float, default=25.0)
     parser.add_argument("--max-vy-cm-s", type=float, default=5.0)
@@ -191,21 +193,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Physical road half-width (default: 25cm, i.e. 50cm full width)",
     )
     parser.add_argument("--road-edge-margin-cm", type=float, default=25.0)
+    parser.add_argument(
+        "--road-bypass-activity-half-width-cm",
+        type=float,
+        default=BYPASS_ACTIVITY_HALF_WIDTH_CM,
+        help="Demo avoidance centre-position range on either side of road centre (default: 90cm)",
+    )
+    parser.add_argument(
+        "--road-bypass-known-clear-side",
+        choices=("auto", "left", "right"),
+        default="right",
+        help="Controlled-demo clear side; right is default for the current left-tree map",
+    )
     parser.add_argument("--road-bypass-lookahead-cm", type=float, default=180.0)
     parser.add_argument("--road-bypass-min-x-cm", type=float, default=40.0)
     parser.add_argument(
         "--road-bypass-intrusion-half-width-cm",
         type=float,
         default=ROAD_HALF_WIDTH_CM,
-        help="Obstacle intrusion half-width (default: the 25cm road half-width)",
+        help="Minimum intrusion half-width; effective value also covers road half-width and clearance",
     )
-    parser.add_argument("--road-bypass-clearance-cm", type=float, default=75.0)
+    parser.add_argument(
+        "--road-bypass-clearance-cm",
+        type=float,
+        default=OBSTACLE_SAFETY_DISTANCE_CM,
+    )
     parser.add_argument("--road-bypass-speed-cm-s", type=float, default=12.0)
     parser.add_argument("--road-bypass-lateral-step-cm", type=float, default=10.0)
     parser.add_argument("--road-bypass-guide-distance-cm", type=float, default=150.0)
     parser.add_argument("--road-bypass-yaw-kp", type=float, default=0.75)
     parser.add_argument("--road-bypass-max-yaw-bias-deg-s", type=float, default=15.0)
-    parser.add_argument("--road-bypass-yaw-sign", type=float, default=1.0)
+    parser.add_argument("--road-bypass-yaw-sign", type=float, default=-1.0)
     parser.add_argument("--road-bypass-activate-frames", type=int, default=2)
     parser.add_argument("--road-bypass-release-s", type=float, default=0.5)
     parser.add_argument("--road-bypass-min-confidence", type=float, default=0.4)
@@ -273,10 +291,15 @@ def main(argv: list[str] | None = None) -> None:
         logger.warning("[SAFETY] dry-run mode: no non-zero velocity will be sent. Add --enable-flight to allow real output")
     if args.no_radar:
         logger.info("[ROAD] camera-only mode: radar acquisition and obstacle avoidance are disabled")
-    if args.road_bypass_enable and args.road_half_width_cm <= args.road_edge_margin_cm:
+    if (
+        args.road_bypass_enable
+        and args.road_bypass_activity_half_width_cm
+        > max(0.0, args.road_half_width_cm - args.road_edge_margin_cm)
+    ):
         logger.warning(
-            "[ROAD] 50cm road leaves no safe lateral bypass corridor after the "
-            "25cm body/edge margin; bypass will use its no-gap slowdown behavior"
+            "[ROAD] demo off-road bypass enabled: vehicle centre may move up to "
+            f"+/-{args.road_bypass_activity_half_width_cm:.0f}cm from road centre; "
+            f"known clear side={args.road_bypass_known_clear_side}"
         )
 
     fc = None
@@ -376,6 +399,12 @@ def main(argv: list[str] | None = None) -> None:
             enabled=bool(args.road_bypass_enable and not args.no_radar),
             road_half_width_cm=args.road_half_width_cm,
             road_edge_margin_cm=args.road_edge_margin_cm,
+            bypass_activity_half_width_cm=args.road_bypass_activity_half_width_cm,
+            known_clear_side=(
+                None
+                if args.road_bypass_known_clear_side == "auto"
+                else args.road_bypass_known_clear_side
+            ),
             min_x_cm=args.road_bypass_min_x_cm,
             lookahead_cm=args.road_bypass_lookahead_cm,
             intrusion_half_width_cm=args.road_bypass_intrusion_half_width_cm,

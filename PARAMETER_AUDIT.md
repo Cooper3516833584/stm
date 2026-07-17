@@ -148,10 +148,13 @@ def get_road_perception(
 NPU 默认使用 `--road-postprocess-mode fast-main`，在 192×144 工作 mask 上只提取
 当前主路；板端三轮 100 帧综合平均 74.4ms。`full` 仅切换为全分辨率主路几何，
 不会恢复分叉处理；CPU YOLO 后处理同样只输出主路。
-道路物理全宽固定为 50cm，因此 `road_follow_main.py` 的
-`--road-half-width-cm`、`--corridor-half-width-cm` 和
-`--road-bypass-intrusion-half-width-cm` 默认均为 25cm。由于机体/边缘余量也是
-25cm，默认道路内绕障没有安全横向候选，只允许减速而不会规划出道路边界。
+演示地图道路物理全宽固定为 50cm，`--road-half-width-cm=25`。障碍侵入半宽
+动态取道路半宽、配置最小值和 `--road-bypass-clearance-cm=75` 的最大值，因此默认
+为 75cm；前向雷达安全走廊也为 ±75cm。因已确认树只在道路一侧、另一侧无其他
+障碍，演示避让使用 `--road-bypass-activity-half-width-cm=90`，允许机体中心暂时离开
+道路。当前左侧树地图同时默认 `--road-bypass-known-clear-side=right`，候选仅在右侧，
+并忽略已人工确认空侧的雷达杂散回波；通用场景必须设为 `auto`。该范围不是通用
+飞行安全边界，只适用于当前受控演示地图。
 
 ---
 

@@ -997,6 +997,9 @@ def _road_record_extra(
             "straightened": bool(
                 getattr(perception, "centerline_straightened", False)
             ),
+            "extrapolated": bool(
+                getattr(perception, "centerline_extrapolated", False)
+            ),
         },
         "perception_age_s": _float_or_none(perception_age_s),
         "perception_stale": bool(perception_stale),

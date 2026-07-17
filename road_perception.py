@@ -65,6 +65,7 @@ class RoadPerceptionResult:
     centerline_max_step_px: float = 0.0
     centerline_inlier_ratio: float = 0.0
     centerline_straightened: bool = False
+    centerline_extrapolated: bool = False
 
 
 @dataclass
@@ -230,10 +231,11 @@ CONTROL_ANGLE_Y_MAX_RATIO = 0.98
 CENTERLINE_SCAN_Y_MAX_RATIO = 0.97
 MIN_FIT_PTS = 5
 
-# A usable control path must reach the near field and cover enough image rows.
-# The experiment road has no forks, so a complete but jagged path can be
+# The experiment road has no forks.  A supported remote patch may therefore
+# be extrapolated into the near field, while a complete but jagged path can be
 # replaced by a robust straight centerline instead of following mask lobes.
-MIN_CONTROL_CENTERLINE_POINTS = 18
+MIN_CONTROL_FIT_POINTS = 8
+MIN_CONTROL_FIT_SPAN_RATIO = 0.08
 MIN_CONTROL_BOTTOM_Y_RATIO = 0.82
 MIN_CONTROL_SPAN_RATIO = 0.22
 MAX_CENTERLINE_RESIDUAL_P90_RATIO = 0.08
@@ -263,6 +265,7 @@ RowIntervals = List[Tuple[int, List[Interval]]]
 class _CenterlineQuality:
     usable: bool
     rough: bool
+    extrapolate: bool
     reason: str
     bottom_ratio: float
     span_ratio: float
@@ -1194,29 +1197,41 @@ def _extract_fast_main_centerline(
     scale_x = float(orig_w) / float(work_w)
     scale_y = float(orig_h) / float(work_h)
     min_width = max(2, int(round(MIN_ROAD_PX_PER_ROW / scale_x)))
-    last_cx = work_w / 2.0
-    points: List[CenterPoint] = []
     bottom_y = min(work_h - 1, int(work_h * CENTERLINE_SCAN_Y_MAX_RATIO))
 
-    for y in range(bottom_y, work_h // 2, -FAST_CENTERLINE_ROW_STEP):
-        intervals = _find_intervals(clean_mask[y, :], min_width)
-        if not intervals:
-            continue
-        left, right = min(
-            intervals,
-            key=lambda interval: abs(((interval[0] + interval[1]) / 2.0) - last_cx),
-        )
-        width = float(right - left + 1)
-        interval_mid = (left + right) / 2.0
+    # The experiment road has no forks.  Process every sampled row in one
+    # NumPy operation instead of repeatedly finding Python interval lists.
+    # For a contiguous road row, the foreground mean is its exact midpoint.
+    sampled_y = np.arange(
+        bottom_y,
+        work_h // 2,
+        -FAST_CENTERLINE_ROW_STEP,
+        dtype=np.int32,
+    )
+    sampled_rows = clean_mask[sampled_y, :] > 0
+    widths = np.count_nonzero(sampled_rows, axis=1)
+    valid = widths >= min_width
+    if not np.any(valid):
+        return []
+
+    sampled_y = sampled_y[valid]
+    sampled_rows = sampled_rows[valid]
+    widths = widths[valid]
+    x_coords = np.arange(work_w, dtype=np.float32)
+    row_centers = (sampled_rows @ x_coords) / widths
+
+    last_cx = work_w / 2.0
+    points: List[CenterPoint] = []
+    for y, interval_mid, width in zip(sampled_y, row_centers, widths):
         center_x = (
-            CENTER_SMOOTH_ALPHA * interval_mid
+            CENTER_SMOOTH_ALPHA * float(interval_mid)
             + (1.0 - CENTER_SMOOTH_ALPHA) * last_cx
         )
         points.append(
             (
                 float(center_x * scale_x),
                 int(round(float(y) * scale_y)),
-                float(width * scale_x),
+                float(width) * scale_x,
             )
         )
         last_cx = center_x
@@ -1258,6 +1273,7 @@ def _centerline_quality(
         return _CenterlineQuality(
             usable=False,
             rough=False,
+            extrapolate=False,
             reason="empty",
             bottom_ratio=0.0,
             span_ratio=0.0,
@@ -1274,21 +1290,16 @@ def _centerline_quality(
     span_ratio = float((np.max(y) - np.min(y)) / h)
 
     if len(points) >= 2:
-        line = np.polyfit(y, x, deg=1)
-        residuals = np.abs(x - np.polyval(line, y))
-        residual_p90_px = float(np.percentile(residuals, 90))
-        max_step_px = float(np.max(np.abs(np.diff(x))))
-
-        slopes: List[float] = []
-        for first in range(len(points) - 1):
-            delta_y = y[first + 1 :] - y[first]
-            valid = delta_y != 0.0
-            if np.any(valid):
-                delta_x = x[first + 1 :] - x[first]
-                slopes.extend((delta_x[valid] / delta_y[valid]).tolist())
-        robust_slope = float(np.median(slopes)) if slopes else 0.0
+        delta_y = np.diff(y)
+        delta_x = np.diff(x)
+        valid = delta_y != 0.0
+        local_slopes = delta_x[valid] / delta_y[valid]
+        robust_slope = float(np.median(local_slopes)) if local_slopes.size else 0.0
         robust_intercept = float(np.median(x - robust_slope * y))
         robust_residuals = np.abs(x - (robust_slope * y + robust_intercept))
+        residual_rank = max(0, int(math.ceil(0.90 * len(robust_residuals))) - 1)
+        residual_p90_px = float(np.sort(robust_residuals)[residual_rank])
+        max_step_px = float(np.max(np.abs(delta_x)))
         inlier_threshold_px = max(24.0, float(w) * ROBUST_CENTERLINE_INLIER_RATIO)
         robust_inlier_ratio = float(np.mean(robust_residuals <= inlier_threshold_px))
     else:
@@ -1302,22 +1313,29 @@ def _centerline_quality(
         residual_p90_px > float(w) * MAX_CENTERLINE_RESIDUAL_P90_RATIO
         or max_step_px > float(w) * MAX_CENTERLINE_STEP_RATIO
     )
-    if len(points) < MIN_CONTROL_CENTERLINE_POINTS:
+    extrapolate = bool(
+        bottom_ratio < MIN_CONTROL_BOTTOM_Y_RATIO
+        or span_ratio < MIN_CONTROL_SPAN_RATIO
+    )
+    if len(points) < MIN_CONTROL_FIT_POINTS:
         usable, reason = False, "too_few_points"
-    elif bottom_ratio < MIN_CONTROL_BOTTOM_Y_RATIO:
-        usable, reason = False, "near_field_missing"
-    elif span_ratio < MIN_CONTROL_SPAN_RATIO:
-        usable, reason = False, "vertical_span_short"
+    elif span_ratio < MIN_CONTROL_FIT_SPAN_RATIO:
+        usable, reason = False, "fit_span_short"
     elif rough and robust_inlier_ratio < MIN_ROBUST_CENTERLINE_INLIERS:
         usable, reason = False, "no_straight_consensus"
+    elif rough and extrapolate:
+        usable, reason = True, "rough_extrapolated"
     elif rough:
         usable, reason = True, "rough_straightened"
+    elif extrapolate:
+        usable, reason = True, "remote_extrapolated"
     else:
         usable, reason = True, "ok"
 
     return _CenterlineQuality(
         usable=usable,
         rough=rough,
+        extrapolate=extrapolate,
         reason=reason,
         bottom_ratio=bottom_ratio,
         span_ratio=span_ratio,
@@ -1329,11 +1347,26 @@ def _centerline_quality(
     )
 
 
-def _straighten_centerline(
+def _fit_control_centerline(
     points: List[CenterPoint],
     quality: _CenterlineQuality,
     w: int,
+    h: int,
 ) -> List[CenterPoint]:
+    if quality.extrapolate:
+        observed_y = np.asarray([point[1] for point in points], dtype=np.int32)
+        row_steps = np.abs(np.diff(observed_y))
+        row_steps = row_steps[row_steps > 0]
+        step_px = int(round(float(np.median(row_steps)))) if row_steps.size else 1
+        step_px = max(1, step_px)
+        bottom_y = min(h - 1, int(round(h * CENTERLINE_SCAN_Y_MAX_RATIO)))
+        top_y = int(np.min(observed_y))
+        fitted_y = np.arange(bottom_y, top_y - 1, -step_px, dtype=np.int32)
+        median_width = float(np.median([point[2] for point in points]))
+        source_points = [(0.0, int(y), median_width) for y in fitted_y]
+    else:
+        source_points = points
+
     return [
         (
             float(
@@ -1346,7 +1379,7 @@ def _straighten_centerline(
             int(y),
             float(width),
         )
-        for _, y, width in points
+        for _, y, width in source_points
     ]
 
 
@@ -1630,8 +1663,8 @@ def _build_fast_main_result(
         result.centerline_max_step_px = quality.max_step_px
         result.centerline_inlier_ratio = quality.robust_inlier_ratio
         return result
-    if quality.rough:
-        points = _straighten_centerline(points, quality, orig_w)
+    if quality.rough or quality.extrapolate:
+        points = _fit_control_centerline(points, quality, orig_w, orig_h)
 
     pixel_error, _ = _compute_pixel_error(points, orig_w, orig_h)
     centerline_angle = _compute_centerline_angle(points, orig_h)
@@ -1650,7 +1683,13 @@ def _build_fast_main_result(
     )
     return RoadPerceptionResult(
         is_road_found=True,
-        road_state="single_rough" if quality.rough else "single",
+        road_state=(
+            "single_extrapolated"
+            if quality.extrapolate
+            else "single_rough"
+            if quality.rough
+            else "single"
+        ),
         pixel_error=float(pixel_error),
         centerline_angle=float(centerline_angle),
         path_width_px=float(path_width_px),
@@ -1677,6 +1716,7 @@ def _build_fast_main_result(
         centerline_max_step_px=quality.max_step_px,
         centerline_inlier_ratio=quality.robust_inlier_ratio,
         centerline_straightened=quality.rough,
+        centerline_extrapolated=quality.extrapolate,
     )
 
 

@@ -191,7 +191,7 @@ def test_fast_main_centerline_restores_original_pixel_scale() -> None:
     assert all(0 <= point[1] < 480 for point in points)
 
 
-def test_fast_main_rejects_remote_only_centerline() -> None:
+def test_fast_main_extrapolates_remote_only_centerline_to_near_field() -> None:
     logits = np.zeros((1, 2, 256, 256), dtype=np.float32)
     logits[:, 0] = 1.0
     logits[0, 1, 100:170, 70:150] = 4.0
@@ -205,10 +205,12 @@ def test_fast_main_rejects_remote_only_centerline() -> None:
         offset_comp_config=None,
     )
 
-    assert not result.is_road_found
-    assert result.road_state == "lost"
-    assert "centerline_quality=reject" in result.debug_msg
+    assert result.is_road_found
+    assert result.road_state == "single_extrapolated"
+    assert "quality=remote_extrapolated" in result.debug_msg
     assert result.centerline_bottom_ratio < road.MIN_CONTROL_BOTTOM_Y_RATIO
+    assert result.centerline_extrapolated
+    assert max(point[1] for point in result.centerline_points) >= 0.95 * 480
 
 
 def test_rough_complete_centerline_is_straightened_with_robust_consensus() -> None:
@@ -217,14 +219,24 @@ def test_rough_complete_centerline_is_straightened_with_robust_consensus() -> No
     points[10:20] = [(430.0, int(y), 250.0) for y in y_values[10:20]]
 
     quality = road._centerline_quality(points, 640, 480)
-    straightened = road._straighten_centerline(points, quality, 640)
+    straightened = road._fit_control_centerline(points, quality, 640, 480)
 
     assert quality.usable
     assert quality.rough
+    assert not quality.extrapolate
     assert quality.reason == "rough_straightened"
     assert quality.robust_inlier_ratio >= road.MIN_ROBUST_CENTERLINE_INLIERS
     assert max(abs(point[0] - 330.0) for point in straightened) < 1.0
     assert max(abs(a[0] - b[0]) for a, b in zip(straightened, straightened[1:])) < 1.0
+
+
+def test_centerline_fit_rejects_tiny_unsupported_patch() -> None:
+    points = [(320.0, y, 100.0) for y in range(280, 245, -7)]
+
+    quality = road._centerline_quality(points, 640, 480)
+
+    assert not quality.usable
+    assert quality.reason == "too_few_points"
 
 
 def test_fast_main_geometry_stays_close_to_full_geometry() -> None:

@@ -68,6 +68,15 @@ def test_rough_but_recoverable_centerline_runs_at_half_speed():
     assert command.reason == "road_follow:single_rough"
 
 
+def test_extrapolated_centerline_keeps_flying_at_half_speed():
+    follower = RoadFollower(RoadFollowerConfig(max_vx_cm_s=20.0))
+
+    command = follower.update(_perception(road_state="single_extrapolated"), now_s=1.0)
+
+    assert command.vx_cm_s == 10.0
+    assert command.reason == "road_follow:single_extrapolated"
+
+
 def test_lost_road_holds_heading_instead_of_blind_search_rotation():
     follower = RoadFollower(RoadFollowerConfig())
 

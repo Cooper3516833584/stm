@@ -129,7 +129,7 @@ class RoadFollower:
 
         road_state = str(getattr(perception, "road_state", "unknown"))
         vx = self.config.max_vx_cm_s * heading_speed_scale
-        if road_state == "ambiguous":
+        if road_state in {"ambiguous", "single_rough", "single_extrapolated"}:
             vx *= self.config.ambiguous_speed_scale
 
         self.last_diagnostics = RoadFollowerDiagnostics(

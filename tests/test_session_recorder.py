@@ -65,3 +65,22 @@ def test_session_recorder_writes_frame_and_radar_snapshot(tmp_path):
     assert manifest["video_frames_written"] == 1
     assert manifest["keyframes_written"] == 1
     assert manifest["metadata"]["test_case"] == "road-diagnostics"
+
+
+def test_frame_due_combines_keyframes_and_sampled_video(tmp_path):
+    recorder = SessionRecorder(
+        SessionRecorderConfig(
+            root_dir=str(tmp_path),
+            enabled=True,
+            frame_every_n=10,
+            video_enabled=True,
+            video_every_n=2,
+        )
+    )
+    try:
+        assert recorder.frame_due(0)
+        assert not recorder.frame_due(1)
+        assert recorder.frame_due(2)
+        assert recorder.frame_due(10)
+    finally:
+        recorder.close()

@@ -5,13 +5,20 @@ import pytest
 from FlightController.Solutions.RoadFollower import RoadFollower, RoadFollowerConfig
 
 
-def _perception(*, pixel_error=0.0, angle=90.0, confidence=0.9, found=True):
+def _perception(
+    *,
+    pixel_error=0.0,
+    angle=90.0,
+    confidence=0.9,
+    found=True,
+    road_state="single",
+):
     return SimpleNamespace(
         is_road_found=found,
         confidence=confidence,
         corrected_pixel_error=pixel_error,
         centerline_angle=angle,
-        road_state="single",
+        road_state=road_state,
     )
 
 
@@ -50,6 +57,24 @@ def test_large_heading_error_stops_forward_motion_until_realigned():
     assert command.vx_cm_s == 0.0
     assert command.yaw_rate_deg_s < 0.0
     assert follower.last_diagnostics.heading_speed_scale == 0.0
+
+
+def test_rough_but_recoverable_centerline_runs_at_half_speed():
+    follower = RoadFollower(RoadFollowerConfig(max_vx_cm_s=20.0))
+
+    command = follower.update(_perception(road_state="single_rough"), now_s=1.0)
+
+    assert command.vx_cm_s == 10.0
+    assert command.reason == "road_follow:single_rough"
+
+
+def test_extrapolated_centerline_keeps_flying_at_half_speed():
+    follower = RoadFollower(RoadFollowerConfig(max_vx_cm_s=20.0))
+
+    command = follower.update(_perception(road_state="single_extrapolated"), now_s=1.0)
+
+    assert command.vx_cm_s == 10.0
+    assert command.reason == "road_follow:single_extrapolated"
 
 
 def test_lost_road_holds_heading_instead_of_blind_search_rotation():

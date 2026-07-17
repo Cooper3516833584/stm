@@ -126,10 +126,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Save one JPEG keyframe every N control loops")
     parser.add_argument("--no-record-video", action="store_true",
                         help="Disable continuous camera AVI recording")
-    parser.add_argument("--record-video-every-n", type=int, default=1,
-                        help="Append one video frame every N control loops (default: 1)")
-    parser.add_argument("--record-video-fps", type=float, default=10.0,
-                        help="Playback FPS stored in camera.avi (default: 10)")
+    parser.add_argument("--record-video-every-n", type=int, default=2,
+                        help="Append one video frame every N control loops (default: 2)")
+    parser.add_argument("--record-video-fps", type=float, default=5.0,
+                        help="Playback FPS stored in camera.avi (default: 5)")
     parser.add_argument("--record-frame-queue-size", type=int, default=8,
                         help="Bounded asynchronous camera writer queue size")
     parser.add_argument("--record-radar-every-n", type=int, default=1,
@@ -485,31 +485,33 @@ def main() -> None:
                 "reason": decision.reason,
                 "sent": bool(not actual_dry_run and fc is not None),
             }
-            diagnostic_frame = _annotate_road_frame(
-                frame,
-                perception=perception,
-                loop_count=loop_count,
-                controller_diagnostics=controller_diagnostics,
-                safe_command=safe.command,
-                fc_telemetry=fc_telemetry,
-                perception_age_s=percept_age_s,
-                perception_stale=percept_stale,
-            )
-            frame_record_path = recorder.record_frame(
-                loop_count=loop_count,
-                now_s=loop_start,
-                frame=diagnostic_frame,
-                label="road",
-                source_time_s=frame_ts,
-                extra={
-                    "perception_age_s": _float_or_none(percept_age_s),
-                    "perception_stale": bool(percept_stale),
-                    "frame_age_s": _float_or_none(frame_age_s),
-                    "road_state": diagnostic_extra["road_state"],
-                    "controller": controller_diagnostics,
-                    "fc": fc_telemetry,
-                },
-            )
+            frame_record_path = None
+            if recorder.frame_due(loop_count):
+                diagnostic_frame = _annotate_road_frame(
+                    frame,
+                    perception=perception,
+                    loop_count=loop_count,
+                    controller_diagnostics=controller_diagnostics,
+                    safe_command=safe.command,
+                    fc_telemetry=fc_telemetry,
+                    perception_age_s=percept_age_s,
+                    perception_stale=percept_stale,
+                )
+                frame_record_path = recorder.record_frame(
+                    loop_count=loop_count,
+                    now_s=loop_start,
+                    frame=diagnostic_frame,
+                    label="road",
+                    source_time_s=frame_ts,
+                    extra={
+                        "perception_age_s": _float_or_none(percept_age_s),
+                        "perception_stale": bool(percept_stale),
+                        "frame_age_s": _float_or_none(frame_age_s),
+                        "road_state": diagnostic_extra["road_state"],
+                        "controller": controller_diagnostics,
+                        "fc": fc_telemetry,
+                    },
+                )
             diagnostic_extra["frame_record_path"] = frame_record_path
 
             # ── 5. Recording
@@ -976,6 +978,29 @@ def _road_record_extra(
         "centerline_point_count": len(centerline_points),
         "centerline_first": _point_extra(centerline_points[0]) if centerline_points else None,
         "centerline_last": _point_extra(centerline_points[-1]) if centerline_points else None,
+        "centerline_quality": {
+            "bottom_ratio": _float_or_none(
+                getattr(perception, "centerline_bottom_ratio", None)
+            ),
+            "span_ratio": _float_or_none(
+                getattr(perception, "centerline_span_ratio", None)
+            ),
+            "residual_p90_px": _float_or_none(
+                getattr(perception, "centerline_residual_p90_px", None)
+            ),
+            "max_step_px": _float_or_none(
+                getattr(perception, "centerline_max_step_px", None)
+            ),
+            "inlier_ratio": _float_or_none(
+                getattr(perception, "centerline_inlier_ratio", None)
+            ),
+            "straightened": bool(
+                getattr(perception, "centerline_straightened", False)
+            ),
+            "extrapolated": bool(
+                getattr(perception, "centerline_extrapolated", False)
+            ),
+        },
         "perception_age_s": _float_or_none(perception_age_s),
         "perception_stale": bool(perception_stale),
         "frame_age_s": _float_or_none(frame_age_s),

@@ -9,6 +9,8 @@ def test_road_follow_disables_radar_by_default():
     args = road_follow_main.parse_args([])
 
     assert args.no_radar is True
+    assert args.record_video_every_n == 2
+    assert args.record_video_fps == 5.0
 
 
 def test_auto_takeoff_remains_valid_in_camera_only_mode():

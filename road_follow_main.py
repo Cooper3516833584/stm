@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import sys
 import time
 
 import cv2
@@ -100,7 +101,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-record", action="store_true",
                         help="Disable camera/radar session recording")
     parser.add_argument("--record-frame-every-n", type=int, default=10,
-                        help="Save one camera frame every N control loops")
+                        help="Save one JPEG keyframe every N control loops")
+    parser.add_argument("--no-record-video", action="store_true",
+                        help="Disable continuous camera AVI recording")
+    parser.add_argument("--record-video-every-n", type=int, default=1,
+                        help="Append one video frame every N control loops (default: 1)")
+    parser.add_argument("--record-video-fps", type=float, default=10.0,
+                        help="Playback FPS stored in camera.avi (default: 10)")
+    parser.add_argument("--record-frame-queue-size", type=int, default=8,
+                        help="Bounded asynchronous camera writer queue size")
     parser.add_argument("--record-radar-every-n", type=int, default=1,
                         help="Save one radar metadata/point snapshot every N control loops")
     parser.add_argument("--record-jpeg-quality", type=int, default=85)
@@ -115,7 +124,23 @@ def parse_args() -> argparse.Namespace:
         help="Radar forward corridor half-width (default: 25cm for a 50cm road)",
     )
     parser.add_argument("--max-vx-cm-s", type=float, default=25.0)
+    parser.add_argument("--max-vy-cm-s", type=float, default=5.0)
     parser.add_argument("--max-yaw-rate-deg-s", type=float, default=25.0)
+    parser.add_argument("--road-pixel-kp-vy", type=float, default=0.03,
+                        help="Cross-track pixel error to lateral velocity gain")
+    parser.add_argument("--road-pixel-kp-yaw", type=float, default=0.0,
+                        help="Legacy cross-track pixel error to yaw gain (default: disabled)")
+    parser.add_argument("--road-angle-kp-yaw", type=float, default=0.4)
+    parser.add_argument("--road-target-centerline-angle-deg", type=float, default=90.0,
+                        help="Camera-image angle that corresponds to aircraft-forward road alignment")
+    parser.add_argument("--road-angle-deadband-deg", type=float, default=3.0)
+    parser.add_argument("--road-yaw-sign", type=float, default=1.0)
+    parser.add_argument("--road-lateral-sign", type=float, default=-1.0,
+                        help="Image-right road error to FC body-Y mapping (default: -1)")
+    parser.add_argument("--road-search-yaw-rate-deg-s", type=float, default=0.0,
+                        help="Yaw while road is lost; zero safely holds heading")
+    parser.add_argument("--road-heading-slowdown-start-deg", type=float, default=30.0)
+    parser.add_argument("--road-heading-stop-deg", type=float, default=70.0)
     parser.add_argument("--road-bypass-enable", action="store_true",
                         help="Enable radar-assisted in-road bypass for branches/vines intruding into the road center")
     parser.add_argument(
@@ -166,9 +191,8 @@ def main() -> None:
     args = parse_args()
     args = _normalize_args(args)
     _validate_flight_args(args)
-    _setup_logging(args.log_file)
 
-    from road_perception import CameraOffsetCompensationConfig, CameraWhiteBalanceConfig
+    from road_perception import CameraOffsetCompensationConfig
     from FlightController.Components import MultiRadar, RadarConfig
     from FlightController.Components.FCConnector import FCConnectConfig, connect_fc
     from FlightController.Solutions.RoadObstacleBypassPlanner import (
@@ -215,6 +239,7 @@ def main() -> None:
     pipeline = None
     flight_owned = False
     interrupted = False
+    log_sink_id = None
     recorder = SessionRecorder(
         SessionRecorderConfig(
             root_dir=args.record_dir,
@@ -223,8 +248,19 @@ def main() -> None:
             frame_every_n=args.record_frame_every_n,
             radar_every_n=args.record_radar_every_n,
             jpeg_quality=args.record_jpeg_quality,
+            video_enabled=not args.no_record_video,
+            video_every_n=args.record_video_every_n,
+            video_fps=args.record_video_fps,
+            frame_queue_size=args.record_frame_queue_size,
+            metadata={
+                "argv": list(sys.argv),
+                "arguments": dict(vars(args)),
+                "control_design": "heading-yaw+lateral-cross-track",
+            },
         )
     )
+    default_log_path = recorder.runtime_log_path
+    log_sink_id = _setup_logging(args.log_file or default_log_path)
     radar_field = RadarObstacleField(
         RadarFieldConfig(
             max_distance_cm=args.max_distance_cm,
@@ -237,7 +273,18 @@ def main() -> None:
         RoadFollowerConfig(
             image_width=args.camera_width,
             max_vx_cm_s=args.max_vx_cm_s,
+            max_vy_cm_s=args.max_vy_cm_s,
             max_yaw_rate_deg_s=args.max_yaw_rate_deg_s,
+            search_yaw_rate_deg_s=args.road_search_yaw_rate_deg_s,
+            pixel_kp_vy=args.road_pixel_kp_vy,
+            pixel_kp_yaw=args.road_pixel_kp_yaw,
+            angle_kp_yaw=args.road_angle_kp_yaw,
+            target_centerline_angle_deg=args.road_target_centerline_angle_deg,
+            angle_deadband_deg=args.road_angle_deadband_deg,
+            yaw_sign=args.road_yaw_sign,
+            lateral_sign=args.road_lateral_sign,
+            heading_slowdown_start_deg=args.road_heading_slowdown_start_deg,
+            heading_stop_deg=args.road_heading_stop_deg,
         )
     )
     bypass_planner = RoadObstacleBypassPlanner(
@@ -269,14 +316,9 @@ def main() -> None:
             require_radar=not args.no_radar,
             radar_timeout_s=args.radar_timeout_s,
             max_vx_cm_s=args.max_vx_cm_s,
+            max_vy_cm_s=args.max_vy_cm_s,
             max_yaw_rate_deg_s=args.max_yaw_rate_deg_s,
         )
-    )
-    wb_config = CameraWhiteBalanceConfig(
-        enabled=bool(args.wb_enable),
-        r_gain=args.wb_r,
-        g_gain=args.wb_g,
-        b_gain=args.wb_b,
     )
     offset_comp = CameraOffsetCompensationConfig(
         enabled=bool(args.offset_comp_enable or args.enable_offset_comp),
@@ -287,6 +329,7 @@ def main() -> None:
         pipeline_latency_s=args.pipeline_latency_s,
     )
     period_s = 1.0 / max(args.loop_hz, 0.1)
+    telemetry_tracker = _FCTelemetryTracker()
 
     try:
         if not args.no_fc:
@@ -311,6 +354,7 @@ def main() -> None:
             wb_r=args.wb_r,
             wb_g=args.wb_g,
             wb_b=args.wb_b,
+            offset_comp_config=offset_comp,
         )
         pipeline.start()
 
@@ -335,14 +379,15 @@ def main() -> None:
             loop_start = time.perf_counter()
 
             # ── 1. Non-blocking: read latest perception + frame from pipeline
-            perception, _percept_age, percept_stale = pipeline.latest_perception()
+            perception, percept_age_s, percept_stale = pipeline.latest_perception()
             camera_ok = pipeline.camera_ok
 
-            # Recording frame (decimated inside SessionRecorder)
-            frame, _frame_ts = pipeline.latest_frame()
-            recorder.record_frame(loop_count=loop_count, now_s=loop_start, frame=frame, label="road")
-            debug_path = _debug_image_path(args.debug_dir, args.debug_every_n, loop_count)
-
+            frame, frame_ts = pipeline.latest_frame()
+            frame_age_s = (
+                max(0.0, loop_start - frame_ts)
+                if frame_ts is not None and frame_ts > 0.0
+                else None
+            )
             # ── 2. Road following (uses latest perception, or lost if stale)
             if perception is None or percept_stale:
                 desired = follower.update(None, now_s=loop_start)
@@ -389,6 +434,53 @@ def main() -> None:
                 dry_run=actual_dry_run,
             )
 
+            fc_telemetry = telemetry_tracker.update(fc, loop_start)
+            controller_diagnostics = follower.last_diagnostics.as_dict()
+            diagnostic_extra = _road_record_extra(
+                perception,
+                camera_ok,
+                planned,
+                bypass_planner,
+                controller_diagnostics=controller_diagnostics,
+                perception_age_s=percept_age_s,
+                perception_stale=percept_stale,
+                frame_age_s=frame_age_s,
+                fc_telemetry=fc_telemetry,
+            )
+            diagnostic_extra["send_gate"] = {
+                "command": _command_extra(decision.command),
+                "allowed": bool(decision.allowed),
+                "hard_stop": bool(decision.hard_stop),
+                "reason": decision.reason,
+                "sent": bool(not actual_dry_run and fc is not None),
+            }
+            diagnostic_frame = _annotate_road_frame(
+                frame,
+                perception=perception,
+                loop_count=loop_count,
+                controller_diagnostics=controller_diagnostics,
+                safe_command=safe.command,
+                fc_telemetry=fc_telemetry,
+                perception_age_s=percept_age_s,
+                perception_stale=percept_stale,
+            )
+            frame_record_path = recorder.record_frame(
+                loop_count=loop_count,
+                now_s=loop_start,
+                frame=diagnostic_frame,
+                label="road",
+                source_time_s=frame_ts,
+                extra={
+                    "perception_age_s": _float_or_none(percept_age_s),
+                    "perception_stale": bool(percept_stale),
+                    "frame_age_s": _float_or_none(frame_age_s),
+                    "road_state": diagnostic_extra["road_state"],
+                    "controller": controller_diagnostics,
+                    "fc": fc_telemetry,
+                },
+            )
+            diagnostic_extra["frame_record_path"] = frame_record_path
+
             # ── 5. Recording (unchanged)
             recorder.record_radar(
                 loop_count=loop_count,
@@ -400,7 +492,7 @@ def main() -> None:
                 desired=desired,
                 safe_command=safe.command,
                 decision_reason=decision.reason,
-                extra=_road_record_extra(perception, camera_ok, planned, bypass_planner),
+                extra=diagnostic_extra,
             )
             recorder.record_command(
                 loop_count=loop_count,
@@ -408,11 +500,7 @@ def main() -> None:
                 desired=desired,
                 safe_command=safe.command,
                 decision_reason=decision.reason,
-                extra={
-                    "camera_ok": bool(camera_ok),
-                    **_bypass_record_extra(bypass_planner),
-                    "planned": _command_extra(planned),
-                },
+                extra=diagnostic_extra,
             )
 
             if loop_start - last_log_s >= 1.0:
@@ -428,6 +516,11 @@ def main() -> None:
                     radar_fresh=radar_connected if multi_radar is not None else "disabled",
                     fc=fc,
                     bypass_planner=bypass_planner,
+                    controller_diagnostics=controller_diagnostics,
+                    perception_age_s=percept_age_s,
+                    perception_stale=percept_stale,
+                    frame_age_s=frame_age_s,
+                    fc_telemetry=fc_telemetry,
                 )
 
             loop_count += 1
@@ -461,8 +554,10 @@ def main() -> None:
             pipeline.stop()
         if multi_radar is not None:
             multi_radar.stop()
-        recorder.close()
         logger.info("[ROAD] stopped")
+        recorder.close()
+        if log_sink_id is not None:
+            logger.remove(log_sink_id)
 
 
 def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
@@ -500,9 +595,25 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
         "takeoff_timeout_s",
         "takeoff_height_tolerance_cm",
         "landing_timeout_s",
+        "record_frame_every_n",
+        "record_radar_every_n",
+        "record_video_every_n",
+        "record_video_fps",
+        "record_frame_queue_size",
     ):
         if getattr(args, option) <= 0:
             raise ValueError(f"--{option.replace('_', '-')} must be greater than zero")
+    for option in ("max_vx_cm_s", "max_vy_cm_s", "max_yaw_rate_deg_s"):
+        if getattr(args, option) < 0:
+            raise ValueError(f"--{option.replace('_', '-')} cannot be negative")
+    if args.road_heading_stop_deg <= args.road_heading_slowdown_start_deg:
+        raise ValueError(
+            "--road-heading-stop-deg must be greater than --road-heading-slowdown-start-deg"
+        )
+    if not 0.0 <= args.road_target_centerline_angle_deg <= 180.0:
+        raise ValueError("--road-target-centerline-angle-deg must be within 0..180")
+    if args.road_angle_deadband_deg < 0.0:
+        raise ValueError("--road-angle-deadband-deg cannot be negative")
 
 
 def _wait_for_fc_mode(fc, target_mode: int, timeout_s: float = 5.0) -> None:
@@ -645,6 +756,59 @@ def _radar_configs(upper_port: str, lower_port: str):
     ]
 
 
+class _FCTelemetryTracker:
+    """Sample FC state and estimate measured yaw rate from fresh telemetry."""
+
+    def __init__(self) -> None:
+        self._last_update_count: int | None = None
+        self._last_yaw_deg: float | None = None
+        self._last_state_time_s: float | None = None
+        self._yaw_rate_deg_s: float | None = None
+
+    def update(self, fc, now_s: float) -> dict[str, object]:
+        if fc is None:
+            return {"connected": False}
+        state = getattr(fc, "state", None)
+        if state is None:
+            return {"connected": bool(getattr(fc, "connected", False))}
+
+        update_count = int(getattr(state, "update_count", 0))
+        state_time_s = _float_or_none(getattr(state, "last_update_monotonic", None))
+        yaw_deg = _state_float(state, "yaw")
+        if update_count != self._last_update_count and yaw_deg is not None:
+            if self._last_yaw_deg is not None and self._last_state_time_s is not None and state_time_s is not None:
+                dt_s = state_time_s - self._last_state_time_s
+                if 0.001 <= dt_s <= 1.0:
+                    yaw_delta_deg = (yaw_deg - self._last_yaw_deg + 180.0) % 360.0 - 180.0
+                    self._yaw_rate_deg_s = yaw_delta_deg / dt_s
+            self._last_update_count = update_count
+            self._last_yaw_deg = yaw_deg
+            self._last_state_time_s = state_time_s
+
+        telemetry_age_s = (
+            max(0.0, now_s - state_time_s)
+            if state_time_s is not None and state_time_s > 0.0
+            else None
+        )
+        return {
+            "connected": bool(getattr(fc, "connected", False)),
+            "update_count": update_count,
+            "telemetry_time_perf_s": state_time_s,
+            "telemetry_age_s": _float_or_none(telemetry_age_s),
+            "yaw_deg": yaw_deg,
+            "yaw_rate_deg_s": _float_or_none(self._yaw_rate_deg_s),
+            "roll_deg": _state_float(state, "rol"),
+            "pitch_deg": _state_float(state, "pit"),
+            "alt_add_cm": _state_float(state, "alt_add"),
+            "vel_x_cm_s": _state_float(state, "vel_x"),
+            "vel_y_cm_s": _state_float(state, "vel_y"),
+            "vel_z_cm_s": _state_float(state, "vel_z"),
+            "battery_v": _state_float(state, "bat"),
+            "mode": _state_value(state, "mode"),
+            "unlock": _state_value(state, "unlock"),
+        }
+
+
 def _log_road_summary(
     *,
     args: argparse.Namespace,
@@ -657,13 +821,20 @@ def _log_road_summary(
     radar_fresh,
     fc,
     bypass_planner=None,
+    controller_diagnostics: dict[str, object] | None = None,
+    perception_age_s: float | None = None,
+    perception_stale: bool = False,
+    frame_age_s: float | None = None,
+    fc_telemetry: dict[str, object] | None = None,
 ) -> None:
     state = getattr(perception, "road_state", "lost")
     err = float(getattr(perception, "pixel_error", 0.0)) if perception is not None else 0.0
     corr = float(getattr(perception, "corrected_pixel_error", 0.0)) if perception is not None else 0.0
     angle = float(getattr(perception, "centerline_angle", 90.0)) if perception is not None else 90.0
     conf = float(getattr(perception, "confidence", 0.0)) if perception is not None else 0.0
-    fc_mode = getattr(getattr(getattr(fc, "state", None), "mode", None), "value", None)
+    controller_diagnostics = controller_diagnostics or {}
+    fc_telemetry = fc_telemetry or {}
+    fc_mode = fc_telemetry.get("mode")
     bypass_state = (
         getattr(getattr(bypass_planner, "state", None), "value", "disabled")
         if bypass_planner is not None
@@ -672,19 +843,35 @@ def _log_road_summary(
     bypass_y = getattr(bypass_planner, "last_target_y_cm", None) if bypass_planner is not None else None
     logger.info(
         "[ROAD] state={} mode=single-road err={:.0f} corr={:.0f} angle={:.0f} conf={:.2f} "
-        "desired=(vx={} yaw={}) planned=(vx={} yaw={}) safe=(vx={} yaw={}) "
+        "ctrl=(angle_err={} px_yaw={} angle_yaw={} speed_scale={}) "
+        "desired=(vx={} vy={} yaw={}) planned=(vx={} vy={} yaw={}) safe=(vx={} vy={} yaw={}) "
+        "actual=(yaw={} yaw_rate={} vx={} vy={}) ages=(frame={} perception={} stale={}) "
         "bypass={} bypass_y={} safety={} sent={} radar_fresh={} fc_mode={}".format(
             state,
             err,
             corr,
             angle,
             conf,
+            _round_or_none(controller_diagnostics.get("angle_error_deg")),
+            _round_or_none(controller_diagnostics.get("pixel_yaw_term_deg_s")),
+            _round_or_none(controller_diagnostics.get("angle_yaw_term_deg_s")),
+            _round_or_none(controller_diagnostics.get("heading_speed_scale"), 2),
             round(desired.vx_cm_s),
+            round(desired.vy_cm_s),
             round(desired.yaw_rate_deg_s),
             round(planned.vx_cm_s),
+            round(planned.vy_cm_s),
             round(planned.yaw_rate_deg_s),
             round(safe_command.vx_cm_s),
+            round(safe_command.vy_cm_s),
             round(safe_command.yaw_rate_deg_s),
+            _round_or_none(fc_telemetry.get("yaw_deg")),
+            _round_or_none(fc_telemetry.get("yaw_rate_deg_s")),
+            _round_or_none(fc_telemetry.get("vel_x_cm_s")),
+            _round_or_none(fc_telemetry.get("vel_y_cm_s")),
+            _round_or_none(frame_age_s, 3),
+            _round_or_none(perception_age_s, 3),
+            bool(perception_stale),
             bypass_state,
             _float_or_none(bypass_y),
             safety_reason,
@@ -695,22 +882,130 @@ def _log_road_summary(
     )
 
 
-def _road_record_extra(perception, camera_ok: bool, planned=None, bypass_planner=None) -> dict[str, object]:
+def _road_record_extra(
+    perception,
+    camera_ok: bool,
+    planned=None,
+    bypass_planner=None,
+    *,
+    controller_diagnostics: dict[str, object] | None = None,
+    perception_age_s: float | None = None,
+    perception_stale: bool = False,
+    frame_age_s: float | None = None,
+    fc_telemetry: dict[str, object] | None = None,
+) -> dict[str, object]:
+    raw_error = _float_or_none(getattr(perception, "pixel_error", None))
+    corrected_error = _float_or_none(getattr(perception, "corrected_pixel_error", None))
+    centerline_points = list(getattr(perception, "centerline_points", []) or [])
     extra = {
         "camera_ok": bool(camera_ok),
         "road_state": getattr(perception, "road_state", "lost") if perception is not None else "lost",
         "branch": "disabled",
-        "pixel_error": _float_or_none(getattr(perception, "pixel_error", None)),
-        "corrected_pixel_error": _float_or_none(getattr(perception, "corrected_pixel_error", None)),
+        "pixel_error": raw_error,
+        "corrected_pixel_error": corrected_error,
+        "offset_correction_px": (
+            corrected_error - raw_error
+            if corrected_error is not None and raw_error is not None
+            else None
+        ),
         "centerline_angle": _float_or_none(getattr(perception, "centerline_angle", None)),
+        "path_width_px": _float_or_none(getattr(perception, "path_width_px", None)),
         "confidence": _float_or_none(getattr(perception, "confidence", None)),
         "is_road_found": bool(getattr(perception, "is_road_found", False)) if perception is not None else False,
+        "debug_msg": getattr(perception, "debug_msg", "") if perception is not None else "",
+        "centerline_point_count": len(centerline_points),
+        "centerline_first": _point_extra(centerline_points[0]) if centerline_points else None,
+        "centerline_last": _point_extra(centerline_points[-1]) if centerline_points else None,
+        "perception_age_s": _float_or_none(perception_age_s),
+        "perception_stale": bool(perception_stale),
+        "frame_age_s": _float_or_none(frame_age_s),
+        "controller": dict(controller_diagnostics or {}),
+        "fc": dict(fc_telemetry or {}),
     }
     if bypass_planner is not None:
         extra.update(_bypass_record_extra(bypass_planner))
     if planned is not None:
         extra["planned"] = _command_extra(planned)
     return extra
+
+
+def _annotate_road_frame(
+    frame,
+    *,
+    perception,
+    loop_count: int,
+    controller_diagnostics: dict[str, object],
+    safe_command,
+    fc_telemetry: dict[str, object],
+    perception_age_s: float | None,
+    perception_stale: bool,
+):
+    if frame is None:
+        return None
+    try:
+        output = np.asarray(frame).copy()
+        height, width = output.shape[:2]
+        cv2.line(output, (width // 2, 0), (width // 2, height - 1), (0, 255, 0), 1)
+
+        points = list(getattr(perception, "centerline_points", []) or [])
+        if len(points) >= 2:
+            polyline = np.asarray(
+                [[round(float(point[0])), round(float(point[1]))] for point in points],
+                dtype=np.int32,
+            ).reshape(-1, 1, 2)
+            cv2.polylines(output, [polyline], False, (0, 0, 255), 3, cv2.LINE_AA)
+
+        road_state = getattr(perception, "road_state", "lost") if perception is not None else "lost"
+        found = bool(getattr(perception, "is_road_found", False)) if perception is not None else False
+        confidence = _float_or_none(getattr(perception, "confidence", None))
+        pixel_error = _float_or_none(getattr(perception, "corrected_pixel_error", None))
+        angle = _float_or_none(getattr(perception, "centerline_angle", None))
+        lines = [
+            (
+                f"loop={loop_count} road={road_state} found={found} conf={_display_float(confidence, 2)} "
+                f"age={_display_float(perception_age_s, 3)}s stale={bool(perception_stale)}"
+            ),
+            (
+                f"pixel={_display_float(pixel_error, 1)}px angle={_display_float(angle, 1)}deg "
+                f"angle_err={_display_float(controller_diagnostics.get('angle_error_deg'), 1)}deg"
+            ),
+            (
+                f"ctrl px_yaw={_display_float(controller_diagnostics.get('pixel_yaw_term_deg_s'), 1)} "
+                f"angle_yaw={_display_float(controller_diagnostics.get('angle_yaw_term_deg_s'), 1)} "
+                f"scale={_display_float(controller_diagnostics.get('heading_speed_scale'), 2)}"
+            ),
+            (
+                f"safe vx={_display_float(getattr(safe_command, 'vx_cm_s', None), 1)} "
+                f"vy={_display_float(getattr(safe_command, 'vy_cm_s', None), 1)} "
+                f"yaw={_display_float(getattr(safe_command, 'yaw_rate_deg_s', None), 1)}"
+            ),
+            (
+                f"fc yaw={_display_float(fc_telemetry.get('yaw_deg'), 1)} "
+                f"yaw_rate={_display_float(fc_telemetry.get('yaw_rate_deg_s'), 1)} "
+                f"vel=({_display_float(fc_telemetry.get('vel_x_cm_s'), 1)},"
+                f"{_display_float(fc_telemetry.get('vel_y_cm_s'), 1)})"
+            ),
+        ]
+        overlay_height = min(height, 12 + len(lines) * 20)
+        shade = output[:overlay_height].copy()
+        shade[:] = 0
+        output[:overlay_height] = cv2.addWeighted(output[:overlay_height], 0.35, shade, 0.65, 0.0)
+        text_color = (0, 0, 255) if perception_stale or not found else (255, 255, 255)
+        for index, line in enumerate(lines):
+            cv2.putText(
+                output,
+                line,
+                (8, 18 + index * 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                text_color,
+                1,
+                cv2.LINE_AA,
+            )
+        return output
+    except Exception as exc:
+        logger.warning(f"[REC] diagnostic overlay failed: {type(exc).__name__}: {exc}")
+        return frame
 
 
 def _command_extra(command) -> dict[str, object] | None:
@@ -738,18 +1033,58 @@ def _float_or_none(value) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        value = float(value)
     except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) else None
+
+
+def _round_or_none(value, digits: int = 1):
+    value = _float_or_none(value)
+    return None if value is None else round(value, digits)
+
+
+def _display_float(value, digits: int = 1) -> str:
+    value = _float_or_none(value)
+    return "n/a" if value is None else f"{value:.{digits}f}"
+
+
+def _state_value(state, name: str):
+    field = getattr(state, name, None)
+    return getattr(field, "value", field)
+
+
+def _state_float(state, name: str) -> float | None:
+    return _float_or_none(_state_value(state, name))
+
+
+def _point_extra(point) -> list[float] | None:
+    try:
+        values = list(point)
+        return [float(values[0]), float(values[1])]
+    except (TypeError, ValueError, IndexError):
         return None
 
 
-def _setup_logging(log_file: str | None) -> None:
+def _setup_logging(log_file: str | Path | None) -> int | None:
     if not log_file:
-        return
+        return None
     path = Path(log_file)
     if str(path).replace("\\", "/").startswith("/tmp/"):
         logger.warning("Avoid writing logs to /tmp on the target board")
-    logger.add(str(path), enqueue=True, level="DEBUG")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sink_id = logger.add(
+            str(path),
+            enqueue=True,
+            level="DEBUG",
+            format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {message}",
+        )
+    except (OSError, ValueError) as exc:
+        logger.warning(f"[ROAD] runtime file logging disabled for {path}: {exc}")
+        return None
+    logger.info(f"[ROAD] runtime log: {path}")
+    return sink_id
 
 
 def _debug_image_path(debug_dir: str | None, every: int, loop_count: int) -> str | None:

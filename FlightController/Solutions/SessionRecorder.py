@@ -1,8 +1,8 @@
-"""Lightweight flight/demo session recorder.
+"""Flight/demo session recorder with non-blocking camera capture.
 
-The recorder is intentionally simple and synchronous. It samples camera frames
-and radar snapshots at a configurable interval so demo capture does not flood
-the SD card during control loops.
+Command and radar metadata are flushed synchronously so a stopped flight still
+has useful diagnostics. Camera encoding is delegated to a bounded background
+queue because JPEG/video writes must not stall the control loop.
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import queue
+import threading
 import time
 from typing import Any
 
@@ -26,6 +28,12 @@ class SessionRecorderConfig:
     frame_every_n: int = 10
     radar_every_n: int = 1
     jpeg_quality: int = 85
+    video_enabled: bool = True
+    video_every_n: int = 1
+    video_fps: float = 10.0
+    video_codec: str = "MJPG"
+    frame_queue_size: int = 8
+    metadata: dict[str, Any] | None = None
 
 
 class SessionRecorder:
@@ -35,8 +43,22 @@ class SessionRecorder:
         self.session_dir: Path | None = None
         self._frame_dir: Path | None = None
         self._radar_points_dir: Path | None = None
+        self._frame_log = None
         self._radar_log = None
         self._command_log = None
+        self._video_path: Path | None = None
+        self._video_writer = None
+        self._video_failed = False
+        self._frame_queue: queue.Queue | None = None
+        self._frame_thread: threading.Thread | None = None
+        self._frame_stop = object()
+        self._frame_jobs_queued = 0
+        self._frame_jobs_dropped = 0
+        self._video_frames_written = 0
+        self._keyframes_written = 0
+        self._last_drop_warning_s = 0.0
+        self._created_wall_time_s = time.time()
+        self._created_wall_time_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
         if not self.enabled:
             return
@@ -48,40 +70,79 @@ class SessionRecorder:
             self._radar_points_dir = self.session_dir / "radar_points"
             self._frame_dir.mkdir(parents=True, exist_ok=True)
             self._radar_points_dir.mkdir(parents=True, exist_ok=True)
+            self._frame_log = open(self.session_dir / "frames.jsonl", "a", encoding="utf-8")
             self._radar_log = open(self.session_dir / "radar.jsonl", "a", encoding="utf-8")
             self._command_log = open(self.session_dir / "commands.jsonl", "a", encoding="utf-8")
-            _write_json(
-                self.session_dir / "session.json",
-                {
-                    "mode": self.config.mode,
-                    "created_wall_time_s": time.time(),
-                    "created_wall_time_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                    "frame_every_n": self.config.frame_every_n,
-                    "radar_every_n": self.config.radar_every_n,
-                    "jpeg_quality": self.config.jpeg_quality,
-                },
+            self._video_path = self.session_dir / "camera.avi"
+            self._frame_queue = queue.Queue(maxsize=max(1, int(self.config.frame_queue_size)))
+            self._frame_thread = threading.Thread(
+                target=self._frame_writer_task,
+                name="session-frame-writer",
+                daemon=True,
             )
+            self._frame_thread.start()
+            self._write_session_manifest()
             logger.info(f"[REC] recording session to {self.session_dir}")
         except OSError as exc:
             logger.warning(f"[REC] recording disabled, cannot create {self.session_dir}: {exc}")
             self.enabled = False
             self.close()
 
-    def record_frame(self, *, loop_count: int, now_s: float, frame: np.ndarray | None, label: str = "camera") -> str | None:
-        if not self.enabled or frame is None or self._frame_dir is None:
+    @property
+    def runtime_log_path(self) -> Path | None:
+        if not self.enabled or self.session_dir is None:
             return None
-        every = max(1, int(self.config.frame_every_n))
-        if loop_count % every != 0:
+        return self.session_dir / "runtime.log"
+
+    def record_frame(
+        self,
+        *,
+        loop_count: int,
+        now_s: float,
+        frame: np.ndarray | None,
+        label: str = "camera",
+        source_time_s: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> str | None:
+        if not self.enabled or frame is None or self._frame_dir is None or self._frame_queue is None:
+            return None
+
+        jpeg_due = loop_count % max(1, int(self.config.frame_every_n)) == 0
+        video_due = bool(
+            self.config.video_enabled
+            and loop_count % max(1, int(self.config.video_every_n)) == 0
+        )
+        if not jpeg_due and not video_due:
             return None
 
         filename = f"{label}_{loop_count:06d}_{int(now_s * 1000):013d}.jpg"
-        path = self._frame_dir / filename
-        quality = int(max(1, min(100, self.config.jpeg_quality)))
-        ok = cv2.imwrite(str(path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-        if not ok:
-            logger.warning(f"[REC] failed to write frame {path}")
+        path = self._frame_dir / filename if jpeg_due else None
+        job = {
+            "loop_count": int(loop_count),
+            "now_s": float(now_s),
+            "source_time_s": _json_float(source_time_s),
+            "frame": np.asarray(frame).copy(),
+            "jpeg_path": path,
+            "video_due": video_due,
+            "extra": dict(extra or {}),
+        }
+        try:
+            self._frame_queue.put_nowait(job)
+            self._frame_jobs_queued += 1
+        except queue.Full:
+            self._frame_jobs_dropped += 1
+            if now_s - self._last_drop_warning_s >= 2.0:
+                self._last_drop_warning_s = now_s
+                logger.warning(
+                    "[REC] frame queue full; dropped={} queue_size={}",
+                    self._frame_jobs_dropped,
+                    self._frame_queue.maxsize,
+                )
             return None
-        return str(path)
+
+        if path is not None:
+            return str(path)
+        return str(self._video_path) if self._video_path is not None else None
 
     def record_radar(
         self,
@@ -150,11 +211,145 @@ class SessionRecorder:
         self._write_log(self._command_log, record)
 
     def close(self) -> None:
-        for handle_name in ("_radar_log", "_command_log"):
+        frame_queue = self._frame_queue
+        frame_thread = self._frame_thread
+        if frame_queue is not None and frame_thread is not None:
+            frame_queue.put(self._frame_stop)
+            frame_thread.join(timeout=15.0)
+            if frame_thread.is_alive():
+                logger.warning("[REC] frame writer did not stop within 15s")
+            self._frame_thread = None
+            self._frame_queue = None
+
+        for handle_name in ("_frame_log", "_radar_log", "_command_log"):
             handle = getattr(self, handle_name, None)
             if handle is not None:
                 handle.close()
                 setattr(self, handle_name, None)
+        if self.session_dir is not None:
+            try:
+                self._write_session_manifest()
+            except OSError as exc:
+                logger.warning(f"[REC] failed to finalize session manifest: {exc}")
+
+    def _frame_writer_task(self) -> None:
+        assert self._frame_queue is not None
+        try:
+            while True:
+                job = self._frame_queue.get()
+                try:
+                    if job is self._frame_stop:
+                        return
+                    self._write_frame_job(job)
+                except Exception as exc:
+                    logger.warning(f"[REC] frame writer error: {type(exc).__name__}: {exc}")
+                finally:
+                    self._frame_queue.task_done()
+        finally:
+            if self._video_writer is not None:
+                self._video_writer.release()
+                self._video_writer = None
+
+    def _write_frame_job(self, job: dict[str, Any]) -> None:
+        frame = np.asarray(job["frame"])
+        video_frame_index: int | None = None
+        video_written = False
+        if bool(job["video_due"]) and self._ensure_video_writer(frame):
+            assert self._video_writer is not None
+            video_frame_index = self._video_frames_written
+            self._video_writer.write(frame)
+            self._video_frames_written += 1
+            video_written = True
+
+        jpeg_path = job["jpeg_path"]
+        keyframe_written = False
+        if jpeg_path is not None:
+            quality = int(max(1, min(100, self.config.jpeg_quality)))
+            keyframe_written = bool(
+                cv2.imwrite(
+                    str(jpeg_path),
+                    frame,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), quality],
+                )
+            )
+            if keyframe_written:
+                self._keyframes_written += 1
+            else:
+                logger.warning(f"[REC] failed to write frame {jpeg_path}")
+
+        if self._frame_log is not None:
+            record = {
+                "loop": int(job["loop_count"]),
+                "time_perf_s": float(job["now_s"]),
+                "time_wall_s": time.time(),
+                "source_time_perf_s": job["source_time_s"],
+                "video_written": video_written,
+                "video_frame_index": video_frame_index,
+                "keyframe_written": keyframe_written,
+                "keyframe_file": str(jpeg_path) if keyframe_written else None,
+                "extra": job["extra"],
+            }
+            self._write_log(self._frame_log, record)
+
+    def _ensure_video_writer(self, frame: np.ndarray) -> bool:
+        if self._video_writer is not None:
+            return True
+        if self._video_failed or self._video_path is None:
+            return False
+        if frame.ndim != 3 or frame.shape[2] != 3:
+            self._video_failed = True
+            logger.warning(f"[REC] video disabled for invalid frame shape={frame.shape}")
+            return False
+
+        codec = str(self.config.video_codec or "MJPG")[:4].ljust(4)
+        height, width = frame.shape[:2]
+        writer = cv2.VideoWriter(
+            str(self._video_path),
+            cv2.VideoWriter_fourcc(*codec),
+            max(0.1, float(self.config.video_fps)),
+            (int(width), int(height)),
+        )
+        if not writer.isOpened():
+            writer.release()
+            self._video_failed = True
+            logger.warning(f"[REC] cannot open video writer {self._video_path} codec={codec!r}")
+            return False
+        self._video_writer = writer
+        logger.info(
+            "[REC] video recording started path={} codec={} fps={:.1f} size={}x{}",
+            self._video_path,
+            codec,
+            float(self.config.video_fps),
+            width,
+            height,
+        )
+        return True
+
+    def _write_session_manifest(self) -> None:
+        if self.session_dir is None:
+            return
+        _write_json(
+            self.session_dir / "session.json",
+            {
+                "mode": self.config.mode,
+                "created_wall_time_s": self._created_wall_time_s,
+                "created_wall_time_iso": self._created_wall_time_iso,
+                "frame_every_n": self.config.frame_every_n,
+                "radar_every_n": self.config.radar_every_n,
+                "jpeg_quality": self.config.jpeg_quality,
+                "video_enabled": bool(self.config.video_enabled),
+                "video_every_n": self.config.video_every_n,
+                "video_fps": self.config.video_fps,
+                "video_codec": self.config.video_codec,
+                "video_file": str(self._video_path) if self._video_path is not None else None,
+                "frame_queue_size": self.config.frame_queue_size,
+                "frame_jobs_queued": self._frame_jobs_queued,
+                "frame_jobs_dropped": self._frame_jobs_dropped,
+                "video_frames_written": self._video_frames_written,
+                "keyframes_written": self._keyframes_written,
+                "metadata": self.config.metadata or {},
+            },
+        )
 
     def _write_points(self, loop_count: int, now_s: float, points: np.ndarray, raw_points: np.ndarray) -> str | None:
         if self._radar_points_dir is None:

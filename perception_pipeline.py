@@ -233,6 +233,7 @@ class YOLOInferenceThread:
         wb_r: float = 2.78,
         wb_g: float = 1.00,
         wb_b: float = 1.26,
+        offset_comp_config=None,
         poll_interval_s: float = 0.005,
         stale_timeout_s: float = 1.0,
     ) -> None:
@@ -246,6 +247,7 @@ class YOLOInferenceThread:
         self._wb_r = wb_r
         self._wb_g = wb_g
         self._wb_b = wb_b
+        self._offset_comp_config = offset_comp_config
         self._poll_interval_s = poll_interval_s
         self._stale_timeout_s = stale_timeout_s
 
@@ -334,7 +336,10 @@ class YOLOInferenceThread:
         if self._wb_enable:
             from road_perception import CameraWhiteBalanceConfig
             wb_config = CameraWhiteBalanceConfig(
-                gain_r=self._wb_r, gain_g=self._wb_g, gain_b=self._wb_b
+                enabled=True,
+                r_gain=self._wb_r,
+                g_gain=self._wb_g,
+                b_gain=self._wb_b,
             )
 
         # The global session is loaded on first call inside road_perception
@@ -360,7 +365,7 @@ class YOLOInferenceThread:
                     frame,
                     flight_height_m=self._flight_height_m,
                     debug_save_path=None,
-                    offset_comp_config=None,
+                    offset_comp_config=self._offset_comp_config,
                     wb_config=wb_config,
                 )
             except Exception as exc:
@@ -416,6 +421,7 @@ class PerceptionPipeline:
         wb_r: float = 1.00,
         wb_g: float = 1.00,
         wb_b: float = 1.00,
+        offset_comp_config=None,
     ) -> None:
         self.camera = CameraThread(
             camera_index=camera_index,
@@ -434,6 +440,7 @@ class PerceptionPipeline:
             wb_r=wb_r,
             wb_g=wb_g,
             wb_b=wb_b,
+            offset_comp_config=offset_comp_config,
         )
 
     # ── lifecycle ───────────────────────────────────────────────────

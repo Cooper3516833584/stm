@@ -53,6 +53,10 @@ class RoadPerceptionResult:
     # Primary centerline. Branch fields remain as an empty compatibility shim
     # for older log/overlay consumers; branch detection is intentionally disabled.
     centerline_points: List[Tuple[float, float]] = field(default_factory=list)
+    # Full bottom-to-top road trajectory used by point-tracking controllers.
+    # ``centerline_points`` remains the lower-half control geometry so existing
+    # controllers and their calibration are unchanged.
+    trajectory_points: List[Tuple[float, float]] = field(default_factory=list)
     branches: List[RoadBranch] = field(default_factory=list)
     selected_branch: RoadBranch | None = None
     branch_decision: str = "disabled"
@@ -1188,6 +1192,8 @@ def _extract_fast_main_centerline(
     clean_mask: np.ndarray,
     orig_w: int,
     orig_h: int,
+    *,
+    top_y_ratio: float = 0.5,
 ) -> List[CenterPoint]:
     """Extract a sparse main-road centerline and return original-image pixels."""
     work_h, work_w = clean_mask.shape[:2]
@@ -1198,13 +1204,14 @@ def _extract_fast_main_centerline(
     scale_y = float(orig_h) / float(work_h)
     min_width = max(2, int(round(MIN_ROAD_PX_PER_ROW / scale_x)))
     bottom_y = min(work_h - 1, int(work_h * CENTERLINE_SCAN_Y_MAX_RATIO))
+    top_y = max(0, min(bottom_y, int(round(work_h * float(top_y_ratio)))))
 
     # The experiment road has no forks.  Process every sampled row in one
     # NumPy operation instead of repeatedly finding Python interval lists.
     # For a contiguous road row, the foreground mean is its exact midpoint.
     sampled_y = np.arange(
         bottom_y,
-        work_h // 2,
+        top_y - 1,
         -FAST_CENTERLINE_ROW_STEP,
         dtype=np.int32,
     )
@@ -1543,6 +1550,7 @@ def _save_debug_image(
             1,
         )
 
+        _draw_polyline(debug_img, result.trajectory_points, (0, 165, 255), 2)
         _draw_polyline(debug_img, result.centerline_points, (0, 0, 255), 4)
 
         cx_bottom = int(round(w / 2.0 + result.pixel_error))
@@ -1640,7 +1648,17 @@ def _build_fast_main_result(
         result.debug_mask = debug_mask
         return result
 
-    points = _extract_fast_main_centerline(work_mask, orig_w, orig_h)
+    trajectory_points = _extract_fast_main_centerline(
+        work_mask,
+        orig_w,
+        orig_h,
+        top_y_ratio=0.0,
+    )
+    points = [point for point in trajectory_points if point[1] >= orig_h * 0.5]
+    if len(points) < MIN_FIT_PTS:
+        # A remote patch may sit entirely above the image centre.  Use its
+        # bottom-most samples for the same guarded fit instead of discarding it.
+        points = trajectory_points[: min(34, len(trajectory_points))]
     if len(points) < MIN_FIT_PTS:
         result = _lost_result("fast main road has too few centerline points")
         result.debug_mask = debug_mask
@@ -1665,6 +1683,12 @@ def _build_fast_main_result(
         return result
     if quality.rough or quality.extrapolate:
         points = _fit_control_centerline(points, quality, orig_w, orig_h)
+        trajectory_points = _fit_control_centerline(
+            trajectory_points,
+            quality,
+            orig_w,
+            orig_h,
+        )
 
     pixel_error, _ = _compute_pixel_error(points, orig_w, orig_h)
     centerline_angle = _compute_centerline_angle(points, orig_h)
@@ -1696,11 +1720,15 @@ def _build_fast_main_result(
         confidence=float(confidence),
         corrected_pixel_error=float(corrected_error),
         centerline_points=[(float(point[0]), float(point[1])) for point in points],
+        trajectory_points=[
+            (float(point[0]), float(point[1])) for point in trajectory_points
+        ],
         branches=[],
         selected_branch=None,
         branch_decision="disabled",
         debug_msg=(
             f"postprocess={POSTPROCESS_FAST_MAIN}, points={len(points)}, "
+            f"trajectory={len(trajectory_points)}, "
             f"work_mask={FAST_MASK_WIDTH}x{FAST_MASK_HEIGHT}, "
             "branch_detection=disabled, "
             f"quality={quality.reason}, bottom={quality.bottom_ratio:.2f}, "
@@ -1895,6 +1923,7 @@ def get_road_perception(
             confidence=float(confidence),
             corrected_pixel_error=float(corrected_pixel_error),
             centerline_points=[(float(p[0]), float(p[1])) for p in points],
+            trajectory_points=[(float(p[0]), float(p[1])) for p in points],
             branches=[],
             selected_branch=None,
             branch_decision="disabled",

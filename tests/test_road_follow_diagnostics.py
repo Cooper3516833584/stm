@@ -54,6 +54,7 @@ def test_road_record_extra_contains_control_latency_geometry_and_fc_state():
         is_road_found=True,
         debug_msg="ok",
         centerline_points=[(300.0, 430.0), (315.0, 100.0)],
+        trajectory_points=[(300.0, 430.0), (315.0, 100.0), (325.0, 20.0)],
     )
 
     payload = _road_record_extra(
@@ -69,6 +70,8 @@ def test_road_record_extra_contains_control_latency_geometry_and_fc_state():
     assert payload["offset_correction_px"] == -5.0
     assert payload["centerline_point_count"] == 2
     assert payload["centerline_first"] == [300.0, 430.0]
+    assert payload["trajectory_point_count"] == 3
+    assert payload["trajectory_last"] == [325.0, 20.0]
     assert payload["perception_age_s"] == 0.08
     assert payload["controller"]["angle_yaw_term_deg_s"] == -2.0
     assert payload["fc"]["yaw_deg"] == 42.0
@@ -83,6 +86,7 @@ def test_diagnostic_video_overlay_keeps_input_unchanged():
         corrected_pixel_error=20.0,
         centerline_angle=95.0,
         centerline_points=[(180.0, 110.0), (160.0, 40.0)],
+        trajectory_points=[(180.0, 110.0), (160.0, 40.0), (150.0, 10.0)],
     )
 
     output = _annotate_road_frame(
@@ -94,6 +98,14 @@ def test_diagnostic_video_overlay_keeps_input_unchanged():
             "pixel_yaw_term_deg_s": 0.0,
             "angle_yaw_term_deg_s": -2.0,
             "heading_speed_scale": 1.0,
+            "controller_mode": "trajectory_point",
+            "target_x_px": 160.0,
+            "target_y_px": 40.0,
+            "target_distance_px": 20.0,
+            "target_index": 1,
+            "path_point_count": 3,
+            "tangent_dx_px": -20.0,
+            "tangent_dy_px": -70.0,
         },
         safe_command=Command(5.0, -1.0, 0.0, -2.0, "road_follow"),
         fc_telemetry={"yaw_deg": 12.0, "yaw_rate_deg_s": -1.8},

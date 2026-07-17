@@ -191,6 +191,27 @@ def test_fast_main_centerline_restores_original_pixel_scale() -> None:
     assert all(0 <= point[1] < 480 for point in points)
 
 
+def test_fast_main_full_trajectory_extends_above_camera_centre() -> None:
+    mask = np.zeros((road.FAST_MASK_HEIGHT, road.FAST_MASK_WIDTH), dtype=np.uint8)
+    mask[:, 72:120] = 255
+
+    control_points = road._extract_fast_main_centerline(mask, 640, 480)
+    trajectory_points = road._extract_fast_main_centerline(
+        mask,
+        640,
+        480,
+        top_y_ratio=0.0,
+    )
+
+    assert len(trajectory_points) > len(control_points)
+    assert max(point[1] for point in trajectory_points) >= 0.95 * 480
+    assert min(point[1] for point in trajectory_points) <= 0.02 * 480
+    assert all(
+        first[1] > second[1]
+        for first, second in zip(trajectory_points, trajectory_points[1:])
+    )
+
+
 def test_fast_main_extrapolates_remote_only_centerline_to_near_field() -> None:
     logits = np.zeros((1, 2, 256, 256), dtype=np.float32)
     logits[:, 0] = 1.0
@@ -211,6 +232,10 @@ def test_fast_main_extrapolates_remote_only_centerline_to_near_field() -> None:
     assert result.centerline_bottom_ratio < road.MIN_CONTROL_BOTTOM_Y_RATIO
     assert result.centerline_extrapolated
     assert max(point[1] for point in result.centerline_points) >= 0.95 * 480
+    assert len(result.trajectory_points) >= len(result.centerline_points)
+    assert min(point[1] for point in result.trajectory_points) < min(
+        point[1] for point in result.centerline_points
+    )
 
 
 def test_rough_complete_centerline_is_straightened_with_robust_consensus() -> None:

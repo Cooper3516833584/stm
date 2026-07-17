@@ -29,6 +29,12 @@ ROAD_HALF_WIDTH_CM = ROAD_WIDTH_CM / 2.0
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Road-following dry-run / flight entry")
+    parser.add_argument(
+        "--road-controller",
+        choices=["centerline", "trajectory-point"],
+        default="centerline",
+        help="Control law: legacy lower-centerline or camera-centre trajectory point tracking",
+    )
     parser.add_argument("--camera-index", type=int, default=7,
                         help="Road-following camera index (default: 7 on OpenSTLinux)")
     parser.add_argument("--camera-width", type=int, default=640)
@@ -167,6 +173,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Yaw while road is lost; zero safely holds heading")
     parser.add_argument("--road-heading-slowdown-start-deg", type=float, default=30.0)
     parser.add_argument("--road-heading-stop-deg", type=float, default=70.0)
+    parser.add_argument("--trajectory-reach-radius-px", type=float, default=20.0)
+    parser.add_argument("--trajectory-tangent-window-points", type=int, default=3)
+    parser.add_argument("--trajectory-tangent-kp-yaw", type=float, default=0.25)
+    parser.add_argument("--trajectory-target-filter-tau-s", type=float, default=0.20)
+    parser.add_argument("--trajectory-tangent-filter-tau-s", type=float, default=0.25)
+    parser.add_argument("--trajectory-degraded-speed-scale", type=float, default=0.75)
     parser.add_argument("--road-bypass-enable", action="store_true",
                         help="Enable radar-assisted in-road bypass for branches/vines intruding into the road center")
     parser.add_argument(
@@ -213,8 +225,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     args = _normalize_args(args)
     _validate_flight_args(args)
 
@@ -226,6 +238,10 @@ def main() -> None:
         RoadObstacleBypassPlanner,
     )
     from FlightController.Solutions.RoadFollower import RoadFollower, RoadFollowerConfig
+    from FlightController.Solutions.TrajectoryPointFollower import (
+        TrajectoryPointFollower,
+        TrajectoryPointFollowerConfig,
+    )
     from FlightController.Solutions.SessionRecorder import SessionRecorder, SessionRecorderConfig
     from FlightController.Solutions.Safety import (
         Command,
@@ -266,11 +282,21 @@ def main() -> None:
     flight_owned = False
     interrupted = False
     log_sink_id = None
+    session_mode = (
+        "road_trajectory_follow"
+        if args.road_controller == "trajectory-point"
+        else "road_follow"
+    )
+    control_design = (
+        "camera-center-to-trajectory-point+tangent-yaw"
+        if args.road_controller == "trajectory-point"
+        else "heading-yaw+lateral-cross-track"
+    )
     recorder = SessionRecorder(
         SessionRecorderConfig(
             root_dir=args.record_dir,
             enabled=not args.no_record,
-            mode="road_follow",
+            mode=session_mode,
             frame_every_n=args.record_frame_every_n,
             radar_every_n=args.record_radar_every_n,
             jpeg_quality=args.record_jpeg_quality,
@@ -281,7 +307,7 @@ def main() -> None:
             metadata={
                 "argv": list(sys.argv),
                 "arguments": dict(vars(args)),
-                "control_design": "heading-yaw+lateral-cross-track",
+                "control_design": control_design,
             },
         )
     )
@@ -295,28 +321,50 @@ def main() -> None:
             forward_corridor_half_width_cm=args.corridor_half_width_cm,
         )
     )
-    follower = RoadFollower(
-        RoadFollowerConfig(
-            image_width=args.camera_width,
-            max_vx_cm_s=args.max_vx_cm_s,
-            max_vy_cm_s=args.max_vy_cm_s,
-            max_yaw_rate_deg_s=args.max_yaw_rate_deg_s,
-            search_yaw_rate_deg_s=args.road_search_yaw_rate_deg_s,
-            pixel_kp_vy=args.road_pixel_kp_vy,
-            pixel_kp_yaw=args.road_pixel_kp_yaw,
-            angle_kp_yaw=args.road_angle_kp_yaw,
-            pixel_filter_tau_s=args.road_pixel_filter_tau_s,
-            angle_filter_tau_s=args.road_angle_filter_tau_s,
-            pixel_filter_max_rate_px_s=args.road_pixel_filter_max_rate_px_s,
-            angle_filter_max_rate_deg_s=args.road_angle_filter_max_rate_deg_s,
-            target_centerline_angle_deg=args.road_target_centerline_angle_deg,
-            angle_deadband_deg=args.road_angle_deadband_deg,
-            yaw_sign=args.road_yaw_sign,
-            lateral_sign=args.road_lateral_sign,
-            heading_slowdown_start_deg=args.road_heading_slowdown_start_deg,
-            heading_stop_deg=args.road_heading_stop_deg,
+    if args.road_controller == "trajectory-point":
+        follower = TrajectoryPointFollower(
+            TrajectoryPointFollowerConfig(
+                image_width=args.camera_width,
+                image_height=args.camera_height,
+                max_vx_cm_s=args.max_vx_cm_s,
+                max_vy_cm_s=args.max_vy_cm_s,
+                max_yaw_rate_deg_s=args.max_yaw_rate_deg_s,
+                reach_radius_px=args.trajectory_reach_radius_px,
+                tangent_window_points=args.trajectory_tangent_window_points,
+                tangent_kp_yaw=args.trajectory_tangent_kp_yaw,
+                tangent_deadband_deg=args.road_angle_deadband_deg,
+                yaw_sign=args.road_yaw_sign,
+                lateral_sign=args.road_lateral_sign,
+                target_filter_tau_s=args.trajectory_target_filter_tau_s,
+                tangent_filter_tau_s=args.trajectory_tangent_filter_tau_s,
+                target_filter_max_rate_px_s=args.road_pixel_filter_max_rate_px_s,
+                tangent_filter_max_rate_deg_s=args.road_angle_filter_max_rate_deg_s,
+                degraded_speed_scale=args.trajectory_degraded_speed_scale,
+            )
         )
-    )
+    else:
+        follower = RoadFollower(
+            RoadFollowerConfig(
+                image_width=args.camera_width,
+                max_vx_cm_s=args.max_vx_cm_s,
+                max_vy_cm_s=args.max_vy_cm_s,
+                max_yaw_rate_deg_s=args.max_yaw_rate_deg_s,
+                search_yaw_rate_deg_s=args.road_search_yaw_rate_deg_s,
+                pixel_kp_vy=args.road_pixel_kp_vy,
+                pixel_kp_yaw=args.road_pixel_kp_yaw,
+                angle_kp_yaw=args.road_angle_kp_yaw,
+                pixel_filter_tau_s=args.road_pixel_filter_tau_s,
+                angle_filter_tau_s=args.road_angle_filter_tau_s,
+                pixel_filter_max_rate_px_s=args.road_pixel_filter_max_rate_px_s,
+                angle_filter_max_rate_deg_s=args.road_angle_filter_max_rate_deg_s,
+                target_centerline_angle_deg=args.road_target_centerline_angle_deg,
+                angle_deadband_deg=args.road_angle_deadband_deg,
+                yaw_sign=args.road_yaw_sign,
+                lateral_sign=args.road_lateral_sign,
+                heading_slowdown_start_deg=args.road_heading_slowdown_start_deg,
+                heading_stop_deg=args.road_heading_stop_deg,
+            )
+        )
     bypass_planner = RoadObstacleBypassPlanner(
         RoadBypassConfig(
             enabled=bool(args.road_bypass_enable and not args.no_radar),
@@ -394,10 +442,11 @@ def main() -> None:
             _auto_takeoff(fc, args)
 
         logger.info(
-            "[ROAD] started dry_run={} no_radar={} mode=single-road camera={} "
+            "[ROAD] started dry_run={} no_radar={} mode=single-road controller={} camera={} "
             "backend={} model={} postprocess={}".format(
                 actual_dry_run,
                 args.no_radar,
+                args.road_controller,
                 args.camera_index,
                 args.road_model_backend,
                 selected_model,
@@ -652,11 +701,21 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
         raise ValueError("--road-target-centerline-angle-deg must be within 0..180")
     if args.road_angle_deadband_deg < 0.0:
         raise ValueError("--road-angle-deadband-deg cannot be negative")
+    if args.trajectory_reach_radius_px <= 0.0:
+        raise ValueError("--trajectory-reach-radius-px must be greater than zero")
+    if args.trajectory_tangent_window_points <= 0:
+        raise ValueError("--trajectory-tangent-window-points must be greater than zero")
+    if args.trajectory_tangent_kp_yaw < 0.0:
+        raise ValueError("--trajectory-tangent-kp-yaw cannot be negative")
+    if not 0.0 < args.trajectory_degraded_speed_scale <= 1.0:
+        raise ValueError("--trajectory-degraded-speed-scale must be within (0, 1]")
     for option in (
         "road_pixel_filter_tau_s",
         "road_angle_filter_tau_s",
         "road_pixel_filter_max_rate_px_s",
         "road_angle_filter_max_rate_deg_s",
+        "trajectory_target_filter_tau_s",
+        "trajectory_tangent_filter_tau_s",
     ):
         if getattr(args, option) < 0.0:
             raise ValueError(f"--{option.replace('_', '-')} cannot be negative")
@@ -905,7 +964,7 @@ def _log_road_summary(
     bypass_y = getattr(bypass_planner, "last_target_y_cm", None) if bypass_planner is not None else None
     logger.info(
         "[ROAD] state={} mode=single-road err={:.0f} corr={:.0f} angle={:.0f} conf={:.2f} "
-        "ctrl=(angle_err={} px_yaw={} angle_yaw={} speed_scale={}) "
+        "ctrl=(mode={} target=({},{}) d={} idx={} angle_err={} px_yaw={} angle_yaw={} speed_scale={}) "
         "desired=(vx={} vy={} yaw={}) planned=(vx={} vy={} yaw={}) safe=(vx={} vy={} yaw={}) "
         "actual=(yaw={} yaw_rate={} vx={} vy={}) ages=(frame={} perception={} stale={}) "
         "bypass={} bypass_y={} safety={} sent={} radar_fresh={} fc_mode={}".format(
@@ -914,6 +973,11 @@ def _log_road_summary(
             corr,
             angle,
             conf,
+            controller_diagnostics.get("controller_mode", "centerline"),
+            _round_or_none(controller_diagnostics.get("target_x_px")),
+            _round_or_none(controller_diagnostics.get("target_y_px")),
+            _round_or_none(controller_diagnostics.get("target_distance_px")),
+            controller_diagnostics.get("target_index"),
             _round_or_none(controller_diagnostics.get("angle_error_deg")),
             _round_or_none(controller_diagnostics.get("pixel_yaw_term_deg_s")),
             _round_or_none(controller_diagnostics.get("angle_yaw_term_deg_s")),
@@ -959,6 +1023,7 @@ def _road_record_extra(
     raw_error = _float_or_none(getattr(perception, "pixel_error", None))
     corrected_error = _float_or_none(getattr(perception, "corrected_pixel_error", None))
     centerline_points = list(getattr(perception, "centerline_points", []) or [])
+    trajectory_points = list(getattr(perception, "trajectory_points", []) or [])
     extra = {
         "camera_ok": bool(camera_ok),
         "road_state": getattr(perception, "road_state", "lost") if perception is not None else "lost",
@@ -978,6 +1043,9 @@ def _road_record_extra(
         "centerline_point_count": len(centerline_points),
         "centerline_first": _point_extra(centerline_points[0]) if centerline_points else None,
         "centerline_last": _point_extra(centerline_points[-1]) if centerline_points else None,
+        "trajectory_point_count": len(trajectory_points),
+        "trajectory_first": _point_extra(trajectory_points[0]) if trajectory_points else None,
+        "trajectory_last": _point_extra(trajectory_points[-1]) if trajectory_points else None,
         "centerline_quality": {
             "bottom_ratio": _float_or_none(
                 getattr(perception, "centerline_bottom_ratio", None)
@@ -1032,6 +1100,24 @@ def _annotate_road_frame(
         height, width = output.shape[:2]
         cv2.line(output, (width // 2, 0), (width // 2, height - 1), (0, 255, 0), 1)
 
+        trajectory_points = list(getattr(perception, "trajectory_points", []) or [])
+        if len(trajectory_points) >= 2:
+            trajectory_polyline = np.asarray(
+                [
+                    [round(float(point[0])), round(float(point[1]))]
+                    for point in trajectory_points
+                ],
+                dtype=np.int32,
+            ).reshape(-1, 1, 2)
+            cv2.polylines(
+                output,
+                [trajectory_polyline],
+                False,
+                (0, 165, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
         points = list(getattr(perception, "centerline_points", []) or [])
         if len(points) >= 2:
             polyline = np.asarray(
@@ -1040,6 +1126,36 @@ def _annotate_road_frame(
             ).reshape(-1, 1, 2)
             cv2.polylines(output, [polyline], False, (0, 0, 255), 3, cv2.LINE_AA)
 
+        center = (width // 2, height // 2)
+        cv2.circle(output, center, 5, (0, 255, 255), -1, cv2.LINE_AA)
+        target_x = _float_or_none(controller_diagnostics.get("target_x_px"))
+        target_y = _float_or_none(controller_diagnostics.get("target_y_px"))
+        if target_x is not None and target_y is not None:
+            target = (round(target_x), round(target_y))
+            cv2.line(output, center, target, (255, 255, 0), 2, cv2.LINE_AA)
+            cv2.circle(output, target, 7, (255, 0, 255), -1, cv2.LINE_AA)
+            tangent_dx = _float_or_none(controller_diagnostics.get("tangent_dx_px"))
+            tangent_dy = _float_or_none(controller_diagnostics.get("tangent_dy_px"))
+            tangent_norm = (
+                float(np.hypot(tangent_dx, tangent_dy))
+                if tangent_dx is not None and tangent_dy is not None
+                else 0.0
+            )
+            if tangent_norm > 1e-6:
+                tangent_end = (
+                    round(target_x + 45.0 * tangent_dx / tangent_norm),
+                    round(target_y + 45.0 * tangent_dy / tangent_norm),
+                )
+                cv2.arrowedLine(
+                    output,
+                    target,
+                    tangent_end,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                    tipLength=0.25,
+                )
+
         road_state = getattr(perception, "road_state", "lost") if perception is not None else "lost"
         found = bool(getattr(perception, "is_road_found", False)) if perception is not None else False
         confidence = _float_or_none(getattr(perception, "confidence", None))
@@ -1047,10 +1163,25 @@ def _annotate_road_frame(
         filtered_pixel_error = _float_or_none(controller_diagnostics.get("filtered_pixel_error_px"))
         angle = _float_or_none(getattr(perception, "centerline_angle", None))
         filtered_angle = _float_or_none(controller_diagnostics.get("centerline_angle_deg"))
+        controller_mode = controller_diagnostics.get("controller_mode", "centerline")
+        if controller_mode == "trajectory_point":
+            pixel_error = _float_or_none(
+                controller_diagnostics.get("raw_lateral_error_px")
+            )
+            angle = _float_or_none(
+                controller_diagnostics.get("raw_centerline_angle_deg")
+            )
         lines = [
             (
                 f"loop={loop_count} road={road_state} found={found} conf={_display_float(confidence, 2)} "
                 f"age={_display_float(perception_age_s, 3)}s stale={bool(perception_stale)}"
+            ),
+            (
+                f"controller={controller_mode} "
+                f"target=({_display_float(target_x, 0)},{_display_float(target_y, 0)}) "
+                f"d={_display_float(controller_diagnostics.get('target_distance_px'), 1)}px "
+                f"idx={controller_diagnostics.get('target_index')}/"
+                f"{controller_diagnostics.get('path_point_count')}"
             ),
             (
                 f"pixel={_display_float(pixel_error, 1)}->{_display_float(filtered_pixel_error, 1)}px "
@@ -1068,7 +1199,8 @@ def _annotate_road_frame(
                 f"yaw={_display_float(getattr(safe_command, 'yaw_rate_deg_s', None), 1)}"
             ),
             (
-                f"fc yaw={_display_float(fc_telemetry.get('yaw_deg'), 1)} "
+                f"fc mode={fc_telemetry.get('mode')} unlock={fc_telemetry.get('unlock')} "
+                f"yaw={_display_float(fc_telemetry.get('yaw_deg'), 1)} "
                 f"yaw_rate={_display_float(fc_telemetry.get('yaw_rate_deg_s'), 1)} "
                 f"vel=({_display_float(fc_telemetry.get('vel_x_cm_s'), 1)},"
                 f"{_display_float(fc_telemetry.get('vel_y_cm_s'), 1)})"

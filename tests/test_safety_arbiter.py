@@ -35,6 +35,19 @@ def test_stale_radar_stops():
     assert decision.command.as_fc_tuple() == (0, 0, 0, 0)
 
 
+def test_locked_fc_stops_when_unlock_is_required():
+    arbiter = SafetyArbiter(SafetyConfig(require_unlocked=True))
+    decision = arbiter.evaluate(
+        Command(10, 2, 0, 3, "road_follow"),
+        FlightHealth(fc_connected=True, fc_mode=2, unlock=False, radar_fresh=True),
+    )
+
+    assert decision.hard_stop
+    assert not decision.allowed
+    assert decision.command == Command.zero("safety_stop:fc_locked")
+    assert decision.reason == "fc_locked"
+
+
 def test_large_attitude_stops():
     arbiter = SafetyArbiter()
     decision = arbiter.evaluate(
@@ -67,4 +80,3 @@ def test_usb_battery_zero_is_ok_when_threshold_disabled():
     assert decision.allowed
     assert not decision.hard_stop
     assert decision.reason == "ok"
-

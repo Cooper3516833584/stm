@@ -87,6 +87,7 @@ class SafetyConfig:
     require_fc: bool = True
     require_hold_pos_mode: bool = True
     hold_pos_mode: int = 2
+    require_unlocked: bool = False
     require_radar: bool = True
     radar_timeout_s: float = 0.5
     max_abs_roll_deg: float = 25.0
@@ -310,6 +311,8 @@ class SafetyArbiter:
             return "fc_not_connected"
         if cfg.require_hold_pos_mode and health.fc_mode != cfg.hold_pos_mode:
             return "not_hold_pos_mode"
+        if cfg.require_unlocked and health.unlock is not True:
+            return "fc_locked"
         if cfg.require_radar and not health.radar_fresh:
             return "radar_not_fresh"
         if health.roll_deg is not None and abs(health.roll_deg) > cfg.max_abs_roll_deg:

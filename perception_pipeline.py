@@ -260,6 +260,7 @@ class YOLOInferenceThread:
         self.skip_count: int = 0
         self.error_count: int = 0
         self._last_log_s: float = 0.0
+        self._last_log_count: int = 0
 
     # ── lifecycle ───────────────────────────────────────────────────
 
@@ -281,6 +282,8 @@ class YOLOInferenceThread:
         io_info = road_perception.get_model_io_info()
 
         self._running = True
+        self._last_log_s = time.monotonic()
+        self._last_log_count = self.inference_count
         self._thread = threading.Thread(
             target=self._inference_task, name="yolo", daemon=True
         )
@@ -382,10 +385,14 @@ class YOLOInferenceThread:
             # Periodic log
             now = time.monotonic()
             if now - self._last_log_s >= 5.0:
+                elapsed_s = max(1e-6, now - self._last_log_s)
+                completed = self.inference_count - self._last_log_count
+                fps = completed / elapsed_s
                 self._last_log_s = now
+                self._last_log_count = self.inference_count
                 state = result.road_state if result else "?"
                 self._log(
-                    f"fps~{self.inference_count / max(1.0, now - self._last_log_s + 5.0):.0f} "
+                    f"fps~{fps:.1f} "
                     f"state={state}"
                 )
 

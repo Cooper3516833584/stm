@@ -1,9 +1,11 @@
 """Segmentation-based road-following entry point.
 
-Default behavior is dry-run. Non-zero FC commands are sent only when
---enable-flight is explicitly provided. Automatic takeoff additionally needs
---auto-takeoff. On Ctrl+C, an enabled in-flight session requests the FC's
-native in-place landing and waits for it to lock.
+Default behavior is dry-run and camera-only road following: radar acquisition
+and obstacle avoidance are disabled unless ``--enable-radar`` is explicitly
+provided. Non-zero FC commands are sent only when ``--enable-flight`` is
+provided. Automatic takeoff additionally needs ``--auto-takeoff``. On Ctrl+C,
+an enabled in-flight session requests the FC's native in-place landing and
+waits for it to lock.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ ROAD_WIDTH_CM = 50.0
 ROAD_HALF_WIDTH_CM = ROAD_WIDTH_CM / 2.0
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Road-following dry-run / flight entry")
     parser.add_argument("--camera-index", type=int, default=7,
                         help="Road-following camera index (default: 7 on OpenSTLinux)")
@@ -65,7 +67,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lower-port", default="/dev/ttySTM9")
     parser.add_argument("--no-fc", action="store_true")
     parser.add_argument("--connect-fc", action="store_true", help="Connect FC for status only")
-    parser.add_argument("--no-radar", action="store_true")
+    radar_group = parser.add_mutually_exclusive_group()
+    radar_group.add_argument(
+        "--enable-radar",
+        dest="no_radar",
+        action="store_false",
+        help="Opt in to radar acquisition and obstacle avoidance (disabled by default)",
+    )
+    radar_group.add_argument(
+        "--no-radar",
+        dest="no_radar",
+        action="store_true",
+        help="Disable radar acquisition and obstacle avoidance (default)",
+    )
+    parser.set_defaults(no_radar=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--enable-flight", action="store_true")
     parser.add_argument(
@@ -184,7 +199,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--offset-max-correction-px", type=float, default=120.0)
     parser.add_argument("--pipeline-latency-s", type=float, default=0.0)
     parser.add_argument("--log-file", default=None)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> None:
@@ -227,7 +242,7 @@ def main() -> None:
     if actual_dry_run:
         logger.warning("[SAFETY] dry-run mode: no non-zero velocity will be sent. Add --enable-flight to allow real output")
     if args.no_radar:
-        logger.warning("[SAFETY] no-radar mode, ground vision debug only; not recommended for flight")
+        logger.info("[ROAD] camera-only mode: radar acquisition and obstacle avoidance are disabled")
     if args.road_bypass_enable and args.road_half_width_cm <= args.road_edge_margin_cm:
         logger.warning(
             "[ROAD] 50cm road leaves no safe lateral bypass corridor after the "
@@ -289,7 +304,7 @@ def main() -> None:
     )
     bypass_planner = RoadObstacleBypassPlanner(
         RoadBypassConfig(
-            enabled=bool(args.road_bypass_enable),
+            enabled=bool(args.road_bypass_enable and not args.no_radar),
             road_half_width_cm=args.road_half_width_cm,
             road_edge_margin_cm=args.road_edge_margin_cm,
             min_x_cm=args.road_bypass_min_x_cm,
@@ -313,6 +328,7 @@ def main() -> None:
         SafetyConfig(
             require_fc=not args.no_fc,
             require_hold_pos_mode=not args.no_fc,
+            require_unlocked=bool(args.enable_flight and not args.no_fc),
             require_radar=not args.no_radar,
             radar_timeout_s=args.radar_timeout_s,
             max_vx_cm_s=args.max_vx_cm_s,
@@ -481,19 +497,20 @@ def main() -> None:
             )
             diagnostic_extra["frame_record_path"] = frame_record_path
 
-            # ── 5. Recording (unchanged)
-            recorder.record_radar(
-                loop_count=loop_count,
-                now_s=loop_start,
-                radar_field=radar_field,
-                multi_radar=multi_radar,
-                radar_age_s=radar_age_s,
-                radar_connected=radar_connected,
-                desired=desired,
-                safe_command=safe.command,
-                decision_reason=decision.reason,
-                extra=diagnostic_extra,
-            )
+            # ── 5. Recording
+            if multi_radar is not None:
+                recorder.record_radar(
+                    loop_count=loop_count,
+                    now_s=loop_start,
+                    radar_field=radar_field,
+                    multi_radar=multi_radar,
+                    radar_age_s=radar_age_s,
+                    radar_connected=radar_connected,
+                    desired=desired,
+                    safe_command=safe.command,
+                    decision_reason=decision.reason,
+                    extra=diagnostic_extra,
+                )
             recorder.record_command(
                 loop_count=loop_count,
                 now_s=loop_start,
@@ -590,6 +607,8 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
         )
     if not 40 <= args.takeoff_height_cm <= 500:
         raise ValueError("--takeoff-height-cm must be within the FC one-key takeoff range of 40..500")
+    if args.no_radar and args.road_bypass_enable:
+        raise ValueError("--road-bypass-enable requires --enable-radar")
     for option in (
         "post_unlock_delay_s",
         "takeoff_timeout_s",

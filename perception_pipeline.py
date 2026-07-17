@@ -19,7 +19,7 @@ Usage::
     pipeline = PerceptionPipeline(
         camera_index=7,
         model_path="FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
-        npu_model_path="FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb",
+        npu_model_path="FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb",
         inference_backend="npu",
         flight_height_m=1.0,
     )
@@ -225,7 +225,7 @@ class YOLOInferenceThread:
         self,
         camera_thread: CameraThread,
         model_path: str,
-        npu_model_path: str = "FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb",
+        npu_model_path: str = "FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb",
         inference_backend: str = "npu",
         postprocess_mode: str = "fast-main",
         flight_height_m: float = 1.0,
@@ -420,7 +420,7 @@ class PerceptionPipeline:
         camera_height: int = 480,
         camera_fps: int = 30,
         model_path: str = "FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
-        npu_model_path: str = "FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb",
+        npu_model_path: str = "FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb",
         inference_backend: str = "npu",
         postprocess_mode: str = "fast-main",
         flight_height_m: float = 1.0,

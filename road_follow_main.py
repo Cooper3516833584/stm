@@ -57,7 +57,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-npu",
-        default="FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb",
+        default="FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb",
         help="Semantic segmentation .nb path used by --road-model-backend npu",
     )
     parser.add_argument("--model-path", default=None, help="Deprecated alias for --model")

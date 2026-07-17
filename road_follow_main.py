@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import sys
 import time
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -29,6 +30,57 @@ OBSTACLE_SAFETY_DISTANCE_CM = 75.0
 BYPASS_ACTIVITY_HALF_WIDTH_CM = 90.0
 
 
+class _StraightRoadTestPipeline:
+    """Camera-free perception source for static radar/bypass testing."""
+
+    def __init__(self, image_width: int = 640, image_height: int = 480) -> None:
+        width = max(2, int(image_width))
+        height = max(2, int(image_height))
+        center_x = float(width) / 2.0
+        step_px = max(10, height // 24)
+        trajectory = [
+            (center_x, float(y))
+            for y in range(height - 1, -1, -step_px)
+        ]
+        if trajectory[-1][1] != 0.0:
+            trajectory.append((center_x, 0.0))
+        centerline = [
+            point for point in trajectory if point[1] >= float(height) * 0.5
+        ]
+        self._perception = SimpleNamespace(
+            is_road_found=True,
+            road_state="single",
+            pixel_error=0.0,
+            corrected_pixel_error=0.0,
+            centerline_angle=90.0,
+            path_width_px=float(width) * 0.25,
+            confidence=1.0,
+            centerline_points=centerline,
+            trajectory_points=trajectory,
+            branches=[],
+            selected_branch=None,
+            branch_decision="obstacle_test_straight",
+            debug_msg="synthetic straight road: angle=90deg error=0px",
+            debug_mask=None,
+        )
+
+    def start(self) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+    def latest_perception(self):
+        return self._perception, 0.0, False
+
+    def latest_frame(self):
+        return None, 0.0
+
+    @property
+    def camera_ok(self) -> bool:
+        return True
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Road-following dry-run / flight entry")
     parser.add_argument(
@@ -36,6 +88,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["centerline", "trajectory-point"],
         default="centerline",
         help="Control law: legacy lower-centerline or camera-centre trajectory point tracking",
+    )
+    parser.add_argument(
+        "--obstacle-test",
+        action="store_true",
+        help=(
+            "Camera-free static bypass test: force a straight-road perception "
+            "(angle=90deg, error=0), enable radar/bypass, and forbid FC output"
+        ),
     )
     parser.add_argument("--camera-index", type=int, default=7,
                         help="Road-following camera index (default: 7 on OpenSTLinux)")
@@ -276,8 +336,12 @@ def main(argv: list[str] | None = None) -> None:
         send_command_safely,
     )
 
-    selected_model = args.model_npu if args.road_model_backend == "npu" else args.model
-    if not os.path.isfile(selected_model):
+    selected_model = (
+        "synthetic-straight-road"
+        if args.obstacle_test
+        else (args.model_npu if args.road_model_backend == "npu" else args.model)
+    )
+    if not args.obstacle_test and not os.path.isfile(selected_model):
         msg = (
             f"[ROAD] {args.road_model_backend} model missing, "
             f"perception lost: {selected_model}"
@@ -454,22 +518,28 @@ def main(argv: list[str] | None = None) -> None:
             multi_radar = MultiRadar(_radar_configs(args.upper_port, args.lower_port))
             multi_radar.start()
 
-        pipeline = PerceptionPipeline(
-            camera_index=args.camera_index,
-            camera_width=args.camera_width,
-            camera_height=args.camera_height,
-            camera_fps=args.camera_fps,
-            model_path=args.model,
-            npu_model_path=args.model_npu,
-            inference_backend=args.road_model_backend,
-            postprocess_mode=args.road_postprocess_mode,
-            flight_height_m=args.flight_height_m,
-            wb_enable=bool(args.wb_enable),
-            wb_r=args.wb_r,
-            wb_g=args.wb_g,
-            wb_b=args.wb_b,
-            offset_comp_config=offset_comp,
-        )
+        if args.obstacle_test:
+            pipeline = _StraightRoadTestPipeline(
+                image_width=args.camera_width,
+                image_height=args.camera_height,
+            )
+        else:
+            pipeline = PerceptionPipeline(
+                camera_index=args.camera_index,
+                camera_width=args.camera_width,
+                camera_height=args.camera_height,
+                camera_fps=args.camera_fps,
+                model_path=args.model,
+                npu_model_path=args.model_npu,
+                inference_backend=args.road_model_backend,
+                postprocess_mode=args.road_postprocess_mode,
+                flight_height_m=args.flight_height_m,
+                wb_enable=bool(args.wb_enable),
+                wb_r=args.wb_r,
+                wb_g=args.wb_g,
+                wb_b=args.wb_b,
+                offset_comp_config=offset_comp,
+            )
         pipeline.start()
 
         if args.auto_takeoff:
@@ -697,11 +767,25 @@ def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
             args.camera_index = int(args.camera)
         except ValueError:
             args.camera_index = args.camera
+    if args.obstacle_test:
+        # This mode exists only to inspect radar -> planner -> safety commands.
+        # It must never connect to the FC or create flight/recording side effects.
+        args.no_fc = True
+        args.dry_run = True
+        args.no_record = True
+        args.no_radar = False
+        args.road_bypass_enable = True
     return args
 
 
 def _validate_flight_args(args: argparse.Namespace) -> None:
     """Reject combinations that could make automatic flight ambiguous."""
+    if args.obstacle_test and (
+        args.enable_flight or args.auto_takeoff or args.connect_fc
+    ):
+        raise ValueError(
+            "--obstacle-test forbids --enable-flight, --auto-takeoff, and --connect-fc"
+        )
     if args.auto_takeoff and (not args.enable_flight or args.dry_run or args.no_fc):
         raise ValueError(
             "--auto-takeoff requires --enable-flight and cannot be combined with --dry-run or --no-fc"

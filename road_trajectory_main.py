@@ -3,6 +3,10 @@
 This program reuses the proven camera, NPU, recording, safety, takeoff, and
 landing pipeline from :mod:`road_follow_main`, but selects the controller that
 flies from the camera centre toward successive road trajectory points.
+
+For a camera-free static obstacle-avoidance check, run this entry point with
+``--obstacle-test``.  That mode supplies a permanent straight-road perception,
+enables the two radars and bypass planner, and forcibly disables FC output.
 """
 
 from __future__ import annotations

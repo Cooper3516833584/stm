@@ -94,6 +94,16 @@ class SessionRecorder:
             return None
         return self.session_dir / "runtime.log"
 
+    def frame_due(self, loop_count: int) -> bool:
+        if not self.enabled:
+            return False
+        jpeg_due = loop_count % max(1, int(self.config.frame_every_n)) == 0
+        video_due = bool(
+            self.config.video_enabled
+            and loop_count % max(1, int(self.config.video_every_n)) == 0
+        )
+        return bool(jpeg_due or video_due)
+
     def record_frame(
         self,
         *,

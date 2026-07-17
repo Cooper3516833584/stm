@@ -352,11 +352,15 @@ def _draw_hud(out: np.ndarray, perception, command, frame_idx: int, fps: float) 
 
 
 def _open_writer(path: Path, fps: float, width: int, height: int) -> cv2.VideoWriter:
+    # Some phone/drone files report an estimated value such as 29.79 fps.
+    # avenc_mpeg4 otherwise falls back to a 25 fps stream tag, so snap values
+    # close to an integer to the standard rate used by the source camera.
+    writer_fps = float(round(fps)) if abs(fps - round(fps)) < 0.25 else fps
     for codec in ("mp4v", "avc1", "H264"):
         writer = cv2.VideoWriter(
             str(path),
             cv2.VideoWriter_fourcc(*codec),
-            fps,
+            writer_fps,
             (width, height),
         )
         if writer.isOpened():
@@ -375,7 +379,7 @@ def _open_writer(path: Path, fps: float, width: int, height: int) -> cv2.VideoWr
         gst_pipeline,
         cv2.CAP_GSTREAMER,
         0,
-        fps,
+        writer_fps,
         (width, height),
         True,
     )

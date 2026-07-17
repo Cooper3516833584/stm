@@ -19,13 +19,16 @@ def _perception(points, *, state="single", found=True, confidence=0.9):
 
 
 def _follower(**overrides):
+    values = {
+        "max_vx_cm_s": 10.0,
+        "max_vy_cm_s": 8.0,
+        "max_yaw_rate_deg_s": 10.0,
+        "max_planar_accel_cm_s2": 1_000_000.0,
+        "max_yaw_accel_deg_s2": 1_000_000.0,
+    }
+    values.update(overrides)
     return TrajectoryPointFollower(
-        TrajectoryPointFollowerConfig(
-            max_vx_cm_s=10.0,
-            max_vy_cm_s=8.0,
-            max_yaw_rate_deg_s=10.0,
-            **overrides,
-        )
+        TrajectoryPointFollowerConfig(**values)
     )
 
 
@@ -46,13 +49,29 @@ def test_reached_nearest_point_advances_to_next_point_and_moves_forward():
 
 def test_offset_target_moves_directly_sideways_with_camera_mapping():
     points = [(400.0, 300.0), (400.0, 240.0), (400.0, 180.0)]
-    follower = _follower()
+    follower = _follower(min_forward_lookahead_px=0.0)
 
     command = follower.update(_perception(points), now_s=1.0)
 
     assert command.vx_cm_s == pytest.approx(0.0)
     assert command.vy_cm_s == pytest.approx(-8.0)
     assert follower.last_diagnostics.target_x_px == 400.0
+
+
+def test_point_at_camera_height_advances_to_forward_lookahead():
+    points = [
+        (380.0, 300.0),
+        (380.0, 243.0),
+        (380.0, 228.0),
+        (380.0, 180.0),
+    ]
+    follower = _follower(min_forward_lookahead_px=12.0)
+
+    command = follower.update(_perception(points), now_s=1.0)
+
+    assert follower.last_diagnostics.target_y_px == 228.0
+    assert follower.last_diagnostics.target_advanced_for_lookahead
+    assert command.vx_cm_s > 0.0
 
 
 def test_diagonal_path_moves_toward_point_and_yaws_with_local_tangent():
@@ -108,6 +127,54 @@ def test_degraded_fitted_path_keeps_moving_at_reduced_speed():
 
     assert command.vx_cm_s == pytest.approx(7.5)
     assert follower.last_diagnostics.heading_speed_scale == pytest.approx(0.75)
+
+
+def test_default_acceleration_limit_ramps_initial_command_without_lowering_cruise_limit():
+    points = [(320.0, float(y)) for y in range(460, 19, -20)]
+    follower = TrajectoryPointFollower(TrajectoryPointFollowerConfig())
+
+    commands = [
+        follower.update(_perception(points), now_s=1.0 + 0.1 * index)
+        for index in range(8)
+    ]
+
+    assert commands[0].vx_cm_s == pytest.approx(1.6)
+    assert commands[-1].vx_cm_s == pytest.approx(10.0)
+    assert commands[-1].vy_cm_s == pytest.approx(0.0)
+
+
+def test_planar_acceleration_limit_brakes_before_direction_reversal():
+    right = [(400.0, 300.0), (400.0, 240.0), (400.0, 180.0)]
+    left = [(240.0, 300.0), (240.0, 240.0), (240.0, 180.0)]
+    follower = _follower(
+        max_planar_accel_cm_s2=16.0,
+        target_filter_tau_s=0.0,
+        target_filter_max_rate_px_s=1_000_000.0,
+    )
+    previous = None
+    for index in range(8):
+        previous = follower.update(_perception(right), now_s=1.0 + 0.1 * index)
+
+    command = follower.update(_perception(left), now_s=1.8)
+    delta = ((command.vx_cm_s - previous.vx_cm_s) ** 2 + (command.vy_cm_s - previous.vy_cm_s) ** 2) ** 0.5
+
+    assert delta == pytest.approx(1.6)
+    assert previous.vy_cm_s < 0.0
+    assert command.vy_cm_s < 0.0
+    assert follower.last_diagnostics.planar_accel_limited
+
+
+def test_lost_road_stops_immediately_and_reacquisition_ramps_from_zero():
+    points = [(320.0, float(y)) for y in range(460, 19, -20)]
+    follower = _follower(max_planar_accel_cm_s2=16.0)
+    follower.update(_perception(points), now_s=1.0)
+
+    stopped = follower.update(None, now_s=1.1)
+    restarted = follower.update(_perception(points), now_s=1.2)
+
+    assert stopped.vx_cm_s == 0.0
+    assert stopped.vy_cm_s == 0.0
+    assert restarted.vx_cm_s == pytest.approx(1.6)
 
 
 @pytest.mark.parametrize(

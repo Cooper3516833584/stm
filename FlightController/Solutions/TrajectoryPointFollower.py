@@ -20,6 +20,7 @@ class TrajectoryPointFollowerConfig:
     max_vy_cm_s: float = 8.0
     max_yaw_rate_deg_s: float = 10.0
     reach_radius_px: float = 20.0
+    min_forward_lookahead_px: float = 12.0
     tangent_window_points: int = 3
     min_confidence: float = 0.35
     tangent_kp_yaw: float = 0.25
@@ -30,6 +31,8 @@ class TrajectoryPointFollowerConfig:
     tangent_filter_tau_s: float = 0.25
     target_filter_max_rate_px_s: float = 600.0
     tangent_filter_max_rate_deg_s: float = 90.0
+    max_planar_accel_cm_s2: float = 16.0
+    max_yaw_accel_deg_s2: float = 20.0
     degraded_speed_scale: float = 0.75
 
 
@@ -46,6 +49,7 @@ class TrajectoryPointFollowerDiagnostics:
     target_y_px: float | None = None
     target_distance_px: float | None = None
     target_reached: bool = False
+    target_advanced_for_lookahead: bool = False
     tangent_dx_px: float | None = None
     tangent_dy_px: float | None = None
     raw_forward_error_px: float | None = None
@@ -63,10 +67,15 @@ class TrajectoryPointFollowerDiagnostics:
     pixel_yaw_term_deg_s: float = 0.0
     angle_yaw_term_deg_s: float = 0.0
     unclamped_yaw_rate_deg_s: float = 0.0
+    clamped_yaw_rate_deg_s: float = 0.0
     yaw_rate_deg_s: float = 0.0
+    yaw_accel_limited: bool = False
+    unclamped_vx_cm_s: float = 0.0
     unclamped_vy_cm_s: float = 0.0
     vy_cm_s: float = 0.0
     vx_cm_s: float = 0.0
+    planar_accel_limited: bool = False
+    planar_command_delta_cm_s: float = 0.0
     heading_speed_scale: float = 0.0
     tangent_motion_fallback: bool = False
     lost_elapsed_s: float = 0.0
@@ -85,6 +94,9 @@ class TrajectoryPointFollower:
         self._filtered_forward_px: float | None = None
         self._filtered_lateral_px: float | None = None
         self._filtered_tangent_error_deg: float | None = None
+        self._limited_vx_cm_s = 0.0
+        self._limited_vy_cm_s = 0.0
+        self._limited_yaw_rate_deg_s = 0.0
         self.last_diagnostics = TrajectoryPointFollowerDiagnostics()
 
     def update(self, perception, now_s: float) -> Command:
@@ -105,12 +117,22 @@ class TrajectoryPointFollower:
             _distance_sq(points[nearest_index], (center_x, center_y))
         )
         target_index = nearest_index
+        target_advanced_for_lookahead = False
         while target_index + 1 < len(points):
+            point_x, point_y = points[target_index]
             target_distance = math.sqrt(
-                _distance_sq(points[target_index], (center_x, center_y))
+                _distance_sq((point_x, point_y), (center_x, center_y))
             )
-            if target_distance >= float(self.config.reach_radius_px):
+            has_forward_lookahead = (
+                center_y - point_y >= float(self.config.min_forward_lookahead_px)
+            )
+            if (
+                target_distance >= float(self.config.reach_radius_px)
+                and has_forward_lookahead
+            ):
                 break
+            if target_distance >= float(self.config.reach_radius_px):
+                target_advanced_for_lookahead = True
             target_index += 1
 
         target_x, target_y = points[target_index]
@@ -162,13 +184,20 @@ class TrajectoryPointFollower:
             * self.config.tangent_kp_yaw
             * used_tangent_error_deg
         )
-        yaw_rate = _clamp(
+        clamped_yaw_rate = _clamp(
             unclamped_yaw_rate,
             -self.config.max_yaw_rate_deg_s,
             self.config.max_yaw_rate_deg_s,
         )
+        yaw_rate, yaw_accel_limited = self._limit_scalar_rate(
+            clamped_yaw_rate,
+            self._limited_yaw_rate_deg_s,
+            max_rate_per_s=self.config.max_yaw_accel_deg_s2,
+            dt_s=dt_s,
+        )
+        self._limited_yaw_rate_deg_s = yaw_rate
 
-        vx, vy = self._directional_velocity(
+        requested_vx, requested_vy = self._directional_velocity(
             filtered_forward_px,
             filtered_lateral_px,
         )
@@ -178,8 +207,20 @@ class TrajectoryPointFollower:
             if road_state in {"single_rough", "single_extrapolated"}
             else 1.0
         )
-        vx *= speed_scale
-        vy *= speed_scale
+        requested_vx *= speed_scale
+        requested_vy *= speed_scale
+        vx, vy, planar_accel_limited, planar_command_delta = (
+            self._limit_planar_acceleration(
+                requested_vx,
+                requested_vy,
+                self._limited_vx_cm_s,
+                self._limited_vy_cm_s,
+                max_accel_cm_s2=self.config.max_planar_accel_cm_s2,
+                dt_s=dt_s,
+            )
+        )
+        self._limited_vx_cm_s = vx
+        self._limited_vy_cm_s = vy
 
         self.last_diagnostics = TrajectoryPointFollowerDiagnostics(
             state="tracking",
@@ -192,6 +233,7 @@ class TrajectoryPointFollower:
             target_y_px=target_y,
             target_distance_px=target_distance,
             target_reached=nearest_distance < self.config.reach_radius_px,
+            target_advanced_for_lookahead=target_advanced_for_lookahead,
             tangent_dx_px=tangent_dx,
             tangent_dy_px=tangent_dy,
             raw_forward_error_px=raw_forward_px,
@@ -208,10 +250,15 @@ class TrajectoryPointFollower:
             used_pixel_error_px=filtered_lateral_px,
             angle_yaw_term_deg_s=unclamped_yaw_rate,
             unclamped_yaw_rate_deg_s=unclamped_yaw_rate,
+            clamped_yaw_rate_deg_s=clamped_yaw_rate,
             yaw_rate_deg_s=yaw_rate,
-            unclamped_vy_cm_s=vy,
+            yaw_accel_limited=yaw_accel_limited,
+            unclamped_vx_cm_s=requested_vx,
+            unclamped_vy_cm_s=requested_vy,
             vy_cm_s=vy,
             vx_cm_s=vx,
+            planar_accel_limited=planar_accel_limited,
+            planar_command_delta_cm_s=planar_command_delta,
             heading_speed_scale=speed_scale,
             tangent_motion_fallback=tangent_motion_fallback,
         )
@@ -288,6 +335,49 @@ class TrajectoryPointFollower:
         scale = min(scale_limits)
         return unit_x * scale, unit_y * scale
 
+    @staticmethod
+    def _limit_planar_acceleration(
+        requested_vx: float,
+        requested_vy: float,
+        previous_vx: float,
+        previous_vy: float,
+        *,
+        max_accel_cm_s2: float,
+        dt_s: float,
+    ) -> tuple[float, float, bool, float]:
+        delta_vx = float(requested_vx) - float(previous_vx)
+        delta_vy = float(requested_vy) - float(previous_vy)
+        requested_delta = math.hypot(delta_vx, delta_vy)
+        if requested_delta < 1e-9 or max_accel_cm_s2 <= 0.0:
+            return float(requested_vx), float(requested_vy), False, requested_delta
+
+        # Do not let one delayed loop consume an arbitrarily large slew budget.
+        max_delta = float(max_accel_cm_s2) * min(float(dt_s), 0.25)
+        if requested_delta <= max_delta:
+            return float(requested_vx), float(requested_vy), False, requested_delta
+        scale = max_delta / requested_delta
+        return (
+            float(previous_vx) + delta_vx * scale,
+            float(previous_vy) + delta_vy * scale,
+            True,
+            max_delta,
+        )
+
+    @staticmethod
+    def _limit_scalar_rate(
+        requested: float,
+        previous: float,
+        *,
+        max_rate_per_s: float,
+        dt_s: float,
+    ) -> tuple[float, bool]:
+        delta = float(requested) - float(previous)
+        if max_rate_per_s <= 0.0:
+            return float(requested), False
+        max_delta = float(max_rate_per_s) * min(float(dt_s), 0.25)
+        limited_delta = _clamp(delta, -max_delta, max_delta)
+        return float(previous) + limited_delta, abs(limited_delta - delta) > 1e-9
+
     def _observation_dt(self, now_s: float) -> float:
         if self._last_update_s is None:
             dt_s = 0.1
@@ -339,6 +429,9 @@ class TrajectoryPointFollower:
         self._filtered_forward_px = None
         self._filtered_lateral_px = None
         self._filtered_tangent_error_deg = None
+        self._limited_vx_cm_s = 0.0
+        self._limited_vy_cm_s = 0.0
+        self._limited_yaw_rate_deg_s = 0.0
         self.last_diagnostics = TrajectoryPointFollowerDiagnostics(
             state="road_lost_hold",
             lost_elapsed_s=lost_elapsed_s,

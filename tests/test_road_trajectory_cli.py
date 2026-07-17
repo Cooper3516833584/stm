@@ -7,6 +7,9 @@ def test_trajectory_entry_selects_point_controller_and_conservative_limits():
 
     assert args.road_controller == "trajectory-point"
     assert args.trajectory_reach_radius_px == 20.0
+    assert args.trajectory_min_forward_lookahead_px == 12.0
+    assert args.trajectory_max_planar_accel_cm_s2 == 16.0
+    assert args.trajectory_max_yaw_accel_deg_s2 == 20.0
     assert args.max_vx_cm_s == 10.0
     assert args.max_vy_cm_s == 8.0
     assert args.max_yaw_rate_deg_s == 10.0

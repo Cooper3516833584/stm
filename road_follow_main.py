@@ -174,10 +174,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--road-heading-slowdown-start-deg", type=float, default=30.0)
     parser.add_argument("--road-heading-stop-deg", type=float, default=70.0)
     parser.add_argument("--trajectory-reach-radius-px", type=float, default=20.0)
+    parser.add_argument("--trajectory-min-forward-lookahead-px", type=float, default=12.0)
     parser.add_argument("--trajectory-tangent-window-points", type=int, default=3)
     parser.add_argument("--trajectory-tangent-kp-yaw", type=float, default=0.25)
     parser.add_argument("--trajectory-target-filter-tau-s", type=float, default=0.20)
     parser.add_argument("--trajectory-tangent-filter-tau-s", type=float, default=0.25)
+    parser.add_argument("--trajectory-max-planar-accel-cm-s2", type=float, default=16.0)
+    parser.add_argument("--trajectory-max-yaw-accel-deg-s2", type=float, default=20.0)
     parser.add_argument("--trajectory-degraded-speed-scale", type=float, default=0.75)
     parser.add_argument("--road-bypass-enable", action="store_true",
                         help="Enable radar-assisted in-road bypass for branches/vines intruding into the road center")
@@ -330,6 +333,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_vy_cm_s=args.max_vy_cm_s,
                 max_yaw_rate_deg_s=args.max_yaw_rate_deg_s,
                 reach_radius_px=args.trajectory_reach_radius_px,
+                min_forward_lookahead_px=args.trajectory_min_forward_lookahead_px,
                 tangent_window_points=args.trajectory_tangent_window_points,
                 tangent_kp_yaw=args.trajectory_tangent_kp_yaw,
                 tangent_deadband_deg=args.road_angle_deadband_deg,
@@ -339,6 +343,8 @@ def main(argv: list[str] | None = None) -> None:
                 tangent_filter_tau_s=args.trajectory_tangent_filter_tau_s,
                 target_filter_max_rate_px_s=args.road_pixel_filter_max_rate_px_s,
                 tangent_filter_max_rate_deg_s=args.road_angle_filter_max_rate_deg_s,
+                max_planar_accel_cm_s2=args.trajectory_max_planar_accel_cm_s2,
+                max_yaw_accel_deg_s2=args.trajectory_max_yaw_accel_deg_s2,
                 degraded_speed_scale=args.trajectory_degraded_speed_scale,
             )
         )
@@ -703,10 +709,18 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
         raise ValueError("--road-angle-deadband-deg cannot be negative")
     if args.trajectory_reach_radius_px <= 0.0:
         raise ValueError("--trajectory-reach-radius-px must be greater than zero")
+    if args.trajectory_min_forward_lookahead_px < 0.0:
+        raise ValueError("--trajectory-min-forward-lookahead-px cannot be negative")
     if args.trajectory_tangent_window_points <= 0:
         raise ValueError("--trajectory-tangent-window-points must be greater than zero")
     if args.trajectory_tangent_kp_yaw < 0.0:
         raise ValueError("--trajectory-tangent-kp-yaw cannot be negative")
+    for option in (
+        "trajectory_max_planar_accel_cm_s2",
+        "trajectory_max_yaw_accel_deg_s2",
+    ):
+        if getattr(args, option) <= 0.0:
+            raise ValueError(f"--{option.replace('_', '-')} must be greater than zero")
     if not 0.0 < args.trajectory_degraded_speed_scale <= 1.0:
         raise ValueError("--trajectory-degraded-speed-scale must be within (0, 1]")
     for option in (
@@ -964,7 +978,7 @@ def _log_road_summary(
     bypass_y = getattr(bypass_planner, "last_target_y_cm", None) if bypass_planner is not None else None
     logger.info(
         "[ROAD] state={} mode=single-road err={:.0f} corr={:.0f} angle={:.0f} conf={:.2f} "
-        "ctrl=(mode={} target=({},{}) d={} idx={} angle_err={} px_yaw={} angle_yaw={} speed_scale={}) "
+        "ctrl=(mode={} target=({},{}) d={} idx={} angle_err={} px_yaw={} angle_yaw={} speed_scale={} slew={}) "
         "desired=(vx={} vy={} yaw={}) planned=(vx={} vy={} yaw={}) safe=(vx={} vy={} yaw={}) "
         "actual=(yaw={} yaw_rate={} vx={} vy={}) ages=(frame={} perception={} stale={}) "
         "bypass={} bypass_y={} safety={} sent={} radar_fresh={} fc_mode={}".format(
@@ -982,6 +996,7 @@ def _log_road_summary(
             _round_or_none(controller_diagnostics.get("pixel_yaw_term_deg_s")),
             _round_or_none(controller_diagnostics.get("angle_yaw_term_deg_s")),
             _round_or_none(controller_diagnostics.get("heading_speed_scale"), 2),
+            bool(controller_diagnostics.get("planar_accel_limited", False)),
             round(desired.vx_cm_s),
             round(desired.vy_cm_s),
             round(desired.yaw_rate_deg_s),

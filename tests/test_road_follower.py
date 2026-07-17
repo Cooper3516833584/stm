@@ -27,7 +27,13 @@ def test_cross_track_error_uses_lateral_velocity_not_yaw_by_default():
 
 
 def test_heading_error_controls_yaw_with_fc_clockwise_positive_convention():
-    follower = RoadFollower(RoadFollowerConfig(pixel_deadband_px=0.0))
+    follower = RoadFollower(
+        RoadFollowerConfig(
+            pixel_deadband_px=0.0,
+            angle_filter_tau_s=0.0,
+            angle_filter_max_rate_deg_s=0.0,
+        )
+    )
 
     road_ahead_left = follower.update(_perception(angle=135.0), now_s=1.0)
     road_ahead_right = follower.update(_perception(angle=45.0), now_s=2.0)
@@ -67,3 +73,39 @@ def test_legacy_pixel_to_yaw_term_remains_explicitly_opt_in():
 
     assert command.yaw_rate_deg_s == pytest.approx(8.0)
     assert command.vy_cm_s == 0.0
+
+
+def test_single_frame_angle_spike_does_not_reverse_yaw():
+    follower = RoadFollower(RoadFollowerConfig(angle_deadband_deg=0.0))
+
+    before = follower.update(_perception(angle=60.0), now_s=1.0)
+    spike = follower.update(_perception(angle=120.0), now_s=1.1)
+
+    assert before.yaw_rate_deg_s > 0.0
+    assert spike.yaw_rate_deg_s > 0.0
+    assert follower.last_diagnostics.raw_centerline_angle_deg == 120.0
+    assert follower.last_diagnostics.centerline_angle_deg == pytest.approx(64.5)
+
+
+def test_sustained_angle_change_eventually_changes_yaw_direction():
+    follower = RoadFollower(RoadFollowerConfig(angle_deadband_deg=0.0))
+    follower.update(_perception(angle=60.0), now_s=1.0)
+
+    command = None
+    for index in range(1, 31):
+        command = follower.update(_perception(angle=120.0), now_s=1.0 + index * 0.1)
+
+    assert command is not None
+    assert command.yaw_rate_deg_s < 0.0
+
+
+def test_single_frame_pixel_spike_does_not_reverse_lateral_command():
+    follower = RoadFollower(RoadFollowerConfig(pixel_deadband_px=0.0))
+
+    before = follower.update(_perception(pixel_error=100.0), now_s=1.0)
+    spike = follower.update(_perception(pixel_error=-100.0), now_s=1.1)
+
+    assert before.vy_cm_s < 0.0
+    assert spike.vy_cm_s < 0.0
+    assert follower.last_diagnostics.raw_pixel_error_px == -100.0
+    assert follower.last_diagnostics.filtered_pixel_error_px == pytest.approx(70.0)

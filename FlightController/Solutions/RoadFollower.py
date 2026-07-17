@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from .Safety import Command
@@ -19,9 +20,13 @@ class RoadFollowerConfig:
     # large lateral error cannot turn the nose perpendicular to the road.
     pixel_kp_yaw: float = 0.0
     pixel_kp_vy: float = 0.03
-    angle_kp_yaw: float = 0.4
+    angle_kp_yaw: float = 0.25
     pixel_deadband_px: float = 20.0
     angle_deadband_deg: float = 3.0
+    pixel_filter_tau_s: float = 0.35
+    angle_filter_tau_s: float = 0.35
+    pixel_filter_max_rate_px_s: float = 300.0
+    angle_filter_max_rate_deg_s: float = 45.0
     target_centerline_angle_deg: float = 90.0
     heading_slowdown_start_deg: float = 30.0
     heading_stop_deg: float = 70.0
@@ -36,7 +41,9 @@ class RoadFollowerConfig:
 class RoadFollowerDiagnostics:
     state: str
     raw_pixel_error_px: float | None = None
+    filtered_pixel_error_px: float | None = None
     used_pixel_error_px: float | None = None
+    raw_centerline_angle_deg: float | None = None
     centerline_angle_deg: float | None = None
     angle_error_deg: float | None = None
     pixel_yaw_term_deg_s: float = 0.0
@@ -52,7 +59,9 @@ class RoadFollowerDiagnostics:
         return {
             "state": self.state,
             "raw_pixel_error_px": self.raw_pixel_error_px,
+            "filtered_pixel_error_px": self.filtered_pixel_error_px,
             "used_pixel_error_px": self.used_pixel_error_px,
+            "raw_centerline_angle_deg": self.raw_centerline_angle_deg,
             "centerline_angle_deg": self.centerline_angle_deg,
             "angle_error_deg": self.angle_error_deg,
             "pixel_yaw_term_deg_s": self.pixel_yaw_term_deg_s,
@@ -72,6 +81,9 @@ class RoadFollower:
     def __init__(self, config: RoadFollowerConfig | None = None):
         self.config = config or RoadFollowerConfig()
         self._lost_since_s: float | None = None
+        self._last_update_s: float | None = None
+        self._filtered_pixel_error_px: float | None = None
+        self._filtered_angle_deg: float | None = None
         self.last_diagnostics = RoadFollowerDiagnostics(state="not_started")
 
     def update(self, perception, now_s: float) -> Command:
@@ -79,8 +91,25 @@ class RoadFollower:
             return self._lost_command(now_s)
 
         self._lost_since_s = None
-        pixel_error = float(getattr(perception, "corrected_pixel_error", 0.0))
-        angle = float(getattr(perception, "centerline_angle", 90.0))
+        dt_s = self._observation_dt(now_s)
+        raw_pixel_error = float(getattr(perception, "corrected_pixel_error", 0.0))
+        raw_angle = float(getattr(perception, "centerline_angle", 90.0))
+        pixel_error = self._filter_observation(
+            raw_pixel_error,
+            previous=self._filtered_pixel_error_px,
+            tau_s=self.config.pixel_filter_tau_s,
+            max_rate_per_s=self.config.pixel_filter_max_rate_px_s,
+            dt_s=dt_s,
+        )
+        angle = self._filter_observation(
+            raw_angle,
+            previous=self._filtered_angle_deg,
+            tau_s=self.config.angle_filter_tau_s,
+            max_rate_per_s=self.config.angle_filter_max_rate_deg_s,
+            dt_s=dt_s,
+        )
+        self._filtered_pixel_error_px = pixel_error
+        self._filtered_angle_deg = angle
         used_pixel_error = self._deadband(pixel_error, self.config.pixel_deadband_px)
         angle_error = self._deadband(
             self.config.target_centerline_angle_deg - angle,
@@ -105,8 +134,10 @@ class RoadFollower:
 
         self.last_diagnostics = RoadFollowerDiagnostics(
             state="tracking",
-            raw_pixel_error_px=pixel_error,
+            raw_pixel_error_px=raw_pixel_error,
+            filtered_pixel_error_px=pixel_error,
             used_pixel_error_px=used_pixel_error,
+            raw_centerline_angle_deg=raw_angle,
             centerline_angle_deg=angle,
             angle_error_deg=angle_error,
             pixel_yaw_term_deg_s=pixel_yaw_term,
@@ -123,8 +154,11 @@ class RoadFollower:
     def _lost_command(self, now_s: float) -> Command:
         if self._lost_since_s is None:
             self._lost_since_s = now_s
+        self._last_update_s = now_s
         lost_elapsed_s = now_s - self._lost_since_s
         if lost_elapsed_s >= self.config.lost_timeout_s:
+            self._filtered_pixel_error_px = None
+            self._filtered_angle_deg = None
             self.last_diagnostics = RoadFollowerDiagnostics(
                 state="lost_timeout",
                 lost_elapsed_s=lost_elapsed_s,
@@ -180,6 +214,40 @@ class RoadFollower:
         if error >= stop:
             return 0.0
         return 1.0 - (error - start) / (stop - start)
+
+    def _observation_dt(self, now_s: float) -> float:
+        previous_s = self._last_update_s
+        self._last_update_s = float(now_s)
+        if previous_s is None:
+            return 0.1
+        return _clamp(float(now_s) - previous_s, 0.02, 0.5)
+
+    @staticmethod
+    def _filter_observation(
+        raw_value: float,
+        *,
+        previous: float | None,
+        tau_s: float,
+        max_rate_per_s: float,
+        dt_s: float,
+    ) -> float:
+        raw_value = float(raw_value)
+        if previous is None:
+            return raw_value
+
+        previous = float(previous)
+        tau_s = max(0.0, float(tau_s))
+        if tau_s == 0.0:
+            target = raw_value
+        else:
+            alpha = 1.0 - math.exp(-max(0.0, float(dt_s)) / tau_s)
+            target = previous + alpha * (raw_value - previous)
+
+        max_rate_per_s = max(0.0, float(max_rate_per_s))
+        if max_rate_per_s == 0.0:
+            return target
+        max_change = max_rate_per_s * max(0.0, float(dt_s))
+        return previous + _clamp(target - previous, -max_change, max_change)
 
     @staticmethod
     def _deadband(value: float, deadband: float) -> float:

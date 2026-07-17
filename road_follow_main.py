@@ -97,6 +97,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--post-unlock-delay-s", type=float, default=2.0)
     parser.add_argument("--takeoff-timeout-s", type=float, default=25.0)
     parser.add_argument("--takeoff-height-tolerance-cm", type=float, default=15.0)
+    parser.add_argument(
+        "--min-takeoff-battery-v",
+        type=float,
+        default=10.5,
+        help="Minimum battery voltage before and during automatic takeoff (default: 10.5)",
+    )
+    parser.add_argument("--takeoff-low-battery-confirm-frames", type=int, default=3)
     parser.add_argument("--landing-timeout-s", type=float, default=30.0)
     parser.add_argument("--loop-hz", type=float, default=10.0)
     parser.add_argument("--wb-enable", action="store_true",
@@ -145,10 +152,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Cross-track pixel error to lateral velocity gain")
     parser.add_argument("--road-pixel-kp-yaw", type=float, default=0.0,
                         help="Legacy cross-track pixel error to yaw gain (default: disabled)")
-    parser.add_argument("--road-angle-kp-yaw", type=float, default=0.4)
+    parser.add_argument("--road-angle-kp-yaw", type=float, default=0.25)
     parser.add_argument("--road-target-centerline-angle-deg", type=float, default=90.0,
                         help="Camera-image angle that corresponds to aircraft-forward road alignment")
     parser.add_argument("--road-angle-deadband-deg", type=float, default=3.0)
+    parser.add_argument("--road-pixel-filter-tau-s", type=float, default=0.35)
+    parser.add_argument("--road-angle-filter-tau-s", type=float, default=0.35)
+    parser.add_argument("--road-pixel-filter-max-rate-px-s", type=float, default=300.0)
+    parser.add_argument("--road-angle-filter-max-rate-deg-s", type=float, default=45.0)
     parser.add_argument("--road-yaw-sign", type=float, default=1.0)
     parser.add_argument("--road-lateral-sign", type=float, default=-1.0,
                         help="Image-right road error to FC body-Y mapping (default: -1)")
@@ -294,6 +305,10 @@ def main() -> None:
             pixel_kp_vy=args.road_pixel_kp_vy,
             pixel_kp_yaw=args.road_pixel_kp_yaw,
             angle_kp_yaw=args.road_angle_kp_yaw,
+            pixel_filter_tau_s=args.road_pixel_filter_tau_s,
+            angle_filter_tau_s=args.road_angle_filter_tau_s,
+            pixel_filter_max_rate_px_s=args.road_pixel_filter_max_rate_px_s,
+            angle_filter_max_rate_deg_s=args.road_angle_filter_max_rate_deg_s,
             target_centerline_angle_deg=args.road_target_centerline_angle_deg,
             angle_deadband_deg=args.road_angle_deadband_deg,
             yaw_sign=args.road_yaw_sign,
@@ -613,6 +628,8 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
         "post_unlock_delay_s",
         "takeoff_timeout_s",
         "takeoff_height_tolerance_cm",
+        "min_takeoff_battery_v",
+        "takeoff_low_battery_confirm_frames",
         "landing_timeout_s",
         "record_frame_every_n",
         "record_radar_every_n",
@@ -633,6 +650,14 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
         raise ValueError("--road-target-centerline-angle-deg must be within 0..180")
     if args.road_angle_deadband_deg < 0.0:
         raise ValueError("--road-angle-deadband-deg cannot be negative")
+    for option in (
+        "road_pixel_filter_tau_s",
+        "road_angle_filter_tau_s",
+        "road_pixel_filter_max_rate_px_s",
+        "road_angle_filter_max_rate_deg_s",
+    ):
+        if getattr(args, option) < 0.0:
+            raise ValueError(f"--{option.replace('_', '-')} cannot be negative")
 
 
 def _wait_for_fc_mode(fc, target_mode: int, timeout_s: float = 5.0) -> None:
@@ -658,6 +683,11 @@ def _auto_takeoff(fc, args: argparse.Namespace) -> None:
         raise RuntimeError("FC is already unlocked; automatic takeoff refused")
     if float(fc.state.bat.value) <= 1.0:
         raise RuntimeError("FC has not reported a valid battery voltage; automatic takeoff refused")
+    if float(fc.state.bat.value) < args.min_takeoff_battery_v:
+        raise RuntimeError(
+            f"battery voltage too low for automatic takeoff: "
+            f"{float(fc.state.bat.value):.2f} V < {args.min_takeoff_battery_v:.2f} V"
+        )
 
     logger.info("[ROAD] automatic takeoff: switching FC to PROGRAM mode")
     _wait_for_fc_mode(fc, fc.PROGRAM_MODE)
@@ -682,11 +712,22 @@ def _auto_takeoff(fc, args: argparse.Namespace) -> None:
     fc.take_off(args.takeoff_height_cm)
     deadline = time.perf_counter() + args.takeoff_timeout_s
     minimum_height_cm = args.takeoff_height_cm - args.takeoff_height_tolerance_cm
+    low_battery_frames = 0
     while time.perf_counter() < deadline:
         if not fc.connected:
             raise RuntimeError("FC disconnected during takeoff")
         if not bool(fc.state.unlock.value):
             raise RuntimeError("FC locked unexpectedly during takeoff")
+        battery_v = float(fc.state.bat.value)
+        if battery_v < args.min_takeoff_battery_v:
+            low_battery_frames += 1
+        else:
+            low_battery_frames = 0
+        if low_battery_frames >= args.takeoff_low_battery_confirm_frames:
+            raise RuntimeError(
+                f"battery voltage stayed too low during takeoff: "
+                f"{battery_v:.2f} V < {args.min_takeoff_battery_v:.2f} V"
+            )
         altitude_cm = float(fc.state.alt_add.value)
         if altitude_cm >= minimum_height_cm:
             _wait_for_fc_mode(fc, fc.HOLD_POS_MODE)
@@ -978,14 +1019,17 @@ def _annotate_road_frame(
         found = bool(getattr(perception, "is_road_found", False)) if perception is not None else False
         confidence = _float_or_none(getattr(perception, "confidence", None))
         pixel_error = _float_or_none(getattr(perception, "corrected_pixel_error", None))
+        filtered_pixel_error = _float_or_none(controller_diagnostics.get("filtered_pixel_error_px"))
         angle = _float_or_none(getattr(perception, "centerline_angle", None))
+        filtered_angle = _float_or_none(controller_diagnostics.get("centerline_angle_deg"))
         lines = [
             (
                 f"loop={loop_count} road={road_state} found={found} conf={_display_float(confidence, 2)} "
                 f"age={_display_float(perception_age_s, 3)}s stale={bool(perception_stale)}"
             ),
             (
-                f"pixel={_display_float(pixel_error, 1)}px angle={_display_float(angle, 1)}deg "
+                f"pixel={_display_float(pixel_error, 1)}->{_display_float(filtered_pixel_error, 1)}px "
+                f"angle={_display_float(angle, 1)}->{_display_float(filtered_angle, 1)}deg "
                 f"angle_err={_display_float(controller_diagnostics.get('angle_error_deg'), 1)}deg"
             ),
             (

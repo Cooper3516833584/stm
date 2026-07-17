@@ -2,7 +2,7 @@
 
 **项目名称**: Cooper_drone (基于 MYiR 开发板的无人机机载/伴随计算机开发)
 **当前阶段**: M8 阶段 — 新道路语义分割模型已通过板端 NPU 验收并接入默认寻路链路
-**最后更新**: 2026年7月17日 (`new_road_seg_v3_final_fp32.nb` 已作为默认 NPU 模型；`fast-main` 主路后处理三轮 100 帧平均 74.4ms；原 128×128 YOLO ONNX CPU 实现保留为显式回退)
+**最后更新**: 2026年7月17日 (`new_road_seg_v4_final_fp32.nb` 已作为默认 NPU 模型；V4 保持 V3 接口和结构，仅更新权重并提升特殊路面精度；原 128×128 YOLO ONNX CPU 实现保留为显式回退)
 
 ## 0. 2026-07-17 新道路语义分割 NPU 模型接入
 
@@ -10,14 +10,19 @@
 - 默认后处理：`--road-postprocess-mode fast-main`；始终只跟随当前主路，`full` 仅保留全分辨率几何
 - 实测道路全宽固定为 50cm：巡线前向雷达走廊、道路半宽和侵入判断默认均为 ±25cm；
   25cm 机体/边缘余量下不规划道路内横向绕行，遇中心障碍物使用 no-gap 减速逻辑
-- 默认 NPU 模型：`FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb`
+- 默认 NPU 模型：`FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb`
+- V4 模型 SHA-256：`1172334fd1e24d597add9cb7d982493c1a59a2d09e740977875fe42d1c18a386`
+- V4 相对 V3：结构、输入输出合同和后处理保持不变；两折基础道路 Road IoU 平均 0.8629，
+  特殊道路平均 0.8705；31 张应用回归全部找到道路，原始 mask 平均 IoU 由 V3 的 0.8919
+  提升至 0.9308
 - 输入契约：RGB float32 `[0,1]`，NCHW `[1,3,256,256]`
 - 输出契约：`logits [1,2,256,256]`，类别 0 为背景、类别 1 为道路
 - CPU 回退：`--road-model-backend cpu`，继续使用 `road_yolo11n_seg_128.onnx`，后处理同样为单主路
-- 板端验收：冷启动 65.09ms，100 轮稳态平均 25.27ms，已记录 `/dev/galcore` 成功 ioctl
-- 生产代码板测：`NBGraphSession` 3 次平均 37.62ms；静态道路图 5/5 找到道路；
-  生产 Python 路径 `strace` 记录 105 次成功 `/dev/galcore` ioctl
-- 完整相机感知：`fast-main` 在 192×144 mask 上隔行提取主路中线，三轮各 100 帧平均
+- V4 板端验收：冷启动 45.99ms，100 轮稳态平均 25.21ms，已记录 `/dev/galcore` 成功 ioctl；
+  冻结输入 NBG 对 ONNX relative L2 为 0.0004025，mask 一致率 100%
+- 生产代码板测：未传 `--model-npu` 时明确加载 V4，静态道路图 5/5 找到道路；当前摄像头
+  画面对 V3/V4 均因中心线点不足返回 lost，因此不将该场景的 road-found 结果归因于 V4
+- V3 同结构后处理性能基线：`fast-main` 在 192×144 mask 上隔行提取主路中线，三轮各 100 帧平均
   73.7/74.8/74.6ms，综合 74.4ms，p95 最高 77.8ms，最慢单帧 80.8ms，road found 300/300。
   相比原完整后处理 216.1ms，中心线阶段由 85.2ms 降至约 12.9ms，解码由 44.0ms
   降至约 10.4ms。静态道路图 fast/full 5/5 均识别成功，最大误差差值 8.7px、最大角度差 3.8°

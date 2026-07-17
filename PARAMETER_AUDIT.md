@@ -142,7 +142,7 @@ def get_road_perception(
 
 **多处引用**: `road_perception.py:141`, `road_follow_main.py:30`
 
-默认使用 `new_road_seg_v3_final_fp32.nb` 在 VIP9000 NPU 上执行；通过
+默认使用 `new_road_seg_v4_final_fp32.nb` 在 VIP9000 NPU 上执行；通过
 `--road-model-backend cpu` 可切回现有 `road_yolo11n_seg_128.onnx` 小模型。
 两个模型文件均随仓库部署，启动时按所选后端检查文件是否存在。
 NPU 默认使用 `--road-postprocess-mode fast-main`，在 192×144 工作 mask 上只提取

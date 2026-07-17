@@ -84,12 +84,40 @@ def parse_args() -> argparse.Namespace:
         help="Directory for rendered videos.",
     )
     parser.add_argument(
+        "--road-model-backend",
+        choices=["npu", "cpu"],
+        default="npu",
+        help="Inference backend (default: NPU semantic model).",
+    )
+    parser.add_argument(
         "--model",
         type=Path,
-        default=ROOT / "FlightController/Solutions/model/road_yolo11n_seg.onnx",
+        default=ROOT / "FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
+        help="Legacy CPU fallback model.",
     )
-    parser.add_argument("--output-width", type=int, default=1920)
-    parser.add_argument("--perception-width", type=int, default=960)
+    parser.add_argument(
+        "--model-npu",
+        type=Path,
+        default=ROOT / "FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb",
+        help="Compiled semantic NPU model.",
+    )
+    parser.add_argument(
+        "--road-postprocess-mode",
+        choices=["fast-main", "full"],
+        default="fast-main",
+    )
+    parser.add_argument(
+        "--output-width",
+        type=int,
+        default=0,
+        help="Rendered width; 0 preserves each source video's resolution.",
+    )
+    parser.add_argument(
+        "--perception-width",
+        type=int,
+        default=640,
+        help="Width used by the perception pipeline; aspect ratio is preserved.",
+    )
     parser.add_argument(
         "--perception-every-n",
         type=int,
@@ -107,9 +135,22 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if not args.model.is_file():
-        raise FileNotFoundError(f"ONNX model not found: {args.model}")
-    road_perception.configure_model(backend="cpu", cpu_model_path=str(args.model))
+    selected_model = args.model_npu if args.road_model_backend == "npu" else args.model
+    if not selected_model.is_file():
+        raise FileNotFoundError(f"Model not found: {selected_model}")
+    road_perception.configure_model(
+        backend=args.road_model_backend,
+        cpu_model_path=str(args.model),
+        npu_model_path=str(args.model_npu),
+        postprocess_mode=args.road_postprocess_mode,
+    )
+    model_info = road_perception.get_model_io_info()
+    print(
+        f"[model] backend={args.road_model_backend} provider={model_info['provider']} "
+        f"kind={model_info['model_kind']} postprocess={model_info['postprocess_mode']} "
+        f"path={selected_model}",
+        flush=True,
+    )
 
     videos = args.videos or sorted((ROOT / "temp").glob("video*.mp4"))
     if not videos:
@@ -130,7 +171,11 @@ def render_video(video_path: Path, args: argparse.Namespace) -> None:
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
     total_frames = int(round(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
 
-    out_w, out_h = _scaled_size(src_w, src_h, args.output_width)
+    out_w, out_h = (
+        (max(2, src_w - src_w % 2), max(2, src_h - src_h % 2))
+        if args.output_width <= 0
+        else _scaled_size(src_w, src_h, args.output_width)
+    )
     percep_w, percep_h = _scaled_size(src_w, src_h, args.perception_width)
     output_path = args.output_dir / f"{video_path.stem}{args.suffix}.mp4"
 
@@ -307,16 +352,40 @@ def _draw_hud(out: np.ndarray, perception, command, frame_idx: int, fps: float) 
 
 
 def _open_writer(path: Path, fps: float, width: int, height: int) -> cv2.VideoWriter:
+    # Some phone/drone files report an estimated value such as 29.79 fps.
+    # avenc_mpeg4 otherwise falls back to a 25 fps stream tag, so snap values
+    # close to an integer to the standard rate used by the source camera.
+    writer_fps = float(round(fps)) if abs(fps - round(fps)) < 0.25 else fps
     for codec in ("mp4v", "avc1", "H264"):
         writer = cv2.VideoWriter(
             str(path),
             cv2.VideoWriter_fourcc(*codec),
-            fps,
+            writer_fps,
             (width, height),
         )
         if writer.isOpened():
             return writer
         writer.release()
+
+    # The production board's OpenCV build can decode through GStreamer but its
+    # default VideoWriter codec discovery does not find an MP4 encoder.  Use
+    # the installed libav MPEG-4 encoder explicitly before giving up.
+    gst_pipeline = (
+        "appsrc ! videoconvert ! video/x-raw,format=I420 ! "
+        "avenc_mpeg4 bitrate=4000000 ! mp4mux ! "
+        f"filesink location={path}"
+    )
+    writer = cv2.VideoWriter(
+        gst_pipeline,
+        cv2.CAP_GSTREAMER,
+        0,
+        writer_fps,
+        (width, height),
+        True,
+    )
+    if writer.isOpened():
+        return writer
+    writer.release()
     raise RuntimeError(f"Could not open VideoWriter for {path}")
 
 

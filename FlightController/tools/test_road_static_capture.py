@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-npu",
-        default="FlightController/Solutions/model/new_road_seg_v3_final_fp32.nb",
+        default="FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb",
         help="NPU semantic segmentation model path.",
     )
     parser.add_argument(

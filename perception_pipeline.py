@@ -44,6 +44,33 @@ from typing import Any
 import numpy as np
 
 
+def _open_camera_capture(cv2, index: int, width: int, height: int, fps: int):
+    """Open the road camera through V4L2 with an explicit MJPG profile."""
+    cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_FPS, fps)
+    buffer_size_property = getattr(cv2, "CAP_PROP_BUFFERSIZE", None)
+    if buffer_size_property is not None:
+        cap.set(buffer_size_property, 1)
+    return cap
+
+
+def _capture_profile(cap, cv2) -> str:
+    """Describe the profile accepted by the camera driver for diagnostics."""
+    try:
+        backend = cap.getBackendName()
+    except Exception:
+        backend = "unknown"
+    width = int(round(cap.get(cv2.CAP_PROP_FRAME_WIDTH)))
+    height = int(round(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+    fourcc_value = int(cap.get(cv2.CAP_PROP_FOURCC))
+    fourcc = "".join(chr((fourcc_value >> (8 * index)) & 0xFF) for index in range(4))
+    return f"backend={backend} profile={width}x{height}@{fps:.1f} fourcc={fourcc!r}"
+
+
 # ── SharedLatest ────────────────────────────────────────────────────────
 
 class SharedLatest:
@@ -119,6 +146,12 @@ class CameraThread:
         self._thread: threading.Thread | None = None
         self._running = False
         self._ok: bool = False
+        self.capture_count: int = 0
+        self.capture_error_count: int = 0
+        self._last_log_s: float = 0.0
+        self._last_log_count: int = 0
+        self._interval_read_ms_total: float = 0.0
+        self._interval_read_ms_max: float = 0.0
 
     # ── lifecycle ───────────────────────────────────────────────────
 
@@ -129,24 +162,35 @@ class CameraThread:
         if self._running:
             return
 
-        cap = cv2.VideoCapture(self._index)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
-        cap.set(cv2.CAP_PROP_FPS, self._fps)
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap = _open_camera_capture(
+            cv2,
+            self._index,
+            self._width,
+            self._height,
+            self._fps,
+        )
+        if not cap.isOpened():
+            cap.release()
+            raise RuntimeError(f"Unable to open road camera index {self._index} through V4L2")
 
         # Warm-up: read and discard a few frames
         for _ in range(5):
             cap.read()
+        accepted_profile = _capture_profile(cap, cv2)
 
         self._cap = cap
-        self._ok = cap.isOpened()
+        self._ok = True
         self._running = True
+        self._last_log_s = time.monotonic()
+        self._last_log_count = self.capture_count
         self._thread = threading.Thread(
             target=self._capture_task, name="camera", daemon=True
         )
         self._thread.start()
-        self._log("started")
+        self._log(
+            f"started requested={self._width}x{self._height}@{self._fps} "
+            f"{accepted_profile}"
+        )
 
     def stop(self) -> None:
         """Signal the thread to stop, join it, and release the camera."""
@@ -183,21 +227,41 @@ class CameraThread:
 
         consecutive_failures = 0
         while self._running:
+            read_started_s = time.monotonic()
             ok, frame = self._cap.read()
             now = time.monotonic()
+            read_ms = max(0.0, now - read_started_s) * 1000.0
 
             if ok and frame is not None:
                 consecutive_failures = 0
                 self.frame_buffer.publish(frame, now)
+                self.capture_count += 1
+                self._interval_read_ms_total += read_ms
+                self._interval_read_ms_max = max(self._interval_read_ms_max, read_ms)
                 if not self._ok:
                     self._ok = True
             else:
                 consecutive_failures += 1
+                self.capture_error_count += 1
                 if consecutive_failures >= 30:
                     self._ok = False
                 if consecutive_failures == 1:
                     self._log(f"camera read failed (consecutive={consecutive_failures})")
                 time.sleep(0.033)  # ~30 fps retry
+
+            if now - self._last_log_s >= 5.0:
+                elapsed_s = max(1e-6, now - self._last_log_s)
+                completed = self.capture_count - self._last_log_count
+                mean_read_ms = self._interval_read_ms_total / max(1, completed)
+                self._log(
+                    f"fps~{completed / elapsed_s:.1f} read_ms~{mean_read_ms:.1f} "
+                    f"read_max_ms={self._interval_read_ms_max:.1f} "
+                    f"errors={self.capture_error_count}"
+                )
+                self._last_log_s = now
+                self._last_log_count = self.capture_count
+                self._interval_read_ms_total = 0.0
+                self._interval_read_ms_max = 0.0
 
     def _log(self, msg: str) -> None:
         try:
@@ -261,6 +325,9 @@ class YOLOInferenceThread:
         self.error_count: int = 0
         self._last_log_s: float = 0.0
         self._last_log_count: int = 0
+        self._interval_inference_ms_total: float = 0.0
+        self._interval_inference_ms_max: float = 0.0
+        self._interval_input_age_ms_max: float = 0.0
 
     # ── lifecycle ───────────────────────────────────────────────────
 
@@ -364,6 +431,7 @@ class YOLOInferenceThread:
             last_frame_id = current_id
 
             try:
+                inference_started_s = time.monotonic()
                 result = road_perception.get_road_perception(
                     frame,
                     flight_height_m=self._flight_height_m,
@@ -371,6 +439,7 @@ class YOLOInferenceThread:
                     offset_comp_config=self._offset_comp_config,
                     wb_config=wb_config,
                 )
+                inference_finished_s = time.monotonic()
             except Exception as exc:
                 self.error_count += 1
                 import road_perception as rp
@@ -381,6 +450,17 @@ class YOLOInferenceThread:
 
             self.road_buffer.publish(result, frame_ts)
             self.inference_count += 1
+            inference_ms = max(0.0, inference_finished_s - inference_started_s) * 1000.0
+            input_age_ms = max(0.0, inference_finished_s - frame_ts) * 1000.0
+            self._interval_inference_ms_total += inference_ms
+            self._interval_inference_ms_max = max(
+                self._interval_inference_ms_max,
+                inference_ms,
+            )
+            self._interval_input_age_ms_max = max(
+                self._interval_input_age_ms_max,
+                input_age_ms,
+            )
 
             # Periodic log
             now = time.monotonic()
@@ -391,10 +471,19 @@ class YOLOInferenceThread:
                 self._last_log_s = now
                 self._last_log_count = self.inference_count
                 state = result.road_state if result else "?"
+                mean_inference_ms = (
+                    self._interval_inference_ms_total / max(1, completed)
+                )
                 self._log(
                     f"fps~{fps:.1f} "
+                    f"infer_ms~{mean_inference_ms:.1f} "
+                    f"infer_max_ms={self._interval_inference_ms_max:.1f} "
+                    f"input_age_max_ms={self._interval_input_age_ms_max:.1f} "
                     f"state={state}"
                 )
+                self._interval_inference_ms_total = 0.0
+                self._interval_inference_ms_max = 0.0
+                self._interval_input_age_ms_max = 0.0
 
     def _log(self, msg: str) -> None:
         try:

@@ -97,6 +97,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "(angle=90deg, error=0), enable radar/bypass, and forbid FC output"
         ),
     )
+    parser.add_argument(
+        "--obstacle-flight-test",
+        action="store_true",
+        help=(
+            "Use the synthetic straight-road perception for a guarded real-flight "
+            "bypass test; requires dedicated flight confirmation"
+        ),
+    )
+    parser.add_argument(
+        "--confirm-obstacle-flight-test",
+        action="store_true",
+        help="Explicitly acknowledge that --obstacle-flight-test will unlock and fly",
+    )
     parser.add_argument("--camera-index", type=int, default=7,
                         help="Road-following camera index (default: 7 on OpenSTLinux)")
     parser.add_argument("--camera-width", type=int, default=640)
@@ -336,12 +349,15 @@ def main(argv: list[str] | None = None) -> None:
         send_command_safely,
     )
 
+    synthetic_straight_road = bool(
+        args.obstacle_test or args.obstacle_flight_test
+    )
     selected_model = (
         "synthetic-straight-road"
-        if args.obstacle_test
+        if synthetic_straight_road
         else (args.model_npu if args.road_model_backend == "npu" else args.model)
     )
-    if not args.obstacle_test and not os.path.isfile(selected_model):
+    if not synthetic_straight_road and not os.path.isfile(selected_model):
         msg = (
             f"[ROAD] {args.road_model_backend} model missing, "
             f"perception lost: {selected_model}"
@@ -353,6 +369,11 @@ def main(argv: list[str] | None = None) -> None:
     actual_dry_run = bool(args.dry_run or args.no_fc or not args.enable_flight)
     if actual_dry_run:
         logger.warning("[SAFETY] dry-run mode: no non-zero velocity will be sent. Add --enable-flight to allow real output")
+    if args.obstacle_flight_test:
+        logger.critical(
+            "[FLIGHT TEST] synthetic straight-road perception is active; "
+            "camera/NPU road measurements are intentionally ignored"
+        )
     if args.no_radar:
         logger.info("[ROAD] camera-only mode: radar acquisition and obstacle avoidance are disabled")
     if (
@@ -372,16 +393,20 @@ def main(argv: list[str] | None = None) -> None:
     flight_owned = False
     interrupted = False
     log_sink_id = None
-    session_mode = (
-        "road_trajectory_follow"
-        if args.road_controller == "trajectory-point"
-        else "road_follow"
-    )
-    control_design = (
-        "camera-center-to-trajectory-point+tangent-yaw"
-        if args.road_controller == "trajectory-point"
-        else "heading-yaw+lateral-cross-track"
-    )
+    if args.obstacle_flight_test:
+        session_mode = "road_obstacle_flight_test"
+        control_design = "synthetic-straight-road+radar-bypass"
+    else:
+        session_mode = (
+            "road_trajectory_follow"
+            if args.road_controller == "trajectory-point"
+            else "road_follow"
+        )
+        control_design = (
+            "camera-center-to-trajectory-point+tangent-yaw"
+            if args.road_controller == "trajectory-point"
+            else "heading-yaw+lateral-cross-track"
+        )
     recorder = SessionRecorder(
         SessionRecorderConfig(
             root_dir=args.record_dir,
@@ -518,7 +543,7 @@ def main(argv: list[str] | None = None) -> None:
             multi_radar = MultiRadar(_radar_configs(args.upper_port, args.lower_port))
             multi_radar.start()
 
-        if args.obstacle_test:
+        if synthetic_straight_road:
             pipeline = _StraightRoadTestPipeline(
                 image_width=args.camera_width,
                 image_height=args.camera_height,
@@ -541,6 +566,13 @@ def main(argv: list[str] | None = None) -> None:
                 offset_comp_config=offset_comp,
             )
         pipeline.start()
+
+        if args.obstacle_flight_test:
+            _wait_for_multi_radar_ready(
+                multi_radar,
+                timeout_s=5.0,
+                max_age_s=args.radar_timeout_s,
+            )
 
         if args.auto_takeoff:
             flight_owned = True
@@ -775,17 +807,97 @@ def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.no_record = True
         args.no_radar = False
         args.road_bypass_enable = True
+    if args.obstacle_flight_test:
+        # Keep FC/flight/recording choices explicit, but the real-flight test
+        # is meaningless without radar-assisted bypass.
+        args.no_radar = False
+        args.road_bypass_enable = True
     return args
 
 
 def _validate_flight_args(args: argparse.Namespace) -> None:
     """Reject combinations that could make automatic flight ambiguous."""
+    if args.obstacle_test and args.obstacle_flight_test:
+        raise ValueError(
+            "--obstacle-test and --obstacle-flight-test are mutually exclusive"
+        )
     if args.obstacle_test and (
         args.enable_flight or args.auto_takeoff or args.connect_fc
     ):
         raise ValueError(
             "--obstacle-test forbids --enable-flight, --auto-takeoff, and --connect-fc"
         )
+    if args.confirm_obstacle_flight_test and not args.obstacle_flight_test:
+        raise ValueError(
+            "--confirm-obstacle-flight-test requires --obstacle-flight-test"
+        )
+    if args.obstacle_flight_test:
+        missing = []
+        if not args.enable_flight:
+            missing.append("--enable-flight")
+        if not args.auto_takeoff:
+            missing.append("--auto-takeoff")
+        if not args.confirm_obstacle_flight_test:
+            missing.append("--confirm-obstacle-flight-test")
+        if missing:
+            raise ValueError(
+                "--obstacle-flight-test requires " + ", ".join(missing)
+            )
+        if args.no_fc or args.dry_run:
+            raise ValueError(
+                "--obstacle-flight-test cannot be combined with --no-fc or --dry-run"
+            )
+        if args.no_record:
+            raise ValueError(
+                "--obstacle-flight-test requires session recording; remove --no-record"
+            )
+        if args.road_controller != "trajectory-point":
+            raise ValueError(
+                "--obstacle-flight-test requires --road-controller trajectory-point"
+            )
+        if args.road_bypass_known_clear_side == "auto":
+            raise ValueError(
+                "--obstacle-flight-test requires a verified left or right clear side"
+            )
+        conservative_limits = {
+            "max_vx_cm_s": 10.0,
+            "max_vy_cm_s": 8.0,
+            "max_yaw_rate_deg_s": 10.0,
+        }
+        for option, limit in conservative_limits.items():
+            if float(getattr(args, option)) > limit:
+                raise ValueError(
+                    f"--{option.replace('_', '-')} cannot exceed {limit:g} "
+                    "during --obstacle-flight-test"
+                )
+        if args.takeoff_height_cm > 100:
+            raise ValueError(
+                "--takeoff-height-cm cannot exceed 100 during --obstacle-flight-test"
+            )
+        fixed_geometry = {
+            "body_x_half_cm": 25.0,
+            "body_y_half_cm": 25.0,
+            "corridor_half_width_cm": 75.0,
+            "road_half_width_cm": 25.0,
+            "road_edge_margin_cm": 25.0,
+            "road_bypass_activity_half_width_cm": 90.0,
+            "road_bypass_intrusion_half_width_cm": 25.0,
+            "road_bypass_clearance_cm": 75.0,
+            "road_bypass_min_x_cm": 40.0,
+            "road_bypass_lookahead_cm": 180.0,
+            "road_bypass_yaw_sign": -1.0,
+        }
+        for option, expected in fixed_geometry.items():
+            if abs(float(getattr(args, option)) - expected) > 1e-6:
+                raise ValueError(
+                    f"--{option.replace('_', '-')} must remain {expected:g} "
+                    "during --obstacle-flight-test"
+                )
+        if args.road_bypass_activate_frames < 2:
+            raise ValueError(
+                "--road-bypass-activate-frames must be at least 2 during "
+                "--obstacle-flight-test"
+            )
     if args.auto_takeoff and (not args.enable_flight or args.dry_run or args.no_fc):
         raise ValueError(
             "--auto-takeoff requires --enable-flight and cannot be combined with --dry-run or --no-fc"
@@ -812,6 +924,7 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
     for option in ("max_vx_cm_s", "max_vy_cm_s", "max_yaw_rate_deg_s"):
         if getattr(args, option) < 0:
             raise ValueError(f"--{option.replace('_', '-')} cannot be negative")
+
     if args.road_heading_stop_deg <= args.road_heading_slowdown_start_deg:
         raise ValueError(
             "--road-heading-stop-deg must be greater than --road-heading-slowdown-start-deg"
@@ -846,6 +959,33 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
     ):
         if getattr(args, option) < 0.0:
             raise ValueError(f"--{option.replace('_', '-')} cannot be negative")
+
+
+def _wait_for_multi_radar_ready(
+    multi_radar,
+    *,
+    timeout_s: float = 5.0,
+    max_age_s: float = 0.5,
+) -> None:
+    """Require both radar streams before a synthetic-vision flight can unlock."""
+    if multi_radar is None:
+        raise RuntimeError("obstacle flight test requires two initialized radars")
+    deadline = time.perf_counter() + max(0.0, float(timeout_s))
+    while True:
+        try:
+            if bool(multi_radar.connected) and bool(
+                multi_radar.is_fresh(max_age_s=max_age_s)
+            ):
+                logger.info("[FLIGHT TEST] both radars connected and fresh")
+                return
+        except Exception:
+            pass
+        if time.perf_counter() >= deadline:
+            break
+        time.sleep(0.05)
+    raise RuntimeError(
+        "obstacle flight test refused before unlock: both radars must be connected and fresh"
+    )
 
 
 def _wait_for_fc_mode(fc, target_mode: int, timeout_s: float = 5.0) -> None:

@@ -11,6 +11,9 @@
 - `road_trajectory_main.py --obstacle-test` 提供无摄像头静态避障入口：持续注入
   `angle=90° / error=0` 的中央直线轨迹，强制启用雷达与绕障，同时强制 no-FC、dry-run、
   no-record，确保只观测规划和安全仲裁命令
+- `road_obstacle_flight_test.py` 是与单寻路入口隔离的固定视觉真实飞行测试。只有同时提供
+  `--enable-flight --auto-takeoff --confirm-obstacle-flight-test` 才能运行；强制雷达绕障、
+  保留记录，并限制速度为 10/8cm/s、偏航 10°/s、起飞高度不超过 100cm
 - 演示地图道路全宽固定为 50cm（物理半宽 ±25cm）；障碍侵入和前向安全走廊按
   `max(道路半宽, 安全间距)` 扩至 ±75cm，避免漏判道路外但已进入安全包络的树木。
   已确认树木只在一侧且另一侧无障碍，因此演示绕障允许机体中心在道路中心 ±90cm

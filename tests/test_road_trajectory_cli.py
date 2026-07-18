@@ -40,6 +40,33 @@ def test_explicit_trajectory_cli_values_override_program_defaults():
     assert args.trajectory_reach_radius_px == 24.0
 
 
+def test_original_single_road_flight_command_does_not_enter_obstacle_test_modes():
+    args = road_follow_main.parse_args(
+        road_trajectory_main.build_argv(
+            [
+                "--enable-flight",
+                "--auto-takeoff",
+                "--require-model",
+                "--no-radar",
+                "--takeoff-height-cm",
+                "100",
+            ]
+        )
+    )
+    args = road_follow_main._normalize_args(args)
+    road_follow_main._validate_flight_args(args)
+
+    assert args.road_controller == "trajectory-point"
+    assert not args.obstacle_test
+    assert not args.obstacle_flight_test
+    assert args.no_radar
+    assert not args.road_bypass_enable
+    assert args.enable_flight
+    assert args.auto_takeoff
+    assert not args.dry_run
+    assert not args.no_fc
+
+
 def test_obstacle_test_forces_radar_bypass_and_no_fc_output():
     args = road_follow_main.parse_args(
         road_trajectory_main.build_argv(["--obstacle-test"])

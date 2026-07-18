@@ -15,18 +15,28 @@ from FlightController.Solutions.TrajectoryPointFollower import (
 )
 
 
-def test_trajectory_entry_selects_point_controller_and_conservative_limits():
+def test_trajectory_entry_selects_adaptive_fast_point_controller_defaults():
     args = road_follow_main.parse_args(road_trajectory_main.build_argv([]))
 
     assert args.road_controller == "trajectory-point"
-    assert args.trajectory_reach_radius_px == 20.0
-    assert args.trajectory_min_forward_lookahead_px == 12.0
-    assert args.trajectory_max_planar_accel_cm_s2 == 16.0
+    assert args.loop_hz == 12.0
+    assert args.trajectory_reach_radius_px == 30.0
+    assert args.trajectory_min_forward_lookahead_px == 24.0
+    assert args.trajectory_max_forward_lookahead_px == 64.0
+    assert args.trajectory_lookahead_speed_gain_px_per_cm_s == 1.2
+    assert args.trajectory_latency_compensation_s == 0.134
+    assert args.trajectory_lateral_deadband_px == 8.0
+    assert args.trajectory_max_planar_accel_cm_s2 == 24.0
     assert args.trajectory_max_yaw_accel_deg_s2 == 20.0
-    assert args.max_vx_cm_s == 10.0
-    assert args.max_vy_cm_s == 8.0
+    assert args.trajectory_min_curve_speed_cm_s == 10.0
+    assert args.max_vx_cm_s == 20.0
+    assert args.max_vy_cm_s == 12.0
     assert args.max_yaw_rate_deg_s == 10.0
     assert args.no_radar is True
+    assert args.enable_flight is True
+    assert args.auto_takeoff is True
+    assert args.require_model is True
+    assert args.takeoff_height_cm == road_trajectory_main.TAKEOFF_HEIGHT_CM
 
 
 def test_explicit_trajectory_cli_values_override_program_defaults():
@@ -40,19 +50,8 @@ def test_explicit_trajectory_cli_values_override_program_defaults():
     assert args.trajectory_reach_radius_px == 24.0
 
 
-def test_original_single_road_flight_command_does_not_enter_obstacle_test_modes():
-    args = road_follow_main.parse_args(
-        road_trajectory_main.build_argv(
-            [
-                "--enable-flight",
-                "--auto-takeoff",
-                "--require-model",
-                "--no-radar",
-                "--takeoff-height-cm",
-                "100",
-            ]
-        )
-    )
+def test_plain_trajectory_invocation_is_valid_production_auto_flight():
+    args = road_follow_main.parse_args(road_trajectory_main.build_argv([]))
     args = road_follow_main._normalize_args(args)
     road_follow_main._validate_flight_args(args)
 
@@ -63,8 +62,68 @@ def test_original_single_road_flight_command_does_not_enter_obstacle_test_modes(
     assert not args.road_bypass_enable
     assert args.enable_flight
     assert args.auto_takeoff
+    assert args.require_model
     assert not args.dry_run
     assert not args.no_fc
+
+
+def test_takeoff_height_constant_and_explicit_cli_value_control_default(monkeypatch):
+    monkeypatch.setattr(road_trajectory_main, "TAKEOFF_HEIGHT_CM", 120)
+    default_args = road_follow_main.parse_args(road_trajectory_main.build_argv([]))
+    override_args = road_follow_main.parse_args(
+        road_trajectory_main.build_argv(["--takeoff-height-cm", "140"])
+    )
+
+    assert default_args.takeoff_height_cm == 120
+    assert override_args.takeoff_height_cm == 140
+
+
+@pytest.mark.parametrize(
+    "safe_mode",
+    [
+        "--dry-run",
+        "--no-fc",
+        "--connect-fc",
+        "--obstacle-test",
+        "--obstacle-flight-test",
+    ],
+)
+def test_explicit_safety_modes_do_not_inherit_auto_flight_defaults(safe_mode):
+    args = road_follow_main.parse_args(road_trajectory_main.build_argv([safe_mode]))
+
+    assert not args.enable_flight
+    assert not args.auto_takeoff
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (
+            [
+                "--trajectory-min-forward-lookahead-px",
+                "50",
+                "--trajectory-max-forward-lookahead-px",
+                "40",
+            ],
+            "max-forward-lookahead",
+        ),
+        (["--trajectory-physical-road-width-cm", "0"], "physical-road-width"),
+        (
+            [
+                "--trajectory-curvature-slowdown-start-deg",
+                "20",
+                "--trajectory-curvature-full-slowdown-deg",
+                "20",
+            ],
+            "curvature-full-slowdown",
+        ),
+    ],
+)
+def test_invalid_adaptive_trajectory_parameters_are_rejected(options, message):
+    args = road_follow_main.parse_args(road_trajectory_main.build_argv(options))
+
+    with pytest.raises(ValueError, match=message):
+        road_follow_main._validate_flight_args(args)
 
 
 def test_obstacle_test_forces_radar_bypass_and_no_fc_output():

@@ -4,7 +4,7 @@ This module deliberately does not add radar behavior to the production visual
 files.  It calls their stable public APIs, while keeping the NPU model,
 postprocess and compatible trajectory-controller configuration used by the
 current ``road_trajectory_main.py``.  The obstacle experiment intentionally
-retains its lower 10/8 cm/s planar limits; geometry, filtering, latency
+retains lower 14/10 cm/s planar limits; geometry, filtering, latency
 compensation and curve handling match the final visual entry.
 """
 
@@ -34,8 +34,8 @@ class FrozenVisualConfig:
     postprocess_mode: str = "fast-main"
     flight_height_m: float = 1.0
 
-    max_vx_cm_s: float = 10.0
-    max_vy_cm_s: float = 8.0
+    max_vx_cm_s: float = 14.0
+    max_vy_cm_s: float = 10.0
     max_yaw_rate_deg_s: float = 10.0
     reach_radius_px: float = 30.0
     min_forward_lookahead_px: float = 24.0

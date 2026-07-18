@@ -32,7 +32,7 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.camera_index == 7
     assert args.upper_port == "/dev/ttySTM4"
     assert args.lower_port == "/dev/ttySTM9"
-    assert args.loop_hz == 12.0
+    assert args.loop_hz == 10.0
     assert not hasattr(args, "synthetic_radar")
 
 
@@ -96,8 +96,8 @@ def test_visual_snapshot_matches_final_trajectory_defaults():
 
     assert config.postprocess_mode == "fast-main"
     # The radar flight experiment deliberately stays below production speed.
-    assert config.max_vx_cm_s == 10.0
-    assert config.max_vy_cm_s == 8.0
+    assert config.max_vx_cm_s == 14.0
+    assert config.max_vy_cm_s == 10.0
     assert config.max_yaw_rate_deg_s == production.max_yaw_rate_deg_s
     assert config.reach_radius_px == production.trajectory_reach_radius_px
     assert (

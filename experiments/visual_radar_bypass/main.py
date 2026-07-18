@@ -49,7 +49,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--upper-port", default="/dev/ttySTM4")
     parser.add_argument("--lower-port", default="/dev/ttySTM9")
     parser.add_argument("--fc-port", default=None)
-    parser.add_argument("--loop-hz", type=float, default=12.0)
+    parser.add_argument("--loop-hz", type=float, default=10.0)
     parser.add_argument("--duration-s", type=float, default=60.0)
     parser.add_argument("--radar-timeout-s", type=float, default=0.5)
     parser.add_argument("--record-dir", default="/media/sdcard/stm_records")
@@ -143,9 +143,9 @@ def main(argv: list[str] | None = None) -> None:
             require_unlocked=actual_flight,
             require_radar=True,
             radar_timeout_s=args.radar_timeout_s,
-            max_vx_cm_s=10.0,
-            max_vy_cm_s=8.0,
-            max_yaw_rate_deg_s=10.0,
+            max_vx_cm_s=visual_config.max_vx_cm_s,
+            max_vy_cm_s=visual_config.max_vy_cm_s,
+            max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
             obstacle_stop_distance_cm=80.0,
             obstacle_slow_distance_cm=150.0,
             slow_speed_limit_cm_s=10.0,

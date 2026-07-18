@@ -1,9 +1,9 @@
-"""Side-agnostic physical-obstacle radar bypass for the isolated experiment.
+"""Side-agnostic physical-obstacle radar sidestep for the isolated experiment.
 
 Coordinate convention: body +X is forward and body +Y is left.  No obstacle
 position is configured or injected.  The planner finds the densest real radar
 cluster inside the bilateral intrusion envelope, infers its side per encounter,
-and guides the aircraft toward the opposite side.  The map guarantee that the
+and commands a direct lateral sidestep toward the opposite side.  The map guarantee that the
 tubular test obstacle has no neighboring obstacles permits local cluster-based
 planning; the global SafetyArbiter still receives the complete physical point
 cloud.
@@ -33,16 +33,14 @@ class ObstacleBypassConfig:
     intrusion_half_width_cm: float = 75.0
     activity_half_width_cm: float = 90.0
     clearance_cm: float = 75.0
-    min_x_cm: float = 40.0
+    min_x_cm: float = 10.0
     lookahead_cm: float = 180.0
-    lateral_step_cm: float = 10.0
-    guide_distance_cm: float = 150.0
     bypass_speed_cm_s: float = 10.0
-    yaw_kp: float = 0.75
-    max_yaw_bias_deg_s: float = 10.0
+    bypass_lateral_speed_cm_s: float = 8.0
     max_yaw_rate_deg_s: float = 10.0
     activate_frames: int = 2
-    release_s: float = 0.5
+    release_s: float = 0.75
+    max_bypass_s: float = 11.25
     min_confidence: float = 0.4
     return_pixel_deadband_px: float = 35.0
 
@@ -54,8 +52,6 @@ class ObstacleBypassConfig:
     min_cluster_points: int = 3
     side_deadband_cm: float = 5.0
     center_obstacle_default_bypass_side: str = "right"
-    w_center: float = 1.0
-    w_switch: float = 0.25
 
     @property
     def effective_intrusion_half_width_cm(self) -> float:
@@ -84,6 +80,7 @@ class ObstacleBypassPlanner:
         self._last_intrusion_s: float | None = None
         self._target_y_cm: float | None = None
         self._active_bypass_side: int | None = None
+        self._bypass_started_s: float | None = None
         self._cluster_point_count = 0
         self._obstacle_center_x_cm: float | None = None
         self._obstacle_center_y_cm: float | None = None
@@ -105,10 +102,6 @@ class ObstacleBypassPlanner:
         radar_field: RadarObstacleField,
         now_s: float,
     ) -> Command:
-        if not self._road_usable(perception):
-            self.reset()
-            return desired
-
         cluster = self._detect_obstacle_cluster(self._points(radar_field))
         self._update_cluster_diagnostics(cluster)
         has_obstacle = cluster is not None
@@ -119,57 +112,36 @@ class ObstacleBypassPlanner:
             self._intrusion_count = 0
 
         if self.state == ObstacleBypassState.NORMAL:
+            if not self._road_usable(perception):
+                return desired
             if self._intrusion_count < max(1, int(self.config.activate_frames)):
                 return desired
             assert cluster is not None
             bypass_side = self._opposite_bypass_side(cluster.obstacle_side)
-            target_y = self._choose_target(cluster.points, bypass_side)
-            if target_y is None:
-                return self._no_gap_command(desired)
-            self._set_bypass(target_y, bypass_side)
-            return self._bypass_command(desired, target_y)
+            self._set_bypass(bypass_side, now_s)
+            return self._bypass_command(desired, bypass_side)
 
         if self.state in {
             ObstacleBypassState.BYPASS_LEFT,
             ObstacleBypassState.BYPASS_RIGHT,
         }:
+            if (
+                self._bypass_started_s is not None
+                and now_s - self._bypass_started_s >= self.config.max_bypass_s
+            ):
+                return self._no_gap_command(desired)
             recently_blocked = (
                 self._last_intrusion_s is not None
                 and now_s - self._last_intrusion_s <= self.config.release_s
             )
-            if has_obstacle:
-                # Keep the selected bypass side for the current encounter so
-                # one noisy frame cannot reverse the turn direction.
-                bypass_side = self._active_bypass_side or self._opposite_bypass_side(
-                    cluster.obstacle_side
-                )
-                target_y = self._choose_target(cluster.points, bypass_side)
-                if target_y is None:
-                    return self._no_gap_command(desired)
-                self._set_bypass(target_y, bypass_side)
-                return self._bypass_command(desired, target_y)
-            if recently_blocked and self._target_y_cm is not None:
-                return self._bypass_command(desired, self._target_y_cm)
-            self.state = ObstacleBypassState.RETURN_CENTER
-            self._target_y_cm = None
-            self._active_bypass_side = None
-            return self._return_command(desired)
-
-        if has_obstacle:
-            bypass_side = self._opposite_bypass_side(cluster.obstacle_side)
-            target_y = self._choose_target(cluster.points, bypass_side)
-            if target_y is None:
-                return self._no_gap_command(desired)
-            self._set_bypass(target_y, bypass_side)
-            return self._bypass_command(desired, target_y)
-
-        pixel_error = abs(
-            float(getattr(perception, "corrected_pixel_error", 0.0))
-        )
-        if pixel_error <= self.config.return_pixel_deadband_px:
+            if has_obstacle or recently_blocked:
+                bypass_side = self._active_bypass_side or 1
+                return self._bypass_command(desired, bypass_side)
             self.reset()
             return desired
-        return self._return_command(desired)
+
+        self.reset()
+        return desired
 
     def reset(self) -> None:
         self.state = ObstacleBypassState.NORMAL
@@ -177,6 +149,7 @@ class ObstacleBypassPlanner:
         self._last_intrusion_s = None
         self._target_y_cm = None
         self._active_bypass_side = None
+        self._bypass_started_s = None
         self._cluster_point_count = 0
         self._obstacle_center_x_cm = None
         self._obstacle_center_y_cm = None
@@ -283,35 +256,12 @@ class ObstacleBypassPlanner:
             else -1
         )
 
-    def _choose_target(
-        self,
-        obstacle_points: np.ndarray,
-        bypass_side: int,
-    ) -> float | None:
-        cfg = self.config
-        step = max(1.0, float(cfg.lateral_step_cm))
-        if bypass_side > 0:
-            candidates = np.arange(0.0, cfg.activity_half_width_cm + 1e-6, step)
-        else:
-            candidates = np.arange(-cfg.activity_half_width_cm, 0.0 + 1e-6, step)
-        safe: list[tuple[float, float]] = []
-        for target_y in candidates:
-            target = float(target_y)
-            if obstacle_points.size and np.any(
-                np.abs(obstacle_points[:, 1] - target) <= cfg.clearance_cm
-            ):
-                continue
-            cost = cfg.w_center * abs(target)
-            if self._target_y_cm is not None:
-                cost += cfg.w_switch * abs(target - self._target_y_cm)
-            safe.append((cost, target))
-        if not safe:
-            return None
-        return min(safe, key=lambda item: item[0])[1]
-
-    def _set_bypass(self, target_y_cm: float, bypass_side: int) -> None:
-        self._target_y_cm = float(target_y_cm)
+    def _set_bypass(self, bypass_side: int, now_s: float) -> None:
         self._active_bypass_side = 1 if bypass_side > 0 else -1
+        self._target_y_cm = (
+            self._active_bypass_side * self.config.activity_half_width_cm
+        )
+        self._bypass_started_s = float(now_s)
         self.state = (
             ObstacleBypassState.BYPASS_LEFT
             if bypass_side > 0
@@ -333,41 +283,24 @@ class ObstacleBypassPlanner:
         self._obstacle_center_y_cm = cluster.center_y_cm
         self._obstacle_side = cluster.obstacle_side
 
-    def _bypass_command(self, desired: Command, target_y_cm: float) -> Command:
+    def _bypass_command(self, desired: Command, bypass_side: int) -> Command:
         cfg = self.config
-        angle_deg = math.degrees(
-            math.atan2(float(target_y_cm), max(1.0, cfg.guide_distance_cm))
-        )
-        # FC yaw>0 is clockwise/right.  Body +Y target is left, hence -angle.
-        yaw_bias = _clamp(
-            -cfg.yaw_kp * angle_deg,
-            -cfg.max_yaw_bias_deg_s,
-            cfg.max_yaw_bias_deg_s,
-        )
         yaw = _clamp(
-            desired.yaw_rate_deg_s + yaw_bias,
+            desired.yaw_rate_deg_s,
             -cfg.max_yaw_rate_deg_s,
             cfg.max_yaw_rate_deg_s,
         )
-        side = "left" if target_y_cm > 0.0 else "right"
+        side_sign = 1 if bypass_side > 0 else -1
+        side = "left" if side_sign > 0 else "right"
         return Command(
             min(desired.vx_cm_s, cfg.bypass_speed_cm_s),
-            0.0,
+            side_sign * cfg.bypass_lateral_speed_cm_s,
             desired.vz_cm_s,
             yaw,
             _append_reason(
                 desired.reason,
-                f"tube_obstacle_bypass:{side}:y={target_y_cm:.0f}",
+                f"tube_obstacle_sidestep:{side}",
             ),
-        )
-
-    def _return_command(self, desired: Command) -> Command:
-        return Command(
-            min(desired.vx_cm_s, self.config.bypass_speed_cm_s),
-            desired.vy_cm_s,
-            desired.vz_cm_s,
-            desired.yaw_rate_deg_s,
-            _append_reason(desired.reason, "tube_obstacle_return_visual"),
         )
 
     def _no_gap_command(self, desired: Command) -> Command:

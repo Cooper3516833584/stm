@@ -49,7 +49,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--upper-port", default="/dev/ttySTM4")
     parser.add_argument("--lower-port", default="/dev/ttySTM9")
     parser.add_argument("--fc-port", default=None)
-    parser.add_argument("--loop-hz", type=float, default=10.0)
+    parser.add_argument("--loop-hz", type=float, default=12.0)
     parser.add_argument("--duration-s", type=float, default=60.0)
     parser.add_argument("--radar-timeout-s", type=float, default=0.5)
     parser.add_argument("--record-dir", default="/media/sdcard/stm_records")

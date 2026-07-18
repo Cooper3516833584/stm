@@ -35,7 +35,6 @@ def _follower(**overrides):
         "max_vy_cm_s": 8.0,
         "max_yaw_rate_deg_s": 10.0,
         "max_planar_accel_cm_s2": 1_000_000.0,
-        "max_planar_decel_cm_s2": 1_000_000.0,
         "max_yaw_accel_deg_s2": 1_000_000.0,
     }
     values.update(overrides)
@@ -190,150 +189,14 @@ def test_tight_upcoming_curve_slows_while_straight_road_uses_full_speed():
     assert straight_command.vx_cm_s == pytest.approx(20.0)
     assert straight_follower.last_diagnostics.forward_curvature_deg == pytest.approx(0.0)
     assert curve_follower.last_diagnostics.forward_curvature_deg >= 35.0
-    assert curve_follower.last_diagnostics.curve_speed_limit_cm_s == pytest.approx(8.0)
-    assert curve_follower.last_diagnostics.turn_active
-    assert curve_follower.last_diagnostics.turn_recovery_active
-    assert math.hypot(curve_command.vx_cm_s, curve_command.vy_cm_s) == pytest.approx(4.0)
+    assert curve_follower.last_diagnostics.curve_speed_limit_cm_s == pytest.approx(10.0)
+    assert math.hypot(curve_command.vx_cm_s, curve_command.vy_cm_s) == pytest.approx(10.0)
 
 
-def test_moderate_curvature_interpolates_to_about_thirteen_cm_s():
+def test_moderate_curvature_interpolates_to_about_fourteen_cm_s():
     follower = TrajectoryPointFollower(TrajectoryPointFollowerConfig())
 
-    assert follower._curve_speed_limit_cm_s(24.2) == pytest.approx(12.8)
-
-
-def test_signed_curvature_feedforward_turns_toward_each_curve_direction():
-    right_curve = [
-        (320.0, 460.0),
-        (320.0, 400.0),
-        (320.0, 340.0),
-        (320.0, 280.0),
-        (320.0, 240.0),
-        (325.0, 215.0),
-        (340.0, 190.0),
-        (365.0, 170.0),
-        (400.0, 155.0),
-        (440.0, 150.0),
-    ]
-    left_curve = [(640.0 - x, y) for x, y in right_curve]
-    right_follower = _follower()
-    left_follower = _follower()
-
-    right = right_follower.update(
-        _perception(right_curve, path_width_px=220.0),
-        now_s=1.0,
-    )
-    left = left_follower.update(
-        _perception(left_curve, path_width_px=220.0),
-        now_s=1.0,
-    )
-
-    assert right_follower.last_diagnostics.raw_signed_curvature_deg > 0.0
-    assert left_follower.last_diagnostics.raw_signed_curvature_deg < 0.0
-    assert right_follower.last_diagnostics.curvature_feedforward_deg_s > 0.0
-    assert left_follower.last_diagnostics.curvature_feedforward_deg_s < 0.0
-    assert right.yaw_rate_deg_s >= 6.0
-    assert left.yaw_rate_deg_s <= -6.0
-
-
-def test_turn_state_holds_curve_speed_until_all_errors_stay_clear():
-    curve = [
-        (320.0, 460.0),
-        (320.0, 360.0),
-        (320.0, 260.0),
-        (320.0, 240.0),
-        (350.0, 200.0),
-        (410.0, 170.0),
-        (470.0, 165.0),
-    ]
-    straight = [(320.0, float(y)) for y in range(460, 19, -20)]
-    follower = _follower(
-        curvature_filter_tau_s=0.0,
-        tangent_filter_tau_s=0.0,
-        tangent_filter_max_rate_deg_s=1_000_000.0,
-        target_filter_tau_s=0.0,
-        turn_exit_hold_s=0.5,
-    )
-
-    follower.update(_perception(curve), now_s=1.0)
-    first_clear = follower.update(_perception(straight), now_s=1.1)
-    still_holding = follower.update(_perception(straight), now_s=1.4)
-    released = follower.update(_perception(straight), now_s=1.61)
-
-    assert math.hypot(first_clear.vx_cm_s, first_clear.vy_cm_s) == pytest.approx(8.0)
-    assert math.hypot(still_holding.vx_cm_s, still_holding.vy_cm_s) == pytest.approx(8.0)
-    assert not follower.last_diagnostics.turn_active
-    assert released.vx_cm_s == pytest.approx(10.0)
-
-
-def test_large_unfinished_turn_enters_slow_yaw_priority_recovery():
-    sharp_diagonal = [
-        (240.0, 320.0),
-        (280.0, 280.0),
-        (320.0, 240.0),
-        (380.0, 190.0),
-        (450.0, 150.0),
-        (520.0, 130.0),
-    ]
-    follower = _follower()
-
-    command = follower.update(
-        _perception(sharp_diagonal, path_width_px=220.0),
-        now_s=1.0,
-    )
-    diagnostics = follower.last_diagnostics
-
-    assert diagnostics.turn_active
-    assert diagnostics.turn_recovery_active
-    assert diagnostics.active_speed_limit_cm_s == pytest.approx(4.0)
-    assert math.hypot(command.vx_cm_s, command.vy_cm_s) == pytest.approx(4.0)
-    assert abs(command.yaw_rate_deg_s) >= 8.0
-
-
-def test_curvature_collapse_does_not_restore_speed_while_turn_is_still_offset():
-    left_curve = [
-        (320.0, 460.0),
-        (320.0, 400.0),
-        (320.0, 340.0),
-        (320.0, 280.0),
-        (320.0, 240.0),
-        (315.0, 215.0),
-        (300.0, 190.0),
-        (275.0, 170.0),
-        (240.0, 155.0),
-        (200.0, 150.0),
-    ]
-    offset_straight = [
-        (400.0, 320.0),
-        (400.0, 260.0),
-        (400.0, 240.0),
-        (400.0, 180.0),
-        (400.0, 120.0),
-    ]
-    follower = _follower(
-        target_filter_tau_s=0.0,
-        target_filter_max_rate_px_s=1_000_000.0,
-        tangent_filter_max_rate_deg_s=1_000_000.0,
-    )
-
-    turning = follower.update(
-        _perception(left_curve, path_width_px=220.0),
-        now_s=1.0,
-    )
-    unfinished = follower.update(
-        _perception(offset_straight, path_width_px=220.0),
-        now_s=1.1,
-    )
-    diagnostics = follower.last_diagnostics
-
-    assert turning.yaw_rate_deg_s < 0.0
-    assert diagnostics.raw_signed_curvature_deg == pytest.approx(0.0)
-    assert diagnostics.filtered_signed_curvature_deg < 0.0
-    assert diagnostics.turn_active
-    assert diagnostics.turn_recovery_active
-    assert diagnostics.active_speed_limit_cm_s == pytest.approx(4.0)
-    assert math.hypot(unfinished.vx_cm_s, unfinished.vy_cm_s) == pytest.approx(4.0)
-    assert unfinished.yaw_rate_deg_s <= -8.0
+    assert follower._curve_speed_limit_cm_s(24.2) == pytest.approx(14.0)
 
 
 def test_speed_and_measured_latency_expand_forward_lookahead():
@@ -386,7 +249,6 @@ def test_planar_acceleration_limit_brakes_before_direction_reversal():
     left = [(240.0, 300.0), (240.0, 240.0), (240.0, 180.0)]
     follower = _follower(
         max_planar_accel_cm_s2=16.0,
-        max_planar_decel_cm_s2=48.0,
         target_filter_tau_s=0.0,
         target_filter_max_rate_px_s=1_000_000.0,
     )
@@ -397,11 +259,10 @@ def test_planar_acceleration_limit_brakes_before_direction_reversal():
     command = follower.update(_perception(left), now_s=1.8)
     delta = ((command.vx_cm_s - previous.vx_cm_s) ** 2 + (command.vy_cm_s - previous.vy_cm_s) ** 2) ** 0.5
 
-    assert delta == pytest.approx(4.8)
+    assert delta == pytest.approx(1.6)
     assert previous.vy_cm_s < 0.0
     assert command.vy_cm_s < 0.0
     assert follower.last_diagnostics.planar_accel_limited
-    assert follower.last_diagnostics.planar_braking
 
 
 def test_lost_road_stops_immediately_and_reacquisition_ramps_from_zero():

@@ -27,18 +27,8 @@ def test_trajectory_entry_selects_adaptive_fast_point_controller_defaults():
     assert args.trajectory_latency_compensation_s == 0.134
     assert args.trajectory_lateral_deadband_px == 8.0
     assert args.trajectory_max_planar_accel_cm_s2 == 24.0
-    assert args.trajectory_max_planar_decel_cm_s2 == 48.0
     assert args.trajectory_max_yaw_accel_deg_s2 == 20.0
-    assert args.trajectory_min_curve_speed_cm_s == 8.0
-    assert args.trajectory_curvature_filter_tau_s == 0.30
-    assert args.trajectory_curvature_feedforward_gain == 1.0
-    assert args.trajectory_turn_enter_curvature_deg == 22.0
-    assert args.trajectory_turn_exit_curvature_deg == 10.0
-    assert args.trajectory_turn_speed_cm_s == 8.0
-    assert args.trajectory_turn_max_lateral_cm_s == 6.0
-    assert args.trajectory_turn_min_yaw_rate_deg_s == 6.0
-    assert args.trajectory_recovery_speed_cm_s == 4.0
-    assert args.trajectory_recovery_yaw_rate_deg_s == 8.0
+    assert args.trajectory_min_curve_speed_cm_s == 10.0
     assert args.max_vx_cm_s == 20.0
     assert args.max_vy_cm_s == 12.0
     assert args.max_yaw_rate_deg_s == 10.0
@@ -126,24 +116,6 @@ def test_explicit_safety_modes_do_not_inherit_auto_flight_defaults(safe_mode):
                 "20",
             ],
             "curvature-full-slowdown",
-        ),
-        (
-            [
-                "--trajectory-turn-enter-curvature-deg",
-                "20",
-                "--trajectory-turn-exit-curvature-deg",
-                "20",
-            ],
-            "turn-exit-curvature",
-        ),
-        (
-            [
-                "--trajectory-turn-enter-heading-deg",
-                "15",
-                "--trajectory-turn-exit-heading-deg",
-                "15",
-            ],
-            "turn-exit-heading",
         ),
     ],
 )

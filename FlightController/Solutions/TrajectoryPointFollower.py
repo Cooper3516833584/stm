@@ -38,29 +38,11 @@ class TrajectoryPointFollowerConfig:
     target_filter_max_rate_px_s: float = 600.0
     tangent_filter_max_rate_deg_s: float = 90.0
     max_planar_accel_cm_s2: float = 24.0
-    max_planar_decel_cm_s2: float = 48.0
     max_yaw_accel_deg_s2: float = 20.0
     degraded_speed_scale: float = 0.85
     curvature_slowdown_start_deg: float = 8.0
     curvature_full_slowdown_deg: float = 35.0
-    min_curve_speed_cm_s: float = 8.0
-    curvature_filter_tau_s: float = 0.30
-    curvature_feedforward_gain: float = 1.0
-    turn_enter_curvature_deg: float = 22.0
-    turn_exit_curvature_deg: float = 10.0
-    turn_enter_heading_deg: float = 18.0
-    turn_exit_heading_deg: float = 8.0
-    turn_exit_lateral_px: float = 30.0
-    turn_exit_hold_s: float = 0.50
-    turn_speed_cm_s: float = 8.0
-    turn_max_lateral_cm_s: float = 6.0
-    turn_tangent_kp_yaw: float = 0.40
-    turn_min_yaw_rate_deg_s: float = 6.0
-    recovery_heading_deg: float = 35.0
-    recovery_lateral_px: float = 70.0
-    recovery_target_distance_px: float = 90.0
-    recovery_speed_cm_s: float = 4.0
-    recovery_yaw_rate_deg_s: float = 8.0
+    min_curve_speed_cm_s: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -85,18 +67,9 @@ class TrajectoryPointFollowerDiagnostics:
     path_width_px: float | None = None
     tangent_dx_px: float | None = None
     tangent_dy_px: float | None = None
-    raw_signed_curvature_deg: float = 0.0
-    filtered_signed_curvature_deg: float = 0.0
     forward_curvature_deg: float = 0.0
-    curvature_arc_px: float = 0.0
-    curvature_feedforward_deg_s: float = 0.0
     curve_speed_limit_cm_s: float = 0.0
     curvature_speed_scale: float = 1.0
-    turn_active: bool = False
-    turn_recovery_active: bool = False
-    turn_clear_elapsed_s: float = 0.0
-    active_speed_limit_cm_s: float = 0.0
-    active_lateral_limit_cm_s: float = 0.0
     raw_forward_error_px: float | None = None
     filtered_forward_error_px: float | None = None
     raw_lateral_error_px: float | None = None
@@ -120,7 +93,6 @@ class TrajectoryPointFollowerDiagnostics:
     vy_cm_s: float = 0.0
     vx_cm_s: float = 0.0
     planar_accel_limited: bool = False
-    planar_braking: bool = False
     planar_command_delta_cm_s: float = 0.0
     heading_speed_scale: float = 0.0
     tangent_motion_fallback: bool = False
@@ -140,12 +112,9 @@ class TrajectoryPointFollower:
         self._filtered_forward_px: float | None = None
         self._filtered_lateral_px: float | None = None
         self._filtered_tangent_error_deg: float | None = None
-        self._filtered_signed_curvature_deg: float | None = None
         self._limited_vx_cm_s = 0.0
         self._limited_vy_cm_s = 0.0
         self._limited_yaw_rate_deg_s = 0.0
-        self._turn_active = False
-        self._turn_clear_since_s: float | None = None
         self.last_diagnostics = TrajectoryPointFollowerDiagnostics()
 
     def update(self, perception, now_s: float) -> Command:
@@ -195,21 +164,12 @@ class TrajectoryPointFollower:
 
         target_x, target_y = points[target_index]
         target_distance = math.hypot(target_x - center_x, target_y - center_y)
-        tangent_dx, tangent_dy = self._forward_tangent(points, target_index)
-        raw_signed_curvature_deg, curvature_arc_px = self._forward_curve_geometry(
+        tangent_dx, tangent_dy = self._local_forward_tangent(points, target_index)
+        forward_curvature_deg = self._forward_curvature_deg(
             points,
             nearest_index,
             target_index,
         )
-        filtered_signed_curvature_deg = self._filter_scalar(
-            raw_signed_curvature_deg,
-            self._filtered_signed_curvature_deg,
-            tau_s=self.config.curvature_filter_tau_s,
-            max_rate_per_s=1_000.0,
-            dt_s=dt_s,
-        )
-        self._filtered_signed_curvature_deg = filtered_signed_curvature_deg
-        forward_curvature_deg = abs(filtered_signed_curvature_deg)
         curve_speed_limit_cm_s = self._curve_speed_limit_cm_s(forward_curvature_deg)
         maximum_cruise_speed = max(0.0, float(self.config.max_vx_cm_s))
         curvature_speed_scale = (
@@ -262,54 +222,11 @@ class TrajectoryPointFollower:
             tangent_error_deg,
             self.config.tangent_deadband_deg,
         )
-        turn_clear_elapsed_s = self._update_turn_state(
-            now_s=now_s,
-            curvature_deg=forward_curvature_deg,
-            heading_error_deg=used_tangent_error_deg,
-            lateral_error_px=raw_lateral_px,
+        unclamped_yaw_rate = (
+            self.config.yaw_sign
+            * self.config.tangent_kp_yaw
+            * used_tangent_error_deg
         )
-        turn_recovery_active = self._turn_active and (
-            abs(used_tangent_error_deg) >= self.config.recovery_heading_deg
-            or (
-                abs(raw_lateral_px) >= self.config.recovery_lateral_px
-                and target_distance >= self.config.recovery_target_distance_px
-            )
-        )
-        heading_kp = (
-            self.config.turn_tangent_kp_yaw
-            if self._turn_active
-            else self.config.tangent_kp_yaw
-        )
-        heading_yaw_term = (
-            self.config.yaw_sign * heading_kp * used_tangent_error_deg
-        )
-        curvature_feedforward_deg_s = self.config.yaw_sign * (
-            self._curvature_feedforward_deg_s(
-                filtered_signed_curvature_deg,
-                curvature_arc_px,
-                path_width_px,
-                current_planar_speed,
-                curve_speed_limit_cm_s,
-            )
-        )
-        unclamped_yaw_rate = heading_yaw_term + curvature_feedforward_deg_s
-        if self._turn_active and (
-            turn_recovery_active
-            or abs(used_tangent_error_deg) >= self.config.turn_exit_heading_deg
-            or forward_curvature_deg >= self.config.turn_exit_curvature_deg
-        ):
-            minimum_yaw_rate = (
-                self.config.recovery_yaw_rate_deg_s
-                if turn_recovery_active
-                else self.config.turn_min_yaw_rate_deg_s
-            )
-            turn_direction = _first_nonzero_sign(
-                unclamped_yaw_rate,
-                self.config.yaw_sign * used_tangent_error_deg,
-                self.config.yaw_sign * filtered_signed_curvature_deg,
-            )
-            if turn_direction != 0.0 and abs(unclamped_yaw_rate) < minimum_yaw_rate:
-                unclamped_yaw_rate = turn_direction * minimum_yaw_rate
         clamped_yaw_rate = _clamp(
             unclamped_yaw_rate,
             -self.config.max_yaw_rate_deg_s,
@@ -323,32 +240,10 @@ class TrajectoryPointFollower:
         )
         self._limited_yaw_rate_deg_s = yaw_rate
 
-        active_speed_limit_cm_s = curve_speed_limit_cm_s
-        active_lateral_limit_cm_s = max(0.0, float(self.config.max_vy_cm_s))
-        if self._turn_active:
-            active_speed_limit_cm_s = min(
-                active_speed_limit_cm_s,
-                max(0.0, float(self.config.turn_speed_cm_s)),
-            )
-            active_lateral_limit_cm_s = min(
-                active_lateral_limit_cm_s,
-                max(0.0, float(self.config.turn_max_lateral_cm_s)),
-            )
-        if turn_recovery_active:
-            active_speed_limit_cm_s = min(
-                active_speed_limit_cm_s,
-                max(0.0, float(self.config.recovery_speed_cm_s)),
-            )
-            active_lateral_limit_cm_s = min(
-                active_lateral_limit_cm_s,
-                max(0.0, float(self.config.recovery_speed_cm_s)),
-            )
-
         requested_vx, requested_vy = self._directional_velocity(
             filtered_forward_px,
             used_lateral_px,
-            speed_limit_cm_s=active_speed_limit_cm_s,
-            max_lateral_cm_s=active_lateral_limit_cm_s,
+            speed_limit_cm_s=curve_speed_limit_cm_s,
         )
         road_state = str(getattr(perception, "road_state", "unknown"))
         speed_scale = (
@@ -358,14 +253,13 @@ class TrajectoryPointFollower:
         )
         requested_vx *= speed_scale
         requested_vy *= speed_scale
-        vx, vy, planar_accel_limited, planar_braking, planar_command_delta = (
+        vx, vy, planar_accel_limited, planar_command_delta = (
             self._limit_planar_acceleration(
                 requested_vx,
                 requested_vy,
                 self._limited_vx_cm_s,
                 self._limited_vy_cm_s,
                 max_accel_cm_s2=self.config.max_planar_accel_cm_s2,
-                max_decel_cm_s2=self.config.max_planar_decel_cm_s2,
                 dt_s=dt_s,
             )
         )
@@ -392,18 +286,9 @@ class TrajectoryPointFollower:
             path_width_px=path_width_px,
             tangent_dx_px=tangent_dx,
             tangent_dy_px=tangent_dy,
-            raw_signed_curvature_deg=raw_signed_curvature_deg,
-            filtered_signed_curvature_deg=filtered_signed_curvature_deg,
             forward_curvature_deg=forward_curvature_deg,
-            curvature_arc_px=curvature_arc_px,
-            curvature_feedforward_deg_s=curvature_feedforward_deg_s,
             curve_speed_limit_cm_s=curve_speed_limit_cm_s,
             curvature_speed_scale=curvature_speed_scale,
-            turn_active=self._turn_active,
-            turn_recovery_active=turn_recovery_active,
-            turn_clear_elapsed_s=turn_clear_elapsed_s,
-            active_speed_limit_cm_s=active_speed_limit_cm_s,
-            active_lateral_limit_cm_s=active_lateral_limit_cm_s,
             raw_forward_error_px=raw_forward_px,
             filtered_forward_error_px=filtered_forward_px,
             raw_lateral_error_px=raw_lateral_px,
@@ -416,7 +301,7 @@ class TrajectoryPointFollower:
             raw_pixel_error_px=raw_lateral_px,
             filtered_pixel_error_px=filtered_lateral_px,
             used_pixel_error_px=used_lateral_px,
-            angle_yaw_term_deg_s=heading_yaw_term,
+            angle_yaw_term_deg_s=unclamped_yaw_rate,
             unclamped_yaw_rate_deg_s=unclamped_yaw_rate,
             clamped_yaw_rate_deg_s=clamped_yaw_rate,
             yaw_rate_deg_s=yaw_rate,
@@ -426,7 +311,6 @@ class TrajectoryPointFollower:
             vy_cm_s=vy,
             vx_cm_s=vx,
             planar_accel_limited=planar_accel_limited,
-            planar_braking=planar_braking,
             planar_command_delta_cm_s=planar_command_delta,
             heading_speed_scale=speed_scale,
             tangent_motion_fallback=tangent_motion_fallback,
@@ -483,26 +367,6 @@ class TrajectoryPointFollower:
         dy = points[last][1] - points[first][1]
         if math.hypot(dx, dy) < 1e-6:
             return 0.0, -1.0
-        if dy > 0.0:
-            return -dx, -dy
-        return dx, dy
-
-    def _forward_tangent(
-        self,
-        points: list[Point],
-        target_index: int,
-    ) -> Point:
-        """Estimate the target heading from points ahead, without averaging the turn away."""
-
-        window = max(1, int(self.config.tangent_window_points))
-        first = min(max(0, target_index), len(points) - 1)
-        last = min(len(points) - 1, first + window)
-        if first == last:
-            return self._local_forward_tangent(points, target_index)
-        dx = points[last][0] - points[first][0]
-        dy = points[last][1] - points[first][1]
-        if math.hypot(dx, dy) < 1e-6:
-            return self._local_forward_tangent(points, target_index)
         if dy > 0.0:
             return -dx, -dy
         return dx, dy
@@ -576,20 +440,7 @@ class TrajectoryPointFollower:
         nearest_index: int,
         target_index: int,
     ) -> float:
-        signed_curvature_deg, _ = self._forward_curve_geometry(
-            points,
-            nearest_index,
-            target_index,
-        )
-        return abs(signed_curvature_deg)
-
-    def _forward_curve_geometry(
-        self,
-        points: list[Point],
-        nearest_index: int,
-        target_index: int,
-    ) -> tuple[float, float]:
-        """Return the largest signed upcoming heading change and its path arc."""
+        """Estimate upcoming heading change without penalising a straight diagonal road."""
 
         window = max(1, int(self.config.tangent_window_points))
         last_probe = min(
@@ -606,100 +457,18 @@ class TrajectoryPointFollower:
                 last_probe,
             }
         )
-        headings: list[tuple[int, float]] = []
+        headings = []
         for index in probe_indices:
             tangent_dx, tangent_dy = self._local_forward_tangent(points, index)
-            headings.append(
-                (index, math.degrees(math.atan2(tangent_dx, -tangent_dy)))
-            )
-
-        best_delta = 0.0
-        best_first, reference_heading = headings[0]
-        best_last = last_probe
-        for second_index, second_heading in headings[1:]:
-            delta = _wrap_angle_deg(second_heading - reference_heading)
-            if abs(delta) > abs(best_delta):
-                best_delta = delta
-                best_last = second_index
-
-        arc_px = sum(
-            math.sqrt(_distance_sq(points[index - 1], points[index]))
-            for index in range(best_first + 1, best_last + 1)
-        )
-        if arc_px < 1e-6:
-            arc_px = sum(
-                math.sqrt(_distance_sq(points[index - 1], points[index]))
-                for index in range(nearest_index + 1, last_probe + 1)
-            )
-        return best_delta, arc_px
-
-    def _curvature_feedforward_deg_s(
-        self,
-        signed_curvature_deg: float,
-        curvature_arc_px: float,
-        path_width_px: float | None,
-        current_planar_speed_cm_s: float,
-        curve_speed_limit_cm_s: float,
-    ) -> float:
-        if (
-            path_width_px is None
-            or path_width_px <= 0.0
-            or curvature_arc_px <= 1e-6
-            or abs(signed_curvature_deg) < 1e-6
-        ):
-            return 0.0
-        road_width_cm = max(1e-6, float(self.config.physical_road_width_cm))
-        pixels_per_cm = path_width_px / road_width_cm
-        arc_cm = curvature_arc_px / max(1e-6, pixels_per_cm)
-        feedforward_speed = min(
-            max(0.0, float(curve_speed_limit_cm_s)),
-            max(
-                max(0.0, float(current_planar_speed_cm_s)),
-                max(0.0, float(self.config.min_curve_speed_cm_s)),
+            headings.append(math.degrees(math.atan2(tangent_dx, -tangent_dy)))
+        return max(
+            (
+                abs(_wrap_angle_deg(second - first))
+                for position, first in enumerate(headings)
+                for second in headings[position + 1 :]
             ),
+            default=0.0,
         )
-        return (
-            float(self.config.curvature_feedforward_gain)
-            * feedforward_speed
-            * float(signed_curvature_deg)
-            / max(1e-6, arc_cm)
-        )
-
-    def _update_turn_state(
-        self,
-        *,
-        now_s: float,
-        curvature_deg: float,
-        heading_error_deg: float,
-        lateral_error_px: float,
-    ) -> float:
-        if not self._turn_active and (
-            abs(curvature_deg) >= self.config.turn_enter_curvature_deg
-            or abs(heading_error_deg) >= self.config.turn_enter_heading_deg
-        ):
-            self._turn_active = True
-            self._turn_clear_since_s = None
-
-        if not self._turn_active:
-            self._turn_clear_since_s = None
-            return 0.0
-
-        turn_is_clear = (
-            abs(curvature_deg) <= self.config.turn_exit_curvature_deg
-            and abs(heading_error_deg) <= self.config.turn_exit_heading_deg
-            and abs(lateral_error_px) <= self.config.turn_exit_lateral_px
-        )
-        if not turn_is_clear:
-            self._turn_clear_since_s = None
-            return 0.0
-
-        if self._turn_clear_since_s is None:
-            self._turn_clear_since_s = float(now_s)
-        clear_elapsed_s = max(0.0, float(now_s) - self._turn_clear_since_s)
-        if clear_elapsed_s >= max(0.0, float(self.config.turn_exit_hold_s)):
-            self._turn_active = False
-            self._turn_clear_since_s = None
-        return clear_elapsed_s
 
     def _curve_speed_limit_cm_s(self, curvature_deg: float) -> float:
         maximum = max(0.0, float(self.config.max_vx_cm_s))
@@ -723,7 +492,6 @@ class TrajectoryPointFollower:
         lateral_px: float,
         *,
         speed_limit_cm_s: float | None = None,
-        max_lateral_cm_s: float | None = None,
     ) -> Point:
         magnitude = math.hypot(forward_px, lateral_px)
         if magnitude < 1e-6:
@@ -739,13 +507,8 @@ class TrajectoryPointFollower:
         scale_limits = [speed_limit]
         if abs(unit_x) > 1e-9:
             scale_limits.append(abs(self.config.max_vx_cm_s) / abs(unit_x))
-        lateral_limit = (
-            abs(self.config.max_vy_cm_s)
-            if max_lateral_cm_s is None
-            else max(0.0, float(max_lateral_cm_s))
-        )
         if abs(unit_y) > 1e-9:
-            scale_limits.append(lateral_limit / abs(unit_y))
+            scale_limits.append(abs(self.config.max_vy_cm_s) / abs(unit_y))
         scale = min(scale_limits)
         return unit_x * scale, unit_y * scale
 
@@ -757,48 +520,23 @@ class TrajectoryPointFollower:
         previous_vy: float,
         *,
         max_accel_cm_s2: float,
-        max_decel_cm_s2: float,
         dt_s: float,
-    ) -> tuple[float, float, bool, bool, float]:
+    ) -> tuple[float, float, bool, float]:
         delta_vx = float(requested_vx) - float(previous_vx)
         delta_vy = float(requested_vy) - float(previous_vy)
         requested_delta = math.hypot(delta_vx, delta_vy)
-        previous_speed = math.hypot(previous_vx, previous_vy)
-        requested_speed = math.hypot(requested_vx, requested_vy)
-        direction_dot = (
-            float(requested_vx) * float(previous_vx)
-            + float(requested_vy) * float(previous_vy)
-        )
-        braking = (
-            requested_speed < previous_speed - 1e-9
-            or (previous_speed > 1e-9 and direction_dot <= 0.0)
-        )
-        rate_limit = max_decel_cm_s2 if braking else max_accel_cm_s2
-        if requested_delta < 1e-9 or rate_limit <= 0.0:
-            return (
-                float(requested_vx),
-                float(requested_vy),
-                False,
-                braking,
-                requested_delta,
-            )
+        if requested_delta < 1e-9 or max_accel_cm_s2 <= 0.0:
+            return float(requested_vx), float(requested_vy), False, requested_delta
 
         # Do not let one delayed loop consume an arbitrarily large slew budget.
-        max_delta = float(rate_limit) * min(float(dt_s), 0.25)
+        max_delta = float(max_accel_cm_s2) * min(float(dt_s), 0.25)
         if requested_delta <= max_delta:
-            return (
-                float(requested_vx),
-                float(requested_vy),
-                False,
-                braking,
-                requested_delta,
-            )
+            return float(requested_vx), float(requested_vy), False, requested_delta
         scale = max_delta / requested_delta
         return (
             float(previous_vx) + delta_vx * scale,
             float(previous_vy) + delta_vy * scale,
             True,
-            braking,
             max_delta,
         )
 
@@ -868,12 +606,9 @@ class TrajectoryPointFollower:
         self._filtered_forward_px = None
         self._filtered_lateral_px = None
         self._filtered_tangent_error_deg = None
-        self._filtered_signed_curvature_deg = None
         self._limited_vx_cm_s = 0.0
         self._limited_vy_cm_s = 0.0
         self._limited_yaw_rate_deg_s = 0.0
-        self._turn_active = False
-        self._turn_clear_since_s = None
         self.last_diagnostics = TrajectoryPointFollowerDiagnostics(
             state="road_lost_hold",
             lost_elapsed_s=lost_elapsed_s,
@@ -909,13 +644,6 @@ def _deadband(value: float, deadband: float) -> float:
 
 def _wrap_angle_deg(value: float) -> float:
     return (float(value) + 180.0) % 360.0 - 180.0
-
-
-def _first_nonzero_sign(*values: float) -> float:
-    for value in values:
-        if abs(float(value)) > 1e-9:
-            return math.copysign(1.0, float(value))
-    return 0.0
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:

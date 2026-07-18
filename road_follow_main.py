@@ -265,29 +265,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--trajectory-target-filter-tau-s", type=float, default=0.15)
     parser.add_argument("--trajectory-tangent-filter-tau-s", type=float, default=0.20)
     parser.add_argument("--trajectory-max-planar-accel-cm-s2", type=float, default=24.0)
-    parser.add_argument("--trajectory-max-planar-decel-cm-s2", type=float, default=48.0)
     parser.add_argument("--trajectory-max-yaw-accel-deg-s2", type=float, default=20.0)
     parser.add_argument("--trajectory-degraded-speed-scale", type=float, default=0.85)
     parser.add_argument("--trajectory-curvature-slowdown-start-deg", type=float, default=8.0)
     parser.add_argument("--trajectory-curvature-full-slowdown-deg", type=float, default=35.0)
-    parser.add_argument("--trajectory-min-curve-speed-cm-s", type=float, default=8.0)
-    parser.add_argument("--trajectory-curvature-filter-tau-s", type=float, default=0.30)
-    parser.add_argument("--trajectory-curvature-feedforward-gain", type=float, default=1.0)
-    parser.add_argument("--trajectory-turn-enter-curvature-deg", type=float, default=22.0)
-    parser.add_argument("--trajectory-turn-exit-curvature-deg", type=float, default=10.0)
-    parser.add_argument("--trajectory-turn-enter-heading-deg", type=float, default=18.0)
-    parser.add_argument("--trajectory-turn-exit-heading-deg", type=float, default=8.0)
-    parser.add_argument("--trajectory-turn-exit-lateral-px", type=float, default=30.0)
-    parser.add_argument("--trajectory-turn-exit-hold-s", type=float, default=0.50)
-    parser.add_argument("--trajectory-turn-speed-cm-s", type=float, default=8.0)
-    parser.add_argument("--trajectory-turn-max-lateral-cm-s", type=float, default=6.0)
-    parser.add_argument("--trajectory-turn-tangent-kp-yaw", type=float, default=0.40)
-    parser.add_argument("--trajectory-turn-min-yaw-rate-deg-s", type=float, default=6.0)
-    parser.add_argument("--trajectory-recovery-heading-deg", type=float, default=35.0)
-    parser.add_argument("--trajectory-recovery-lateral-px", type=float, default=70.0)
-    parser.add_argument("--trajectory-recovery-target-distance-px", type=float, default=90.0)
-    parser.add_argument("--trajectory-recovery-speed-cm-s", type=float, default=4.0)
-    parser.add_argument("--trajectory-recovery-yaw-rate-deg-s", type=float, default=8.0)
+    parser.add_argument("--trajectory-min-curve-speed-cm-s", type=float, default=10.0)
     parser.add_argument("--road-bypass-enable", action="store_true",
                         help="Enable radar-assisted in-road bypass for branches/vines intruding into the road center")
     parser.add_argument(
@@ -495,7 +477,6 @@ def main(argv: list[str] | None = None) -> None:
                 target_filter_max_rate_px_s=args.road_pixel_filter_max_rate_px_s,
                 tangent_filter_max_rate_deg_s=args.road_angle_filter_max_rate_deg_s,
                 max_planar_accel_cm_s2=args.trajectory_max_planar_accel_cm_s2,
-                max_planar_decel_cm_s2=args.trajectory_max_planar_decel_cm_s2,
                 max_yaw_accel_deg_s2=args.trajectory_max_yaw_accel_deg_s2,
                 degraded_speed_scale=args.trajectory_degraded_speed_scale,
                 curvature_slowdown_start_deg=(
@@ -505,31 +486,6 @@ def main(argv: list[str] | None = None) -> None:
                     args.trajectory_curvature_full_slowdown_deg
                 ),
                 min_curve_speed_cm_s=args.trajectory_min_curve_speed_cm_s,
-                curvature_filter_tau_s=args.trajectory_curvature_filter_tau_s,
-                curvature_feedforward_gain=(
-                    args.trajectory_curvature_feedforward_gain
-                ),
-                turn_enter_curvature_deg=(
-                    args.trajectory_turn_enter_curvature_deg
-                ),
-                turn_exit_curvature_deg=args.trajectory_turn_exit_curvature_deg,
-                turn_enter_heading_deg=args.trajectory_turn_enter_heading_deg,
-                turn_exit_heading_deg=args.trajectory_turn_exit_heading_deg,
-                turn_exit_lateral_px=args.trajectory_turn_exit_lateral_px,
-                turn_exit_hold_s=args.trajectory_turn_exit_hold_s,
-                turn_speed_cm_s=args.trajectory_turn_speed_cm_s,
-                turn_max_lateral_cm_s=args.trajectory_turn_max_lateral_cm_s,
-                turn_tangent_kp_yaw=args.trajectory_turn_tangent_kp_yaw,
-                turn_min_yaw_rate_deg_s=(
-                    args.trajectory_turn_min_yaw_rate_deg_s
-                ),
-                recovery_heading_deg=args.trajectory_recovery_heading_deg,
-                recovery_lateral_px=args.trajectory_recovery_lateral_px,
-                recovery_target_distance_px=(
-                    args.trajectory_recovery_target_distance_px
-                ),
-                recovery_speed_cm_s=args.trajectory_recovery_speed_cm_s,
-                recovery_yaw_rate_deg_s=args.trajectory_recovery_yaw_rate_deg_s,
             )
         )
     else:
@@ -1025,23 +981,6 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
         "trajectory_lateral_deadband_px",
         "trajectory_curvature_slowdown_start_deg",
         "trajectory_min_curve_speed_cm_s",
-        "trajectory_curvature_filter_tau_s",
-        "trajectory_curvature_feedforward_gain",
-        "trajectory_turn_enter_curvature_deg",
-        "trajectory_turn_exit_curvature_deg",
-        "trajectory_turn_enter_heading_deg",
-        "trajectory_turn_exit_heading_deg",
-        "trajectory_turn_exit_lateral_px",
-        "trajectory_turn_exit_hold_s",
-        "trajectory_turn_speed_cm_s",
-        "trajectory_turn_max_lateral_cm_s",
-        "trajectory_turn_tangent_kp_yaw",
-        "trajectory_turn_min_yaw_rate_deg_s",
-        "trajectory_recovery_heading_deg",
-        "trajectory_recovery_lateral_px",
-        "trajectory_recovery_target_distance_px",
-        "trajectory_recovery_speed_cm_s",
-        "trajectory_recovery_yaw_rate_deg_s",
     ):
         if getattr(args, option) < 0.0:
             raise ValueError(f"--{option.replace('_', '-')} cannot be negative")
@@ -1055,22 +994,8 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
             "--trajectory-curvature-full-slowdown-deg must be greater than "
             "--trajectory-curvature-slowdown-start-deg"
         )
-    if (
-        args.trajectory_turn_exit_curvature_deg
-        >= args.trajectory_turn_enter_curvature_deg
-    ):
-        raise ValueError(
-            "--trajectory-turn-exit-curvature-deg must be less than "
-            "--trajectory-turn-enter-curvature-deg"
-        )
-    if args.trajectory_turn_exit_heading_deg >= args.trajectory_turn_enter_heading_deg:
-        raise ValueError(
-            "--trajectory-turn-exit-heading-deg must be less than "
-            "--trajectory-turn-enter-heading-deg"
-        )
     for option in (
         "trajectory_max_planar_accel_cm_s2",
-        "trajectory_max_planar_decel_cm_s2",
         "trajectory_max_yaw_accel_deg_s2",
     ):
         if getattr(args, option) <= 0.0:
@@ -1359,9 +1284,8 @@ def _log_road_summary(
     bypass_y = getattr(bypass_planner, "last_target_y_cm", None) if bypass_planner is not None else None
     logger.info(
         "[ROAD] state={} mode=single-road err={:.0f} corr={:.0f} angle={:.0f} conf={:.2f} "
-        "ctrl=(mode={} target=({},{}) d={} idx={} lookahead={} pred={} curve={} signed={} "
-        "curve_ff={} vlim={}/{} turn={}/{} angle_err={} px_yaw={} angle_yaw={} "
-        "speed_scale={} slew={} braking={}) "
+        "ctrl=(mode={} target=({},{}) d={} idx={} lookahead={} pred={} curve={} vlim={} "
+        "angle_err={} px_yaw={} angle_yaw={} speed_scale={} slew={}) "
         "desired=(vx={} vy={} yaw={}) planned=(vx={} vy={} yaw={}) safe=(vx={} vy={} yaw={}) "
         "actual=(yaw={} yaw_rate={} vx={} vy={}) ages=(frame={} perception={} stale={}) "
         "bypass={} bypass_y={} safety={} sent={} radar_fresh={} fc_mode={}".format(
@@ -1378,18 +1302,12 @@ def _log_road_summary(
             _round_or_none(controller_diagnostics.get("effective_lookahead_px")),
             _round_or_none(controller_diagnostics.get("latency_prediction_px")),
             _round_or_none(controller_diagnostics.get("forward_curvature_deg")),
-            _round_or_none(controller_diagnostics.get("filtered_signed_curvature_deg")),
-            _round_or_none(controller_diagnostics.get("curvature_feedforward_deg_s")),
             _round_or_none(controller_diagnostics.get("curve_speed_limit_cm_s")),
-            _round_or_none(controller_diagnostics.get("active_speed_limit_cm_s")),
-            bool(controller_diagnostics.get("turn_active", False)),
-            bool(controller_diagnostics.get("turn_recovery_active", False)),
             _round_or_none(controller_diagnostics.get("angle_error_deg")),
             _round_or_none(controller_diagnostics.get("pixel_yaw_term_deg_s")),
             _round_or_none(controller_diagnostics.get("angle_yaw_term_deg_s")),
             _round_or_none(controller_diagnostics.get("heading_speed_scale"), 2),
             bool(controller_diagnostics.get("planar_accel_limited", False)),
-            bool(controller_diagnostics.get("planar_braking", False)),
             round(desired.vx_cm_s),
             round(desired.vy_cm_s),
             round(desired.yaw_rate_deg_s),
@@ -1594,11 +1512,8 @@ def _annotate_road_frame(
             (
                 f"lookahead={_display_float(controller_diagnostics.get('effective_lookahead_px'), 1)}px "
                 f"prediction={_display_float(controller_diagnostics.get('latency_prediction_px'), 1)}px "
-                f"curve={_display_float(controller_diagnostics.get('filtered_signed_curvature_deg'), 1)}deg "
-                f"ff={_display_float(controller_diagnostics.get('curvature_feedforward_deg_s'), 1)}deg/s "
-                f"limit={_display_float(controller_diagnostics.get('active_speed_limit_cm_s'), 1)}cm/s "
-                f"turn={bool(controller_diagnostics.get('turn_active', False))}/"
-                f"{bool(controller_diagnostics.get('turn_recovery_active', False))}"
+                f"curve={_display_float(controller_diagnostics.get('forward_curvature_deg'), 1)}deg "
+                f"limit={_display_float(controller_diagnostics.get('curve_speed_limit_cm_s'), 1)}cm/s"
             ),
             (
                 f"pixel={_display_float(pixel_error, 1)}->{_display_float(filtered_pixel_error, 1)}px "

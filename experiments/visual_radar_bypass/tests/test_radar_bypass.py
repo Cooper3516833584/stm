@@ -8,8 +8,8 @@ from FlightController.Solutions.Safety import (
     RadarObstacleField,
 )
 from experiments.visual_radar_bypass.radar_bypass import (
-    LeftTreeBypassPlanner,
-    LeftTreeBypassState,
+    ObstacleBypassPlanner,
+    ObstacleBypassState,
 )
 
 
@@ -39,10 +39,7 @@ def _desired():
     return Command(10.0, 2.0, 0.0, 0.0, "trajectory_point_follow:single")
 
 
-def test_realistic_left_tree_at_40cm_selects_right_40cm_target():
-    planner = LeftTreeBypassPlanner()
-    field = _field([[100.0, 40.0]])
-
+def _activate(planner, field):
     first = planner.update(
         desired=_desired(),
         perception=_perception(),
@@ -55,50 +52,132 @@ def test_realistic_left_tree_at_40cm_selects_right_40cm_target():
         radar_field=field,
         now_s=1.1,
     )
+    return first, second
+
+
+def test_left_obstacle_cluster_automatically_selects_right_bypass():
+    planner = ObstacleBypassPlanner()
+    field = _field(
+        [[99.0, 38.0], [100.0, 40.0], [101.0, 41.0], [102.0, 42.0]]
+    )
+
+    first, second = _activate(planner, field)
 
     assert first == _desired()
-    assert planner.state == LeftTreeBypassState.BYPASS_RIGHT
+    assert planner.state == ObstacleBypassState.BYPASS_RIGHT
     assert planner.target_y_cm == -40.0
-    assert second.vx_cm_s == 10.0
+    assert planner.active_bypass_side == -1
     assert second.vy_cm_s == 0.0
     assert second.yaw_rate_deg_s > 0.0
-    assert "left_tree_bypass:right" in second.reason
+    assert "tube_obstacle_bypass:right" in second.reason
+    assert planner.diagnostics()["obstacle_side"] == "left"
 
 
-def test_verified_right_side_ghost_returns_do_not_block_local_right_bypass():
-    planner = LeftTreeBypassPlanner()
+def test_right_obstacle_cluster_automatically_selects_left_bypass():
+    planner = ObstacleBypassPlanner()
+    field = _field(
+        [[99.0, -38.0], [100.0, -40.0], [101.0, -41.0], [102.0, -42.0]]
+    )
+
+    _, output = _activate(planner, field)
+
+    assert planner.state == ObstacleBypassState.BYPASS_LEFT
+    assert planner.target_y_cm == 40.0
+    assert planner.active_bypass_side == 1
+    assert output.vy_cm_s == 0.0
+    assert output.yaw_rate_deg_s < 0.0
+    assert "tube_obstacle_bypass:left" in output.reason
+    assert planner.diagnostics()["obstacle_side"] == "right"
+
+
+def test_center_obstacle_uses_deterministic_default_right_bypass():
+    planner = ObstacleBypassPlanner()
+    field = _field(
+        [[99.0, -2.0], [100.0, 0.0], [101.0, 1.0], [102.0, 2.0]]
+    )
+
+    _, output = _activate(planner, field)
+
+    assert planner.state == ObstacleBypassState.BYPASS_RIGHT
+    assert planner.target_y_cm == -80.0
+    assert output.yaw_rate_deg_s > 0.0
+    assert planner.diagnostics()["obstacle_side"] == "center"
+
+
+def test_dense_physical_cluster_wins_over_diffuse_bilateral_returns():
+    planner = ObstacleBypassPlanner()
     field = _field(
         [
-            [100.0, 40.0],
-            [90.0, -70.0],
-            [130.0, -30.0],
+            [95.0, -42.0],
+            [96.0, -41.0],
+            [97.0, -40.0],
+            [98.0, -39.0],
+            [99.0, -38.0],
+            [70.0, 15.0],
+            [110.0, 30.0],
+            [150.0, 55.0],
+            [175.0, 70.0],
         ]
     )
 
-    planner.update(
-        desired=_desired(),
-        perception=_perception(),
-        radar_field=field,
-        now_s=1.0,
+    _, output = _activate(planner, field)
+
+    assert planner.state == ObstacleBypassState.BYPASS_LEFT
+    assert output.yaw_rate_deg_s < 0.0
+    assert planner.diagnostics()["cluster_point_count"] >= 3
+    assert planner.diagnostics()["obstacle_side"] == "right"
+
+
+def test_opposite_cluster_during_locked_encounter_stops_without_reversing_side():
+    planner = ObstacleBypassPlanner()
+    left = _field(
+        [[99.0, 38.0], [100.0, 40.0], [101.0, 41.0], [102.0, 42.0]]
     )
+    _activate(planner, left)
+    right_noise = _field(
+        [[99.0, -38.0], [100.0, -40.0], [101.0, -41.0], [102.0, -42.0]]
+    )
+
     output = planner.update(
         desired=_desired(),
         perception=_perception(),
-        radar_field=field,
-        now_s=1.1,
+        radar_field=right_noise,
+        now_s=1.2,
     )
 
-    assert len(field.points_body_cm) == 3
-    assert planner.state == LeftTreeBypassState.BYPASS_RIGHT
+    assert planner.state == ObstacleBypassState.BYPASS_RIGHT
+    assert planner.active_bypass_side == -1
+    assert output == Command(0.0, 0.0, 0.0, 0.0, output.reason)
+    assert "tube_obstacle_no_gap_stop" in output.reason
+
+
+def test_small_cluster_motion_keeps_stable_target_on_selected_side():
+    planner = ObstacleBypassPlanner()
+    initial = _field(
+        [[99.0, 38.0], [100.0, 40.0], [101.0, 41.0], [102.0, 42.0]]
+    )
+    _activate(planner, initial)
+    shifted = _field(
+        [[100.0, 39.0], [101.0, 40.0], [102.0, 42.0], [103.0, 43.0]]
+    )
+
+    output = planner.update(
+        desired=_desired(),
+        perception=_perception(),
+        radar_field=shifted,
+        now_s=1.2,
+    )
+
+    assert planner.state == ObstacleBypassState.BYPASS_RIGHT
     assert planner.target_y_cm == -40.0
     assert output.yaw_rate_deg_s > 0.0
 
 
-def test_left_point_outside_75cm_intrusion_envelope_does_not_trigger():
-    planner = LeftTreeBypassPlanner()
-    field = _field([[100.0, 80.0]])
-
+def test_no_cluster_on_other_road_sections_preserves_visual_command():
+    planner = ObstacleBypassPlanner()
+    field = _field([])
     desired = _desired()
+
     for now_s in (1.0, 1.1, 1.2):
         output = planner.update(
             desired=desired,
@@ -108,24 +187,27 @@ def test_left_point_outside_75cm_intrusion_envelope_does_not_trigger():
         )
 
     assert output == desired
-    assert planner.state == LeftTreeBypassState.NORMAL
+    assert planner.state == ObstacleBypassState.NORMAL
 
 
-def test_lost_visual_road_resets_bypass_and_holds_visual_command():
-    planner = LeftTreeBypassPlanner()
-    field = _field([[100.0, 40.0]])
-    planner.update(
-        desired=_desired(),
-        perception=_perception(),
-        radar_field=field,
-        now_s=1.0,
+def test_points_outside_bilateral_75cm_envelope_do_not_trigger():
+    planner = ObstacleBypassPlanner()
+    field = _field(
+        [[98.0, 80.0], [99.0, 81.0], [100.0, 82.0], [101.0, 83.0]]
     )
-    planner.update(
-        desired=_desired(),
-        perception=_perception(),
-        radar_field=field,
-        now_s=1.1,
+
+    _, output = _activate(planner, field)
+
+    assert output == _desired()
+    assert planner.state == ObstacleBypassState.NORMAL
+
+
+def test_lost_visual_road_resets_active_bypass():
+    planner = ObstacleBypassPlanner()
+    field = _field(
+        [[99.0, -38.0], [100.0, -40.0], [101.0, -41.0], [102.0, -42.0]]
     )
+    _activate(planner, field)
     hold = Command.zero("trajectory_road_lost_hold")
 
     output = planner.update(
@@ -136,4 +218,4 @@ def test_lost_visual_road_resets_bypass_and_holds_visual_command():
     )
 
     assert output == hold
-    assert planner.state == LeftTreeBypassState.NORMAL
+    assert planner.state == ObstacleBypassState.NORMAL

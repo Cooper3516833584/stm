@@ -1,4 +1,4 @@
-"""Independent real-vision + physical-radar left-tree bypass experiment."""
+"""Independent real-vision + physical-radar tubular-obstacle experiment."""
 
 from __future__ import annotations
 
@@ -36,13 +36,13 @@ from .flight_runtime import (
     wait_for_radars,
     wait_for_visual_road,
 )
-from .radar_bypass import LeftTreeBypassPlanner
+from .radar_bypass import ObstacleBypassPlanner
 from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Isolated real-vision/physical-radar left-tree bypass test"
+        description="Isolated real-vision/physical-radar tubular-obstacle test"
     )
     parser.add_argument("--camera-index", type=int, default=7)
     parser.add_argument("--model-npu", default=FrozenVisualConfig().npu_model_path)
@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> None:
         SessionRecorderConfig(
             root_dir=args.record_dir,
             enabled=not args.no_record,
-            mode="isolated_visual_radar_left_tree",
+            mode="isolated_visual_radar_tube_obstacle",
             frame_every_n=10,
             radar_every_n=1,
             video_enabled=True,
@@ -114,7 +114,9 @@ def main(argv: list[str] | None = None) -> None:
             metadata={
                 "argv": list(sys.argv),
                 "visual_config": vars(visual_config),
-                "physical_obstacle": "real tree on left, about +40cm from road centre",
+                "physical_obstacle": (
+                    "real movable tube; position is inferred from physical radar points"
+                ),
                 "radar_points": "physical only; no synthetic injection",
             },
         )
@@ -133,7 +135,7 @@ def main(argv: list[str] | None = None) -> None:
             forward_corridor_half_width_cm=75.0,
         )
     )
-    planner = LeftTreeBypassPlanner()
+    planner = ObstacleBypassPlanner()
     arbiter = SafetyArbiter(
         SafetyConfig(
             require_fc=actual_flight,
@@ -232,7 +234,7 @@ def main(argv: list[str] | None = None) -> None:
                     "camera_ok": sample.camera_ok,
                     "controller": sample.diagnostics,
                 },
-                "left_tree_bypass": planner.diagnostics(),
+                "tube_obstacle_bypass": planner.diagnostics(),
                 "sent": bool(actual_flight and decision.allowed),
             }
             if recorder.frame_due(loop_count):

@@ -1,9 +1,9 @@
-"""Visual road following plus isolated left-tree radar bypass experiment."""
+"""Visual road following plus side-agnostic physical-obstacle bypass."""
 
 from .radar_bypass import (
-    LeftTreeBypassConfig,
-    LeftTreeBypassPlanner,
-    LeftTreeBypassState,
+    ObstacleBypassConfig,
+    ObstacleBypassPlanner,
+    ObstacleBypassState,
 )
 from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance, VisualSample
 
@@ -11,7 +11,7 @@ __all__ = [
     "FrozenVisualConfig",
     "FrozenVisualGuidance",
     "VisualSample",
-    "LeftTreeBypassConfig",
-    "LeftTreeBypassPlanner",
-    "LeftTreeBypassState",
+    "ObstacleBypassConfig",
+    "ObstacleBypassPlanner",
+    "ObstacleBypassState",
 ]

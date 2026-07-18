@@ -19,10 +19,12 @@ import road_follow_main
 DEFAULT_ARGUMENTS = [
     "--road-controller",
     "trajectory-point",
+    "--loop-hz",
+    "12",
     "--max-vx-cm-s",
-    "10",
+    "20",
     "--max-vy-cm-s",
-    "8",
+    "12",
     "--max-yaw-rate-deg-s",
     "10",
 ]

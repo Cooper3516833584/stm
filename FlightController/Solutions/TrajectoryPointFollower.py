@@ -16,24 +16,33 @@ Point = tuple[float, float]
 class TrajectoryPointFollowerConfig:
     image_width: int = 640
     image_height: int = 480
-    max_vx_cm_s: float = 10.0
-    max_vy_cm_s: float = 8.0
+    max_vx_cm_s: float = 20.0
+    max_vy_cm_s: float = 12.0
     max_yaw_rate_deg_s: float = 10.0
-    reach_radius_px: float = 20.0
-    min_forward_lookahead_px: float = 12.0
-    tangent_window_points: int = 3
+    reach_radius_px: float = 30.0
+    min_forward_lookahead_px: float = 24.0
+    max_forward_lookahead_px: float = 64.0
+    lookahead_speed_gain_px_per_cm_s: float = 1.2
+    latency_compensation_s: float = 0.134
+    physical_road_width_cm: float = 50.0
+    max_latency_prediction_px: float = 16.0
+    tangent_window_points: int = 5
     min_confidence: float = 0.35
     tangent_kp_yaw: float = 0.25
     tangent_deadband_deg: float = 3.0
+    lateral_deadband_px: float = 8.0
     yaw_sign: float = 1.0
     lateral_sign: float = -1.0
-    target_filter_tau_s: float = 0.20
-    tangent_filter_tau_s: float = 0.25
+    target_filter_tau_s: float = 0.15
+    tangent_filter_tau_s: float = 0.20
     target_filter_max_rate_px_s: float = 600.0
     tangent_filter_max_rate_deg_s: float = 90.0
-    max_planar_accel_cm_s2: float = 16.0
+    max_planar_accel_cm_s2: float = 24.0
     max_yaw_accel_deg_s2: float = 20.0
-    degraded_speed_scale: float = 0.75
+    degraded_speed_scale: float = 0.85
+    curvature_slowdown_start_deg: float = 8.0
+    curvature_full_slowdown_deg: float = 35.0
+    min_curve_speed_cm_s: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -50,8 +59,17 @@ class TrajectoryPointFollowerDiagnostics:
     target_distance_px: float | None = None
     target_reached: bool = False
     target_advanced_for_lookahead: bool = False
+    current_planar_speed_cm_s: float = 0.0
+    base_lookahead_px: float = 0.0
+    latency_prediction_px: float = 0.0
+    effective_lookahead_px: float = 0.0
+    target_path_distance_px: float = 0.0
+    path_width_px: float | None = None
     tangent_dx_px: float | None = None
     tangent_dy_px: float | None = None
+    forward_curvature_deg: float = 0.0
+    curve_speed_limit_cm_s: float = 0.0
+    curvature_speed_scale: float = 1.0
     raw_forward_error_px: float | None = None
     filtered_forward_error_px: float | None = None
     raw_lateral_error_px: float | None = None
@@ -116,28 +134,49 @@ class TrajectoryPointFollower:
         nearest_distance = math.sqrt(
             _distance_sq(points[nearest_index], (center_x, center_y))
         )
-        target_index = nearest_index
-        target_advanced_for_lookahead = False
-        while target_index + 1 < len(points):
-            point_x, point_y = points[target_index]
-            target_distance = math.sqrt(
-                _distance_sq((point_x, point_y), (center_x, center_y))
-            )
-            has_forward_lookahead = (
-                center_y - point_y >= float(self.config.min_forward_lookahead_px)
-            )
-            if (
-                target_distance >= float(self.config.reach_radius_px)
-                and has_forward_lookahead
-            ):
-                break
-            if target_distance >= float(self.config.reach_radius_px):
-                target_advanced_for_lookahead = True
-            target_index += 1
+        current_planar_speed = math.hypot(
+            self._limited_vx_cm_s,
+            self._limited_vy_cm_s,
+        )
+        path_width_px = _finite_or_none(getattr(perception, "path_width_px", None))
+        base_lookahead_px = self._adaptive_lookahead_px(current_planar_speed)
+        latency_prediction_px = self._latency_prediction_px(
+            current_planar_speed,
+            path_width_px,
+        )
+        effective_lookahead_px = min(
+            max(
+                float(self.config.min_forward_lookahead_px),
+                base_lookahead_px + latency_prediction_px,
+            ),
+            max(
+                float(self.config.min_forward_lookahead_px),
+                float(self.config.max_forward_lookahead_px),
+            ),
+        )
+        target_index, target_path_distance_px = self._select_forward_target(
+            points,
+            nearest_index=nearest_index,
+            center_y=center_y,
+            lookahead_px=effective_lookahead_px,
+        )
+        target_advanced_for_lookahead = target_index > nearest_index
 
         target_x, target_y = points[target_index]
         target_distance = math.hypot(target_x - center_x, target_y - center_y)
         tangent_dx, tangent_dy = self._local_forward_tangent(points, target_index)
+        forward_curvature_deg = self._forward_curvature_deg(
+            points,
+            nearest_index,
+            target_index,
+        )
+        curve_speed_limit_cm_s = self._curve_speed_limit_cm_s(forward_curvature_deg)
+        maximum_cruise_speed = max(0.0, float(self.config.max_vx_cm_s))
+        curvature_speed_scale = (
+            curve_speed_limit_cm_s / maximum_cruise_speed
+            if maximum_cruise_speed > 1e-9
+            else 0.0
+        )
 
         raw_forward_px = center_y - target_y
         raw_lateral_px = target_x - center_x
@@ -165,6 +204,10 @@ class TrajectoryPointFollower:
         )
         self._filtered_forward_px = filtered_forward_px
         self._filtered_lateral_px = filtered_lateral_px
+        used_lateral_px = _deadband(
+            filtered_lateral_px,
+            self.config.lateral_deadband_px,
+        )
 
         raw_tangent_error_deg = math.degrees(math.atan2(tangent_dx, -tangent_dy))
         tangent_error_deg = self._filter_angle(
@@ -199,7 +242,8 @@ class TrajectoryPointFollower:
 
         requested_vx, requested_vy = self._directional_velocity(
             filtered_forward_px,
-            filtered_lateral_px,
+            used_lateral_px,
+            speed_limit_cm_s=curve_speed_limit_cm_s,
         )
         road_state = str(getattr(perception, "road_state", "unknown"))
         speed_scale = (
@@ -234,8 +278,17 @@ class TrajectoryPointFollower:
             target_distance_px=target_distance,
             target_reached=nearest_distance < self.config.reach_radius_px,
             target_advanced_for_lookahead=target_advanced_for_lookahead,
+            current_planar_speed_cm_s=current_planar_speed,
+            base_lookahead_px=base_lookahead_px,
+            latency_prediction_px=latency_prediction_px,
+            effective_lookahead_px=effective_lookahead_px,
+            target_path_distance_px=target_path_distance_px,
+            path_width_px=path_width_px,
             tangent_dx_px=tangent_dx,
             tangent_dy_px=tangent_dy,
+            forward_curvature_deg=forward_curvature_deg,
+            curve_speed_limit_cm_s=curve_speed_limit_cm_s,
+            curvature_speed_scale=curvature_speed_scale,
             raw_forward_error_px=raw_forward_px,
             filtered_forward_error_px=filtered_forward_px,
             raw_lateral_error_px=raw_lateral_px,
@@ -247,7 +300,7 @@ class TrajectoryPointFollower:
             angle_error_deg=used_tangent_error_deg,
             raw_pixel_error_px=raw_lateral_px,
             filtered_pixel_error_px=filtered_lateral_px,
-            used_pixel_error_px=filtered_lateral_px,
+            used_pixel_error_px=used_lateral_px,
             angle_yaw_term_deg_s=unclamped_yaw_rate,
             unclamped_yaw_rate_deg_s=unclamped_yaw_rate,
             clamped_yaw_rate_deg_s=clamped_yaw_rate,
@@ -318,16 +371,140 @@ class TrajectoryPointFollower:
             return -dx, -dy
         return dx, dy
 
-    def _directional_velocity(self, forward_px: float, lateral_px: float) -> Point:
+    def _adaptive_lookahead_px(self, current_speed_cm_s: float) -> float:
+        minimum = max(0.0, float(self.config.min_forward_lookahead_px))
+        maximum = max(minimum, float(self.config.max_forward_lookahead_px))
+        requested = minimum + (
+            max(0.0, float(current_speed_cm_s))
+            * max(0.0, float(self.config.lookahead_speed_gain_px_per_cm_s))
+        )
+        return _clamp(requested, minimum, maximum)
+
+    def _latency_prediction_px(
+        self,
+        current_speed_cm_s: float,
+        path_width_px: float | None,
+    ) -> float:
+        if path_width_px is None or path_width_px <= 0.0:
+            return 0.0
+        road_width_cm = float(self.config.physical_road_width_cm)
+        if road_width_cm <= 0.0:
+            return 0.0
+        pixels_per_cm = path_width_px / road_width_cm
+        predicted_px = (
+            max(0.0, float(current_speed_cm_s))
+            * max(0.0, float(self.config.latency_compensation_s))
+            * pixels_per_cm
+        )
+        return _clamp(
+            predicted_px,
+            0.0,
+            max(0.0, float(self.config.max_latency_prediction_px)),
+        )
+
+    def _select_forward_target(
+        self,
+        points: list[Point],
+        *,
+        nearest_index: int,
+        center_y: float,
+        lookahead_px: float,
+    ) -> tuple[int, float]:
+        """Choose the farthest centreline point inside the adaptive arc horizon."""
+
+        target_index = nearest_index
+        path_distance_px = 0.0
+        for index in range(nearest_index + 1, len(points)):
+            step_px = math.sqrt(_distance_sq(points[index - 1], points[index]))
+            candidate_distance_px = path_distance_px + step_px
+            if candidate_distance_px > lookahead_px:
+                break
+            target_index = index
+            path_distance_px = candidate_distance_px
+
+        minimum_forward_px = max(0.0, float(self.config.min_forward_lookahead_px))
+        while (
+            target_index + 1 < len(points)
+            and center_y - points[target_index][1] < minimum_forward_px
+        ):
+            next_index = target_index + 1
+            path_distance_px += math.sqrt(
+                _distance_sq(points[target_index], points[next_index])
+            )
+            target_index = next_index
+        return target_index, path_distance_px
+
+    def _forward_curvature_deg(
+        self,
+        points: list[Point],
+        nearest_index: int,
+        target_index: int,
+    ) -> float:
+        """Estimate upcoming heading change without penalising a straight diagonal road."""
+
+        window = max(1, int(self.config.tangent_window_points))
+        last_probe = min(
+            len(points) - 1,
+            max(target_index, nearest_index + 1) + 2 * window,
+        )
+        span = max(1, last_probe - nearest_index)
+        probe_indices = sorted(
+            {
+                nearest_index,
+                nearest_index + span // 3,
+                nearest_index + (2 * span) // 3,
+                target_index,
+                last_probe,
+            }
+        )
+        headings = []
+        for index in probe_indices:
+            tangent_dx, tangent_dy = self._local_forward_tangent(points, index)
+            headings.append(math.degrees(math.atan2(tangent_dx, -tangent_dy)))
+        return max(
+            (
+                abs(_wrap_angle_deg(second - first))
+                for position, first in enumerate(headings)
+                for second in headings[position + 1 :]
+            ),
+            default=0.0,
+        )
+
+    def _curve_speed_limit_cm_s(self, curvature_deg: float) -> float:
+        maximum = max(0.0, float(self.config.max_vx_cm_s))
+        minimum = _clamp(float(self.config.min_curve_speed_cm_s), 0.0, maximum)
+        slowdown_start = max(0.0, float(self.config.curvature_slowdown_start_deg))
+        full_slowdown = max(
+            slowdown_start + 1e-6,
+            float(self.config.curvature_full_slowdown_deg),
+        )
+        curvature = max(0.0, float(curvature_deg))
+        if curvature <= slowdown_start:
+            return maximum
+        if curvature >= full_slowdown:
+            return minimum
+        ratio = (curvature - slowdown_start) / (full_slowdown - slowdown_start)
+        return maximum + ratio * (minimum - maximum)
+
+    def _directional_velocity(
+        self,
+        forward_px: float,
+        lateral_px: float,
+        *,
+        speed_limit_cm_s: float | None = None,
+    ) -> Point:
         magnitude = math.hypot(forward_px, lateral_px)
         if magnitude < 1e-6:
             return 0.0, 0.0
 
         unit_x = forward_px / magnitude
         unit_y = self.config.lateral_sign * lateral_px / magnitude
-        scale_limits = [
-            max(abs(self.config.max_vx_cm_s), abs(self.config.max_vy_cm_s)),
-        ]
+        speed_limit = (
+            max(abs(self.config.max_vx_cm_s), abs(self.config.max_vy_cm_s))
+            if speed_limit_cm_s is None
+            else max(0.0, float(speed_limit_cm_s))
+        )
+        scale_limits = [speed_limit]
         if abs(unit_x) > 1e-9:
             scale_limits.append(abs(self.config.max_vx_cm_s) / abs(unit_x))
         if abs(unit_y) > 1e-9:
@@ -448,6 +625,14 @@ def _is_empty(values: Iterable[object]) -> bool:
         return len(values) == 0  # type: ignore[arg-type]
     except TypeError:
         return False
+
+
+def _finite_or_none(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _deadband(value: float, deadband: float) -> float:

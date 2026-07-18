@@ -248,15 +248,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Yaw while road is lost; zero safely holds heading")
     parser.add_argument("--road-heading-slowdown-start-deg", type=float, default=30.0)
     parser.add_argument("--road-heading-stop-deg", type=float, default=70.0)
-    parser.add_argument("--trajectory-reach-radius-px", type=float, default=20.0)
-    parser.add_argument("--trajectory-min-forward-lookahead-px", type=float, default=12.0)
-    parser.add_argument("--trajectory-tangent-window-points", type=int, default=3)
+    parser.add_argument("--trajectory-reach-radius-px", type=float, default=30.0)
+    parser.add_argument("--trajectory-min-forward-lookahead-px", type=float, default=24.0)
+    parser.add_argument("--trajectory-max-forward-lookahead-px", type=float, default=64.0)
+    parser.add_argument(
+        "--trajectory-lookahead-speed-gain-px-per-cm-s",
+        type=float,
+        default=1.2,
+    )
+    parser.add_argument("--trajectory-latency-compensation-s", type=float, default=0.134)
+    parser.add_argument("--trajectory-physical-road-width-cm", type=float, default=50.0)
+    parser.add_argument("--trajectory-max-latency-prediction-px", type=float, default=16.0)
+    parser.add_argument("--trajectory-tangent-window-points", type=int, default=5)
     parser.add_argument("--trajectory-tangent-kp-yaw", type=float, default=0.25)
-    parser.add_argument("--trajectory-target-filter-tau-s", type=float, default=0.20)
-    parser.add_argument("--trajectory-tangent-filter-tau-s", type=float, default=0.25)
-    parser.add_argument("--trajectory-max-planar-accel-cm-s2", type=float, default=16.0)
+    parser.add_argument("--trajectory-lateral-deadband-px", type=float, default=8.0)
+    parser.add_argument("--trajectory-target-filter-tau-s", type=float, default=0.15)
+    parser.add_argument("--trajectory-tangent-filter-tau-s", type=float, default=0.20)
+    parser.add_argument("--trajectory-max-planar-accel-cm-s2", type=float, default=24.0)
     parser.add_argument("--trajectory-max-yaw-accel-deg-s2", type=float, default=20.0)
-    parser.add_argument("--trajectory-degraded-speed-scale", type=float, default=0.75)
+    parser.add_argument("--trajectory-degraded-speed-scale", type=float, default=0.85)
+    parser.add_argument("--trajectory-curvature-slowdown-start-deg", type=float, default=8.0)
+    parser.add_argument("--trajectory-curvature-full-slowdown-deg", type=float, default=35.0)
+    parser.add_argument("--trajectory-min-curve-speed-cm-s", type=float, default=10.0)
     parser.add_argument("--road-bypass-enable", action="store_true",
                         help="Enable radar-assisted in-road bypass for branches/vines intruding into the road center")
     parser.add_argument(
@@ -446,9 +459,17 @@ def main(argv: list[str] | None = None) -> None:
                 max_yaw_rate_deg_s=args.max_yaw_rate_deg_s,
                 reach_radius_px=args.trajectory_reach_radius_px,
                 min_forward_lookahead_px=args.trajectory_min_forward_lookahead_px,
+                max_forward_lookahead_px=args.trajectory_max_forward_lookahead_px,
+                lookahead_speed_gain_px_per_cm_s=(
+                    args.trajectory_lookahead_speed_gain_px_per_cm_s
+                ),
+                latency_compensation_s=args.trajectory_latency_compensation_s,
+                physical_road_width_cm=args.trajectory_physical_road_width_cm,
+                max_latency_prediction_px=args.trajectory_max_latency_prediction_px,
                 tangent_window_points=args.trajectory_tangent_window_points,
                 tangent_kp_yaw=args.trajectory_tangent_kp_yaw,
                 tangent_deadband_deg=args.road_angle_deadband_deg,
+                lateral_deadband_px=args.trajectory_lateral_deadband_px,
                 yaw_sign=args.road_yaw_sign,
                 lateral_sign=args.road_lateral_sign,
                 target_filter_tau_s=args.trajectory_target_filter_tau_s,
@@ -458,6 +479,13 @@ def main(argv: list[str] | None = None) -> None:
                 max_planar_accel_cm_s2=args.trajectory_max_planar_accel_cm_s2,
                 max_yaw_accel_deg_s2=args.trajectory_max_yaw_accel_deg_s2,
                 degraded_speed_scale=args.trajectory_degraded_speed_scale,
+                curvature_slowdown_start_deg=(
+                    args.trajectory_curvature_slowdown_start_deg
+                ),
+                curvature_full_slowdown_deg=(
+                    args.trajectory_curvature_full_slowdown_deg
+                ),
+                min_curve_speed_cm_s=args.trajectory_min_curve_speed_cm_s,
             )
         )
     else:
@@ -937,10 +965,35 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
         raise ValueError("--trajectory-reach-radius-px must be greater than zero")
     if args.trajectory_min_forward_lookahead_px < 0.0:
         raise ValueError("--trajectory-min-forward-lookahead-px cannot be negative")
+    if args.trajectory_max_forward_lookahead_px < args.trajectory_min_forward_lookahead_px:
+        raise ValueError(
+            "--trajectory-max-forward-lookahead-px must be at least "
+            "--trajectory-min-forward-lookahead-px"
+        )
     if args.trajectory_tangent_window_points <= 0:
         raise ValueError("--trajectory-tangent-window-points must be greater than zero")
     if args.trajectory_tangent_kp_yaw < 0.0:
         raise ValueError("--trajectory-tangent-kp-yaw cannot be negative")
+    for option in (
+        "trajectory_lookahead_speed_gain_px_per_cm_s",
+        "trajectory_latency_compensation_s",
+        "trajectory_max_latency_prediction_px",
+        "trajectory_lateral_deadband_px",
+        "trajectory_curvature_slowdown_start_deg",
+        "trajectory_min_curve_speed_cm_s",
+    ):
+        if getattr(args, option) < 0.0:
+            raise ValueError(f"--{option.replace('_', '-')} cannot be negative")
+    if args.trajectory_physical_road_width_cm <= 0.0:
+        raise ValueError("--trajectory-physical-road-width-cm must be greater than zero")
+    if (
+        args.trajectory_curvature_full_slowdown_deg
+        <= args.trajectory_curvature_slowdown_start_deg
+    ):
+        raise ValueError(
+            "--trajectory-curvature-full-slowdown-deg must be greater than "
+            "--trajectory-curvature-slowdown-start-deg"
+        )
     for option in (
         "trajectory_max_planar_accel_cm_s2",
         "trajectory_max_yaw_accel_deg_s2",
@@ -1231,7 +1284,8 @@ def _log_road_summary(
     bypass_y = getattr(bypass_planner, "last_target_y_cm", None) if bypass_planner is not None else None
     logger.info(
         "[ROAD] state={} mode=single-road err={:.0f} corr={:.0f} angle={:.0f} conf={:.2f} "
-        "ctrl=(mode={} target=({},{}) d={} idx={} angle_err={} px_yaw={} angle_yaw={} speed_scale={} slew={}) "
+        "ctrl=(mode={} target=({},{}) d={} idx={} lookahead={} pred={} curve={} vlim={} "
+        "angle_err={} px_yaw={} angle_yaw={} speed_scale={} slew={}) "
         "desired=(vx={} vy={} yaw={}) planned=(vx={} vy={} yaw={}) safe=(vx={} vy={} yaw={}) "
         "actual=(yaw={} yaw_rate={} vx={} vy={}) ages=(frame={} perception={} stale={}) "
         "bypass={} bypass_y={} safety={} sent={} radar_fresh={} fc_mode={}".format(
@@ -1245,6 +1299,10 @@ def _log_road_summary(
             _round_or_none(controller_diagnostics.get("target_y_px")),
             _round_or_none(controller_diagnostics.get("target_distance_px")),
             controller_diagnostics.get("target_index"),
+            _round_or_none(controller_diagnostics.get("effective_lookahead_px")),
+            _round_or_none(controller_diagnostics.get("latency_prediction_px")),
+            _round_or_none(controller_diagnostics.get("forward_curvature_deg")),
+            _round_or_none(controller_diagnostics.get("curve_speed_limit_cm_s")),
             _round_or_none(controller_diagnostics.get("angle_error_deg")),
             _round_or_none(controller_diagnostics.get("pixel_yaw_term_deg_s")),
             _round_or_none(controller_diagnostics.get("angle_yaw_term_deg_s")),
@@ -1450,6 +1508,12 @@ def _annotate_road_frame(
                 f"d={_display_float(controller_diagnostics.get('target_distance_px'), 1)}px "
                 f"idx={controller_diagnostics.get('target_index')}/"
                 f"{controller_diagnostics.get('path_point_count')}"
+            ),
+            (
+                f"lookahead={_display_float(controller_diagnostics.get('effective_lookahead_px'), 1)}px "
+                f"prediction={_display_float(controller_diagnostics.get('latency_prediction_px'), 1)}px "
+                f"curve={_display_float(controller_diagnostics.get('forward_curvature_deg'), 1)}deg "
+                f"limit={_display_float(controller_diagnostics.get('curve_speed_limit_cm_s'), 1)}cm/s"
             ),
             (
                 f"pixel={_display_float(pixel_error, 1)}->{_display_float(filtered_pixel_error, 1)}px "

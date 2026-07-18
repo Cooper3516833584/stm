@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -8,14 +9,24 @@ from FlightController.Solutions.TrajectoryPointFollower import (
 )
 
 
-def _perception(points, *, state="single", found=True, confidence=0.9):
-    return SimpleNamespace(
+def _perception(
+    points,
+    *,
+    state="single",
+    found=True,
+    confidence=0.9,
+    path_width_px=None,
+):
+    perception = SimpleNamespace(
         is_road_found=found,
         confidence=confidence,
         road_state=state,
         trajectory_points=points,
         centerline_points=points,
     )
+    if path_width_px is not None:
+        perception.path_width_px = path_width_px
+    return perception
 
 
 def _follower(**overrides):
@@ -32,7 +43,7 @@ def _follower(**overrides):
     )
 
 
-def test_reached_nearest_point_advances_to_next_point_and_moves_forward():
+def test_reached_nearest_point_advances_to_adaptive_lookahead_and_moves_forward():
     points = [(320.0, float(y)) for y in range(460, 19, -20)]
     follower = _follower()
 
@@ -40,8 +51,9 @@ def test_reached_nearest_point_advances_to_next_point_and_moves_forward():
 
     diagnostics = follower.last_diagnostics
     assert diagnostics.target_reached
-    assert diagnostics.target_index == diagnostics.nearest_index + 1
-    assert diagnostics.target_distance_px == pytest.approx(20.0)
+    assert diagnostics.target_index == diagnostics.nearest_index + 2
+    assert diagnostics.target_distance_px == pytest.approx(40.0)
+    assert diagnostics.base_lookahead_px == pytest.approx(24.0)
     assert command.vx_cm_s == pytest.approx(10.0)
     assert command.vy_cm_s == pytest.approx(0.0)
     assert command.yaw_rate_deg_s == pytest.approx(0.0)
@@ -135,12 +147,101 @@ def test_default_acceleration_limit_ramps_initial_command_without_lowering_cruis
 
     commands = [
         follower.update(_perception(points), now_s=1.0 + 0.1 * index)
-        for index in range(8)
+        for index in range(9)
     ]
 
-    assert commands[0].vx_cm_s == pytest.approx(1.6)
-    assert commands[-1].vx_cm_s == pytest.approx(10.0)
+    assert commands[0].vx_cm_s == pytest.approx(2.4)
+    assert commands[-1].vx_cm_s == pytest.approx(20.0)
     assert commands[-1].vy_cm_s == pytest.approx(0.0)
+
+
+def test_tight_upcoming_curve_slows_while_straight_road_uses_full_speed():
+    straight = [(320.0, float(y)) for y in range(460, 19, -20)]
+    tight_curve = [
+        (320.0, 460.0),
+        (320.0, 400.0),
+        (320.0, 340.0),
+        (320.0, 280.0),
+        (320.0, 240.0),
+        (320.0, 220.0),
+        (325.0, 200.0),
+        (340.0, 180.0),
+        (365.0, 165.0),
+        (395.0, 155.0),
+        (430.0, 150.0),
+    ]
+    straight_follower = TrajectoryPointFollower(
+        TrajectoryPointFollowerConfig(
+            max_planar_accel_cm_s2=1_000_000.0,
+            max_yaw_accel_deg_s2=1_000_000.0,
+        )
+    )
+    curve_follower = TrajectoryPointFollower(
+        TrajectoryPointFollowerConfig(
+            max_planar_accel_cm_s2=1_000_000.0,
+            max_yaw_accel_deg_s2=1_000_000.0,
+        )
+    )
+
+    straight_command = straight_follower.update(_perception(straight), now_s=1.0)
+    curve_command = curve_follower.update(_perception(tight_curve), now_s=1.0)
+
+    assert straight_command.vx_cm_s == pytest.approx(20.0)
+    assert straight_follower.last_diagnostics.forward_curvature_deg == pytest.approx(0.0)
+    assert curve_follower.last_diagnostics.forward_curvature_deg >= 35.0
+    assert curve_follower.last_diagnostics.curve_speed_limit_cm_s == pytest.approx(10.0)
+    assert math.hypot(curve_command.vx_cm_s, curve_command.vy_cm_s) == pytest.approx(10.0)
+
+
+def test_moderate_curvature_interpolates_to_about_fourteen_cm_s():
+    follower = TrajectoryPointFollower(TrajectoryPointFollowerConfig())
+
+    assert follower._curve_speed_limit_cm_s(24.2) == pytest.approx(14.0)
+
+
+def test_speed_and_measured_latency_expand_forward_lookahead():
+    points = [(320.0, float(y)) for y in range(460, 19, -5)]
+    latency_follower = TrajectoryPointFollower(
+        TrajectoryPointFollowerConfig(
+            max_planar_accel_cm_s2=1_000_000.0,
+            latency_compensation_s=0.134,
+        )
+    )
+    no_latency_follower = TrajectoryPointFollower(
+        TrajectoryPointFollowerConfig(
+            max_planar_accel_cm_s2=1_000_000.0,
+            latency_compensation_s=0.0,
+        )
+    )
+    perception = _perception(points, path_width_px=200.0)
+
+    latency_follower.update(perception, now_s=1.0)
+    latency_follower.update(perception, now_s=1.1)
+    no_latency_follower.update(perception, now_s=1.0)
+    no_latency_follower.update(perception, now_s=1.1)
+
+    latency = latency_follower.last_diagnostics
+    no_latency = no_latency_follower.last_diagnostics
+    assert latency.current_planar_speed_cm_s == pytest.approx(20.0)
+    assert latency.base_lookahead_px == pytest.approx(48.0)
+    assert latency.latency_prediction_px == pytest.approx(10.72)
+    assert latency.effective_lookahead_px == pytest.approx(58.72)
+    assert latency.target_index > no_latency.target_index
+
+
+def test_small_lateral_error_is_ignored_but_larger_error_is_corrected():
+    small_error = [(326.0, 300.0), (326.0, 240.0), (326.0, 180.0)]
+    large_error = [(340.0, 300.0), (340.0, 240.0), (340.0, 180.0)]
+    small_follower = _follower(min_forward_lookahead_px=0.0)
+    large_follower = _follower(min_forward_lookahead_px=0.0)
+
+    small_command = small_follower.update(_perception(small_error), now_s=1.0)
+    large_command = large_follower.update(_perception(large_error), now_s=1.0)
+
+    assert small_follower.last_diagnostics.used_pixel_error_px == 0.0
+    assert small_command.vy_cm_s == pytest.approx(0.0)
+    assert abs(large_follower.last_diagnostics.used_pixel_error_px) == pytest.approx(12.0)
+    assert large_command.vy_cm_s < 0.0
 
 
 def test_planar_acceleration_limit_brakes_before_direction_reversal():

@@ -33,7 +33,22 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.upper_port == "/dev/ttySTM4"
     assert args.lower_port == "/dev/ttySTM9"
     assert args.loop_hz == 10.0
+    assert args.bypass_planner == "legacy"
     assert not hasattr(args, "synthetic_radar")
+
+
+def test_smooth_sidestep_is_explicit_and_does_not_replace_legacy_default(tmp_path):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--bypass-planner",
+            "smooth-sidestep",
+        ]
+    )
+
+    main.validate_args(args)
+    assert args.bypass_planner == "smooth-sidestep"
 
 
 def test_real_flight_requires_both_takeoff_and_explicit_confirmation(tmp_path):

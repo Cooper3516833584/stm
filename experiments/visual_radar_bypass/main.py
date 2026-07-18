@@ -37,6 +37,7 @@ from .flight_runtime import (
     wait_for_visual_road,
 )
 from .radar_bypass import ObstacleBypassPlanner
+from .smooth_sidestep import SmoothSidestepPlanner
 from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance
 
 
@@ -52,6 +53,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--loop-hz", type=float, default=10.0)
     parser.add_argument("--duration-s", type=float, default=60.0)
     parser.add_argument("--radar-timeout-s", type=float, default=0.5)
+    parser.add_argument(
+        "--bypass-planner",
+        choices=("legacy", "smooth-sidestep"),
+        default="legacy",
+        help="Select the unchanged legacy planner or the isolated smooth sidestep",
+    )
     parser.add_argument("--record-dir", default="/media/sdcard/stm_records")
     parser.add_argument("--no-record", action="store_true")
     parser.add_argument("--enable-flight", action="store_true")
@@ -101,11 +108,16 @@ def main(argv: list[str] | None = None) -> None:
     flight_config = FlightRuntimeConfig(
         takeoff_height_cm=args.takeoff_height_cm,
     )
+    session_mode = (
+        "isolated_visual_radar_smooth_sidestep"
+        if args.bypass_planner == "smooth-sidestep"
+        else "isolated_visual_radar_tube_obstacle"
+    )
     recorder = SessionRecorder(
         SessionRecorderConfig(
             root_dir=args.record_dir,
             enabled=not args.no_record,
-            mode="isolated_visual_radar_tube_obstacle",
+            mode=session_mode,
             frame_every_n=10,
             radar_every_n=1,
             video_enabled=True,
@@ -118,6 +130,7 @@ def main(argv: list[str] | None = None) -> None:
                     "real movable tube; position is inferred from physical radar points"
                 ),
                 "radar_points": "physical only; no synthetic injection",
+                "bypass_planner": args.bypass_planner,
             },
         )
     )
@@ -135,7 +148,11 @@ def main(argv: list[str] | None = None) -> None:
             forward_corridor_half_width_cm=75.0,
         )
     )
-    planner = ObstacleBypassPlanner()
+    planner = (
+        SmoothSidestepPlanner()
+        if args.bypass_planner == "smooth-sidestep"
+        else ObstacleBypassPlanner()
+    )
     arbiter = SafetyArbiter(
         SafetyConfig(
             require_fc=actual_flight,

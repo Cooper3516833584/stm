@@ -35,6 +35,7 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.loop_hz == 10.0
     assert args.bypass_planner == "legacy"
     assert args.bypass_forward_transition_s == 2.0
+    assert not args.right_half_radar_then_visual
     assert not hasattr(args, "synthetic_radar")
 
 
@@ -77,6 +78,43 @@ def test_negative_forward_transition_duration_is_rejected(tmp_path):
     )
 
     with pytest.raises(ValueError, match="forward-transition"):
+        main.validate_args(args)
+
+
+def test_right_half_radar_then_visual_is_explicit(tmp_path):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--right-half-radar-then-visual",
+        ]
+    )
+
+    main.validate_args(args)
+    assert args.right_half_radar_then_visual
+
+
+@pytest.mark.parametrize(
+    "incompatible",
+    [
+        ["--bypass-planner", "smooth-sidestep"],
+        ["--bypass-forward-transition-s", "0"],
+    ],
+)
+def test_right_half_handoff_requires_legacy_three_stage_mode(
+    tmp_path,
+    incompatible,
+):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--right-half-radar-then-visual",
+            *incompatible,
+        ]
+    )
+
+    with pytest.raises(ValueError, match="right-half-radar"):
         main.validate_args(args)
 
 

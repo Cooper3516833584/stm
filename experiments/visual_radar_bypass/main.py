@@ -36,7 +36,7 @@ from .flight_runtime import (
     wait_for_radars,
     wait_for_visual_road,
 )
-from .radar_bypass import ObstacleBypassPlanner
+from .radar_bypass import ObstacleBypassConfig, ObstacleBypassPlanner
 from .smooth_sidestep import SmoothSidestepPlanner
 from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance
 
@@ -59,6 +59,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="legacy",
         help="Select the unchanged legacy planner or the isolated smooth sidestep",
     )
+    parser.add_argument(
+        "--bypass-forward-transition-s",
+        type=float,
+        default=2.0,
+        help="Legacy planner forward-priority radar-to-vision handoff duration",
+    )
     parser.add_argument("--record-dir", default="/media/sdcard/stm_records")
     parser.add_argument("--no-record", action="store_true")
     parser.add_argument("--enable-flight", action="store_true")
@@ -79,6 +85,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--loop-hz must be greater than zero")
     if args.duration_s <= 0.0:
         raise ValueError("--duration-s must be greater than zero")
+    if args.bypass_forward_transition_s < 0.0:
+        raise ValueError("--bypass-forward-transition-s cannot be negative")
     if args.enable_flight:
         missing = []
         if not args.auto_takeoff:
@@ -151,7 +159,11 @@ def main(argv: list[str] | None = None) -> None:
     planner = (
         SmoothSidestepPlanner()
         if args.bypass_planner == "smooth-sidestep"
-        else ObstacleBypassPlanner()
+        else ObstacleBypassPlanner(
+            ObstacleBypassConfig(
+                forward_recovery_s=args.bypass_forward_transition_s,
+            )
+        )
     )
     arbiter = SafetyArbiter(
         SafetyConfig(

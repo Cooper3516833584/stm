@@ -8,6 +8,7 @@ from FlightController.Solutions.Safety import (
     RadarObstacleField,
 )
 from experiments.visual_radar_bypass.radar_bypass import (
+    ObstacleBypassConfig,
     ObstacleBypassPlanner,
     ObstacleBypassState,
 )
@@ -234,7 +235,7 @@ def test_close_obstacle_below_40cm_remains_detected():
     assert output.vy_cm_s == 8.0
 
 
-def test_sidestep_releases_directly_back_to_visual_command():
+def test_sidestep_enters_forward_recovery_before_visual_command():
     planner = ObstacleBypassPlanner()
     obstacle = _field(
         [[99.0, -38.0], [100.0, -40.0], [101.0, -41.0], [102.0, -42.0]]
@@ -248,7 +249,7 @@ def test_sidestep_releases_directly_back_to_visual_command():
         radar_field=empty,
         now_s=1.2,
     )
-    released = planner.update(
+    recovery = planner.update(
         desired=_desired(),
         perception=_perception(),
         radar_field=empty,
@@ -256,5 +257,147 @@ def test_sidestep_releases_directly_back_to_visual_command():
     )
 
     assert held.vy_cm_s == 8.0
-    assert released == _desired()
+    assert recovery.vy_cm_s == 8.0
+    assert planner.state == ObstacleBypassState.FORWARD_RECOVERY
+    assert "tube_obstacle_forward_recovery" in recovery.reason
+
+
+def test_forward_recovery_decays_lateral_then_prioritises_forward_motion():
+    planner = ObstacleBypassPlanner()
+    obstacle = _field(
+        [[99.0, -38.0], [100.0, -40.0], [101.0, -41.0], [102.0, -42.0]]
+    )
+    empty = _field([])
+    _activate(planner, obstacle)
+    planner.update(
+        desired=_desired(),
+        perception=_perception(),
+        radar_field=empty,
+        now_s=2.0,
+    )
+
+    decaying = planner.update(
+        desired=_desired(),
+        perception=_perception(),
+        radar_field=empty,
+        now_s=2.2,
+    )
+    forward = planner.update(
+        desired=_desired(),
+        perception=_perception(),
+        radar_field=empty,
+        now_s=2.5,
+    )
+
+    assert 0.3 < decaying.vy_cm_s < 8.0
+    assert forward.vx_cm_s == 10.0
+    assert forward.vy_cm_s == 0.3
+    assert forward.yaw_rate_deg_s == 0.0
+
+
+def test_forward_recovery_blends_to_exact_visual_command_at_timeout():
+    planner = ObstacleBypassPlanner()
+    obstacle = _field(
+        [[99.0, -38.0], [100.0, -40.0], [101.0, -41.0], [102.0, -42.0]]
+    )
+    empty = _field([])
+    _activate(planner, obstacle)
+    planner.update(
+        desired=_desired(),
+        perception=_perception(),
+        radar_field=empty,
+        now_s=2.0,
+    )
+
+    blending = planner.update(
+        desired=_desired(),
+        perception=_perception(),
+        radar_field=empty,
+        now_s=3.75,
+    )
+    completed = planner.update(
+        desired=_desired(),
+        perception=_perception(),
+        radar_field=empty,
+        now_s=4.0,
+    )
+
+    assert 0.3 < blending.vy_cm_s < _desired().vy_cm_s
+    assert completed == _desired()
+    assert planner.state == ObstacleBypassState.NORMAL
+
+
+def test_forward_recovery_radar_safety_reentry_reuses_locked_side():
+    planner = ObstacleBypassPlanner()
+    obstacle = _field(
+        [[99.0, -38.0], [100.0, -40.0], [101.0, -41.0], [102.0, -42.0]]
+    )
+    empty = _field([])
+    safety_only = _field([[50.0, -10.0], [51.0, -11.0]])
+    _activate(planner, obstacle)
+    planner.update(
+        desired=_desired(),
+        perception=_perception(),
+        radar_field=empty,
+        now_s=2.0,
+    )
+
+    output = planner.update(
+        desired=_desired(),
+        perception=_perception(),
+        radar_field=safety_only,
+        now_s=2.1,
+    )
+
+    assert planner.state == ObstacleBypassState.BYPASS_LEFT
+    assert planner.active_bypass_side == 1
+    assert output.vy_cm_s == 8.0
+
+
+def test_forward_recovery_holds_if_visual_path_is_lost():
+    planner = ObstacleBypassPlanner()
+    obstacle = _field(
+        [[99.0, -38.0], [100.0, -40.0], [101.0, -41.0], [102.0, -42.0]]
+    )
+    empty = _field([])
+    _activate(planner, obstacle)
+    planner.update(
+        desired=_desired(),
+        perception=_perception(),
+        radar_field=empty,
+        now_s=2.0,
+    )
+    hold = Command.zero("trajectory_road_lost_hold")
+
+    output = planner.update(
+        desired=hold,
+        perception=_perception(is_road_found=False),
+        radar_field=empty,
+        now_s=2.2,
+    )
+
+    assert output.vx_cm_s == 0.0
+    assert output.vy_cm_s == 0.0
+    assert planner.state == ObstacleBypassState.FORWARD_RECOVERY
+    assert "forward_recovery_visual_hold" in output.reason
+
+
+def test_forward_recovery_can_be_disabled_with_zero_duration():
+    planner = ObstacleBypassPlanner(
+        ObstacleBypassConfig(forward_recovery_s=0.0)
+    )
+    obstacle = _field(
+        [[99.0, -38.0], [100.0, -40.0], [101.0, -41.0], [102.0, -42.0]]
+    )
+    empty = _field([])
+    _activate(planner, obstacle)
+
+    output = planner.update(
+        desired=_desired(),
+        perception=_perception(),
+        radar_field=empty,
+        now_s=2.0,
+    )
+
+    assert output == _desired()
     assert planner.state == ObstacleBypassState.NORMAL

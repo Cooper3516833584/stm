@@ -34,6 +34,7 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.lower_port == "/dev/ttySTM9"
     assert args.loop_hz == 10.0
     assert args.bypass_planner == "legacy"
+    assert args.bypass_forward_transition_s == 2.0
     assert not hasattr(args, "synthetic_radar")
 
 
@@ -49,6 +50,34 @@ def test_smooth_sidestep_is_explicit_and_does_not_replace_legacy_default(tmp_pat
 
     main.validate_args(args)
     assert args.bypass_planner == "smooth-sidestep"
+
+
+def test_legacy_forward_transition_duration_is_configurable(tmp_path):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--bypass-forward-transition-s",
+            "3.25",
+        ]
+    )
+
+    main.validate_args(args)
+    assert args.bypass_forward_transition_s == 3.25
+
+
+def test_negative_forward_transition_duration_is_rejected(tmp_path):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--bypass-forward-transition-s",
+            "-0.1",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="forward-transition"):
+        main.validate_args(args)
 
 
 def test_real_flight_requires_both_takeoff_and_explicit_confirmation(tmp_path):
@@ -110,6 +139,8 @@ def test_visual_snapshot_matches_final_trajectory_defaults():
     production = road_follow_main.parse_args(road_trajectory_main.build_argv([]))
 
     assert config.postprocess_mode == "fast-main"
+    assert config.instance_selection == production.road_instance_selection
+    assert config.npu_model_path == production.model_npu
     # The radar flight experiment deliberately stays below production speed.
     assert config.max_vx_cm_s == 14.0
     assert config.max_vy_cm_s == 10.0
@@ -157,6 +188,8 @@ def test_visual_guidance_passes_final_adaptive_parameters_to_follower():
     guidance = FrozenVisualGuidance()
     snapshot = guidance.config
     follower = guidance.follower.config
+
+    assert guidance.pipeline.yolo._instance_selection == snapshot.instance_selection
 
     for field_name in (
         "reach_radius_px",

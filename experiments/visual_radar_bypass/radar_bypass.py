@@ -24,6 +24,7 @@ class ObstacleBypassState(str, Enum):
     NORMAL = "normal"
     BYPASS_LEFT = "bypass_left"
     BYPASS_RIGHT = "bypass_right"
+    FORWARD_RECOVERY = "forward_recovery"
     RETURN_CENTER = "return_center"
 
 
@@ -43,6 +44,14 @@ class ObstacleBypassConfig:
     max_bypass_s: float = 11.25
     min_confidence: float = 0.4
     return_pixel_deadband_px: float = 35.0
+
+    # Forward-priority handoff from radar sidestep back to visual tracking.
+    forward_recovery_s: float = 2.0
+    forward_recovery_vx_cm_s: float = 10.0
+    forward_recovery_lateral_decay_s: float = 0.4
+    forward_recovery_visual_blend_s: float = 0.5
+    forward_recovery_middle_visual_weight: float = 0.15
+    forward_recovery_radar_reentry_cm: float = 80.0
 
     # Real tubular obstacle extraction.  A peak grid cell is expanded to a
     # small neighborhood so an obstacle crossing cell boundaries stays whole.
@@ -81,6 +90,8 @@ class ObstacleBypassPlanner:
         self._target_y_cm: float | None = None
         self._active_bypass_side: int | None = None
         self._bypass_started_s: float | None = None
+        self._forward_recovery_started_s: float | None = None
+        self._forward_recovery_elapsed_s = 0.0
         self._cluster_point_count = 0
         self._obstacle_center_x_cm: float | None = None
         self._obstacle_center_y_cm: float | None = None
@@ -137,8 +148,37 @@ class ObstacleBypassPlanner:
             if has_obstacle or recently_blocked:
                 bypass_side = self._active_bypass_side or 1
                 return self._bypass_command(desired, bypass_side)
-            self.reset()
-            return desired
+            if not self._visual_command_usable(perception, desired):
+                self.reset()
+                return desired
+            if self.config.forward_recovery_s <= 0.0:
+                self.reset()
+                return desired
+            self._start_forward_recovery(now_s)
+            return self._forward_recovery_command(desired, now_s)
+
+        if self.state == ObstacleBypassState.FORWARD_RECOVERY:
+            if self._radar_requires_bypass(radar_field, has_obstacle):
+                bypass_side = self._active_bypass_side or (
+                    self._opposite_bypass_side(cluster.obstacle_side)
+                    if cluster is not None
+                    else 1
+                )
+                self._set_bypass(bypass_side, now_s)
+                return self._bypass_command(desired, bypass_side)
+            if not self._visual_command_usable(perception, desired):
+                return Command.zero(
+                    _append_reason(
+                        desired.reason,
+                        "tube_obstacle_forward_recovery_visual_hold",
+                    )
+                )
+            assert self._forward_recovery_started_s is not None
+            elapsed_s = max(0.0, now_s - self._forward_recovery_started_s)
+            if elapsed_s >= max(0.0, self.config.forward_recovery_s):
+                self.reset()
+                return desired
+            return self._forward_recovery_command(desired, now_s)
 
         self.reset()
         return desired
@@ -150,6 +190,8 @@ class ObstacleBypassPlanner:
         self._target_y_cm = None
         self._active_bypass_side = None
         self._bypass_started_s = None
+        self._forward_recovery_started_s = None
+        self._forward_recovery_elapsed_s = 0.0
         self._cluster_point_count = 0
         self._obstacle_center_x_cm = None
         self._obstacle_center_y_cm = None
@@ -165,6 +207,7 @@ class ObstacleBypassPlanner:
             "obstacle_center_x_cm": self._obstacle_center_x_cm,
             "obstacle_center_y_cm": self._obstacle_center_y_cm,
             "obstacle_side": _side_name(self._obstacle_side),
+            "forward_recovery_elapsed_s": self._forward_recovery_elapsed_s,
             "config": asdict(self.config),
         }
 
@@ -174,6 +217,13 @@ class ObstacleBypassPlanner:
             and getattr(perception, "is_road_found", False)
             and float(getattr(perception, "confidence", 0.0))
             >= self.config.min_confidence
+        )
+
+    def _visual_command_usable(self, perception, desired: Command) -> bool:
+        return bool(
+            self._road_usable(perception)
+            and "road_lost" not in str(desired.reason)
+            and "visual_unavailable" not in str(desired.reason)
         )
 
     @staticmethod
@@ -262,10 +312,31 @@ class ObstacleBypassPlanner:
             self._active_bypass_side * self.config.activity_half_width_cm
         )
         self._bypass_started_s = float(now_s)
+        self._forward_recovery_started_s = None
+        self._forward_recovery_elapsed_s = 0.0
         self.state = (
             ObstacleBypassState.BYPASS_LEFT
             if bypass_side > 0
             else ObstacleBypassState.BYPASS_RIGHT
+        )
+
+    def _start_forward_recovery(self, now_s: float) -> None:
+        self.state = ObstacleBypassState.FORWARD_RECOVERY
+        self._bypass_started_s = None
+        self._forward_recovery_started_s = float(now_s)
+        self._forward_recovery_elapsed_s = 0.0
+
+    def _radar_requires_bypass(
+        self,
+        radar_field: RadarObstacleField,
+        has_obstacle: bool,
+    ) -> bool:
+        if has_obstacle:
+            return True
+        nearest = radar_field.nearest_forward_obstacle_cm()
+        return bool(
+            nearest is not None
+            and nearest <= self.config.forward_recovery_radar_reentry_cm
         )
 
     def _update_cluster_diagnostics(
@@ -303,6 +374,69 @@ class ObstacleBypassPlanner:
             ),
         )
 
+    def _forward_recovery_command(
+        self,
+        desired: Command,
+        now_s: float,
+    ) -> Command:
+        cfg = self.config
+        assert self._forward_recovery_started_s is not None
+        elapsed_s = max(0.0, float(now_s) - self._forward_recovery_started_s)
+        self._forward_recovery_elapsed_s = elapsed_s
+        total_s = max(1e-6, float(cfg.forward_recovery_s))
+        decay_s = min(total_s, max(0.0, cfg.forward_recovery_lateral_decay_s))
+        blend_s = min(total_s, max(0.0, cfg.forward_recovery_visual_blend_s))
+        middle_weight = _clamp(
+            cfg.forward_recovery_middle_visual_weight,
+            0.0,
+            1.0,
+        )
+        side = self._active_bypass_side or 1
+
+        initial = Command(
+            min(desired.vx_cm_s, cfg.bypass_speed_cm_s),
+            side * cfg.bypass_lateral_speed_cm_s,
+            desired.vz_cm_s,
+            _clamp(
+                desired.yaw_rate_deg_s,
+                -cfg.max_yaw_rate_deg_s,
+                cfg.max_yaw_rate_deg_s,
+            ),
+            desired.reason,
+        )
+        forward = Command(
+            max(0.0, cfg.forward_recovery_vx_cm_s),
+            0.0,
+            desired.vz_cm_s,
+            0.0,
+            desired.reason,
+        )
+        middle = _blend_command(forward, desired, middle_weight)
+
+        if decay_s > 0.0 and elapsed_s < decay_s:
+            phase = _smoothstep(elapsed_s / decay_s)
+            command = _blend_command(initial, middle, phase)
+            visual_weight = phase * middle_weight
+        elif blend_s > 0.0 and elapsed_s > total_s - blend_s:
+            phase = _smoothstep((elapsed_s - (total_s - blend_s)) / blend_s)
+            command = _blend_command(middle, desired, phase)
+            visual_weight = middle_weight + (1.0 - middle_weight) * phase
+        else:
+            command = middle
+            visual_weight = middle_weight
+
+        return Command(
+            command.vx_cm_s,
+            command.vy_cm_s,
+            command.vz_cm_s,
+            command.yaw_rate_deg_s,
+            _append_reason(
+                desired.reason,
+                "tube_obstacle_forward_recovery:"
+                f"t={elapsed_s:.2f}:visual={visual_weight:.2f}",
+            ),
+        )
+
     def _no_gap_command(self, desired: Command) -> Command:
         return Command(
             0.0,
@@ -325,6 +459,26 @@ def _side_name(side: int | None) -> str | None:
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, float(value)))
+
+
+def _smoothstep(value: float) -> float:
+    x = _clamp(value, 0.0, 1.0)
+    return x * x * (3.0 - 2.0 * x)
+
+
+def _blend_command(start: Command, end: Command, alpha: float) -> Command:
+    weight = _clamp(alpha, 0.0, 1.0)
+
+    def blend(a: float, b: float) -> float:
+        return float(a) + weight * (float(b) - float(a))
+
+    return Command(
+        blend(start.vx_cm_s, end.vx_cm_s),
+        blend(start.vy_cm_s, end.vy_cm_s),
+        blend(start.vz_cm_s, end.vz_cm_s),
+        blend(start.yaw_rate_deg_s, end.yaw_rate_deg_s),
+        end.reason,
+    )
 
 
 def _append_reason(reason: str, suffix: str) -> str:

@@ -32,6 +32,7 @@ class FrozenVisualConfig:
         "FlightController/Solutions/model/new_road_seg_v5_final_fp32.nb"
     )
     postprocess_mode: str = "fast-main"
+    instance_selection: str = "highest-confidence"
     flight_height_m: float = 1.0
 
     max_vx_cm_s: float = 14.0
@@ -89,6 +90,7 @@ class FrozenVisualGuidance:
             npu_model_path=cfg.npu_model_path,
             inference_backend="npu",
             postprocess_mode=cfg.postprocess_mode,
+            instance_selection=cfg.instance_selection,
             flight_height_m=cfg.flight_height_m,
             wb_enable=False,
             wb_r=1.0,

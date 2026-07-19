@@ -98,7 +98,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-npu",
         type=Path,
-        default=ROOT / "FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb",
+        default=ROOT / "FlightController/Solutions/model/new_road_seg_v5_final_fp32.nb",
         help="Compiled semantic NPU model.",
     )
     parser.add_argument(

@@ -195,7 +195,7 @@ MODEL_PATH = "FlightController/Solutions/model/road_yolo11n_seg_128.onnx"
 # New semantic road segmentation model compiled for the STM32MP257 VIP9000.
 # Contract: RGB float32 [0, 1], NCHW [1, 3, 256, 256] -> logits
 # [1, 2, 256, 256], where class 0 is background and class 1 is road.
-MODEL_PATH_NPU = "FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb"
+MODEL_PATH_NPU = "FlightController/Solutions/model/new_road_seg_v5_final_fp32.nb"
 
 # Prefer the NPU semantic model by default.  Set this to False (or call
 # configure_model(..., backend="cpu")) to retain the existing CPU YOLO path.
@@ -600,7 +600,7 @@ def _preprocess(frame: np.ndarray, input_size: int):
 
 
 def _preprocess_semantic(frame: np.ndarray, input_size: int) -> np.ndarray:
-    """Match the V4 training contract: full-frame resize, RGB, float [0, 1]."""
+    """Match the V4/V5 training contract: full-frame resize, RGB, float [0, 1]."""
     resized = cv2.resize(frame, (input_size, input_size), interpolation=cv2.INTER_LINEAR)
     image_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
     blob = image_rgb.astype(np.float32) / 255.0

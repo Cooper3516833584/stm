@@ -191,7 +191,7 @@ function update(obstacles_body_cm):
 
 ### 2.1 问题建模
 
-给定 640×480 BGR 图像帧，默认使用 `new_road_seg_v4_final_fp32.nb`
+给定 640×480 BGR 图像帧，默认使用 `new_road_seg_v5_final_fp32.nb`
 在 VIP9000 NPU 上进行二类语义分割，从道路 mask 中提取中线点序列，输出
 像素偏差 $e_{\text{px}}$、中线角度 $\alpha$ 及道路状态。系统只输出当前主路和
 `single` 状态；`fast-main` 使用稀疏低分辨率 mask，`full` 保留全分辨率主路几何。

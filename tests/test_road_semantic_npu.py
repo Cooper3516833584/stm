@@ -59,7 +59,7 @@ def test_backend_switch_keeps_legacy_cpu_model(monkeypatch) -> None:
     road.configure_model(backend="npu", postprocess_mode="full")
     npu_path, is_nb = road._resolve_model_path()
     assert is_nb
-    assert npu_path.endswith("new_road_seg_v4_final_fp32.nb")
+    assert npu_path.endswith("new_road_seg_v5_final_fp32.nb")
     assert road._POSTPROCESS_MODE == road.POSTPROCESS_FULL
 
 

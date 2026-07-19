@@ -29,7 +29,7 @@ class FrozenVisualConfig:
     camera_height: int = 480
     camera_fps: int = 30
     npu_model_path: str = (
-        "FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb"
+        "FlightController/Solutions/model/new_road_seg_v5_final_fp32.nb"
     )
     postprocess_mode: str = "fast-main"
     flight_height_m: float = 1.0

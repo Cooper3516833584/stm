@@ -36,6 +36,9 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.bypass_planner == "legacy"
     assert args.bypass_forward_transition_s == 2.0
     assert not args.right_half_radar_then_visual
+    assert not args.circular_tube_bypass
+    assert args.tube_radius_cm == 15.0
+    assert args.tube_safety_radius_cm == 75.0
     assert not hasattr(args, "synthetic_radar")
 
 
@@ -115,6 +118,65 @@ def test_right_half_handoff_requires_legacy_three_stage_mode(
     )
 
     with pytest.raises(ValueError, match="right-half-radar"):
+        main.validate_args(args)
+
+
+def test_circular_tube_bypass_is_an_independent_explicit_mode(tmp_path):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--circular-tube-bypass",
+            "--tube-radius-cm",
+            "7.5",
+            "--tube-safety-radius-cm",
+            "65",
+        ]
+    )
+
+    main.validate_args(args)
+    assert args.circular_tube_bypass
+    assert args.tube_radius_cm == 7.5
+    assert args.tube_safety_radius_cm == 65.0
+
+
+@pytest.mark.parametrize(
+    "incompatible",
+    [
+        ["--bypass-planner", "smooth-sidestep"],
+        ["--right-half-radar-then-visual"],
+    ],
+)
+def test_circular_tube_mode_rejects_other_experimental_planners(
+    tmp_path,
+    incompatible,
+):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--circular-tube-bypass",
+            *incompatible,
+        ]
+    )
+
+    with pytest.raises(ValueError, match="circular-tube-bypass"):
+        main.validate_args(args)
+
+
+@pytest.mark.parametrize(
+    "radius_option",
+    [
+        ["--tube-radius-cm", "0"],
+        ["--tube-safety-radius-cm", "-1"],
+    ],
+)
+def test_circular_tube_radii_must_be_positive(tmp_path, radius_option):
+    args = main.parse_args(
+        ["--model-npu", _model(tmp_path), *radius_option]
+    )
+
+    with pytest.raises(ValueError, match="radius-cm"):
         main.validate_args(args)
 
 

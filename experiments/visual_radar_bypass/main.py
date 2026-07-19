@@ -36,6 +36,10 @@ from .flight_runtime import (
     wait_for_radars,
     wait_for_visual_road,
 )
+from .circular_tube_bypass import (
+    CircularTubeBypassConfig,
+    CircularTubeBypassPlanner,
+)
 from .radar_bypass import ObstacleBypassConfig, ObstacleBypassPlanner
 from .right_half_handoff import RightHalfRadarHandoff
 from .smooth_sidestep import SmoothSidestepPlanner
@@ -74,6 +78,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "after forward recovery has remained normal for 5 seconds"
         ),
     )
+    parser.add_argument(
+        "--circular-tube-bypass",
+        action="store_true",
+        help="Follow a low-complexity inflated circle around the detected tube",
+    )
+    parser.add_argument("--tube-radius-cm", type=float, default=15.0)
+    parser.add_argument("--tube-safety-radius-cm", type=float, default=75.0)
     parser.add_argument("--record-dir", default="/media/sdcard/stm_records")
     parser.add_argument("--no-record", action="store_true")
     parser.add_argument("--enable-flight", action="store_true")
@@ -104,6 +115,18 @@ def validate_args(args: argparse.Namespace) -> None:
                 "--right-half-radar-then-visual requires a positive "
                 "--bypass-forward-transition-s"
             )
+    if args.circular_tube_bypass:
+        if args.bypass_planner != "legacy":
+            raise ValueError("--circular-tube-bypass requires legacy planner selection")
+        if args.right_half_radar_then_visual:
+            raise ValueError(
+                "--circular-tube-bypass and --right-half-radar-then-visual "
+                "are independent experiments and cannot be combined"
+            )
+    if args.tube_radius_cm <= 0.0:
+        raise ValueError("--tube-radius-cm must be greater than zero")
+    if args.tube_safety_radius_cm <= 0.0:
+        raise ValueError("--tube-safety-radius-cm must be greater than zero")
     if args.enable_flight:
         missing = []
         if not args.auto_takeoff:
@@ -133,11 +156,12 @@ def main(argv: list[str] | None = None) -> None:
     flight_config = FlightRuntimeConfig(
         takeoff_height_cm=args.takeoff_height_cm,
     )
-    session_mode = (
-        "isolated_visual_radar_smooth_sidestep"
-        if args.bypass_planner == "smooth-sidestep"
-        else "isolated_visual_radar_tube_obstacle"
-    )
+    if args.circular_tube_bypass:
+        session_mode = "isolated_visual_radar_circular_tube"
+    elif args.bypass_planner == "smooth-sidestep":
+        session_mode = "isolated_visual_radar_smooth_sidestep"
+    else:
+        session_mode = "isolated_visual_radar_tube_obstacle"
     recorder = SessionRecorder(
         SessionRecorderConfig(
             root_dir=args.record_dir,
@@ -157,6 +181,9 @@ def main(argv: list[str] | None = None) -> None:
                 "radar_points": "physical only; no synthetic injection",
                 "bypass_planner": args.bypass_planner,
                 "right_half_radar_then_visual": args.right_half_radar_then_visual,
+                "circular_tube_bypass": args.circular_tube_bypass,
+                "tube_radius_cm": args.tube_radius_cm,
+                "tube_safety_radius_cm": args.tube_safety_radius_cm,
             },
         )
     )
@@ -174,15 +201,21 @@ def main(argv: list[str] | None = None) -> None:
             forward_corridor_half_width_cm=75.0,
         )
     )
-    planner = (
-        SmoothSidestepPlanner()
-        if args.bypass_planner == "smooth-sidestep"
-        else ObstacleBypassPlanner(
+    if args.circular_tube_bypass:
+        planner = CircularTubeBypassPlanner(
+            CircularTubeBypassConfig(
+                tube_radius_cm=args.tube_radius_cm,
+                safety_radius_cm=args.tube_safety_radius_cm,
+            )
+        )
+    elif args.bypass_planner == "smooth-sidestep":
+        planner = SmoothSidestepPlanner()
+    else:
+        planner = ObstacleBypassPlanner(
             ObstacleBypassConfig(
                 forward_recovery_s=args.bypass_forward_transition_s,
             )
         )
-    )
     right_half_handoff = (
         RightHalfRadarHandoff() if args.right_half_radar_then_visual else None
     )

@@ -47,20 +47,27 @@ def test_backend_switch_keeps_legacy_cpu_model(monkeypatch) -> None:
         "_MODEL_KIND",
         "_USE_CROP_PREPROCESS",
         "_POSTPROCESS_MODE",
+        "_INSTANCE_SELECTION_MODE",
     ):
         monkeypatch.setattr(road, name, getattr(road, name))
 
-    road.configure_model(backend="cpu", postprocess_mode="fast-main")
+    road.configure_model(
+        backend="cpu",
+        postprocess_mode="fast-main",
+        instance_selection="highest-confidence",
+    )
     cpu_path, is_nb = road._resolve_model_path()
     assert not is_nb
     assert cpu_path.endswith("road_yolo11n_seg_128.onnx")
     assert road._POSTPROCESS_MODE == road.POSTPROCESS_FAST_MAIN
+    assert road._INSTANCE_SELECTION_MODE == road.INSTANCE_SELECTION_HIGHEST_CONFIDENCE
 
     road.configure_model(backend="npu", postprocess_mode="full")
     npu_path, is_nb = road._resolve_model_path()
     assert is_nb
     assert npu_path.endswith("new_road_seg_v5_final_fp32.nb")
     assert road._POSTPROCESS_MODE == road.POSTPROCESS_FULL
+    assert road._INSTANCE_SELECTION_MODE == road.INSTANCE_SELECTION_GEOMETRY
 
 
 def test_inference_thread_configures_selected_backend(monkeypatch) -> None:
@@ -77,6 +84,7 @@ def test_inference_thread_configures_selected_backend(monkeypatch) -> None:
             "provider": "NPU_NBGraph",
             "model_kind": road.MODEL_KIND_SEMANTIC,
             "postprocess_mode": road.POSTPROCESS_FAST_MAIN,
+            "instance_selection": road.INSTANCE_SELECTION_HIGHEST_CONFIDENCE,
         },
     )
 
@@ -87,6 +95,7 @@ def test_inference_thread_configures_selected_backend(monkeypatch) -> None:
         npu_model_path="new.nb",
         inference_backend="npu",
         postprocess_mode="fast-main",
+        instance_selection="highest-confidence",
     )
     worker.start()
     worker.stop()
@@ -97,8 +106,42 @@ def test_inference_thread_configures_selected_backend(monkeypatch) -> None:
             "cpu_model_path": "legacy.onnx",
             "npu_model_path": "new.nb",
             "postprocess_mode": "fast-main",
+            "instance_selection": "highest-confidence",
         }
     ]
+
+
+def test_highest_confidence_instance_selection_ignores_geometry(monkeypatch) -> None:
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    centred_lower_confidence = road.RoadInstance(
+        mask=mask,
+        score=0.72,
+        box_xywh=(320.0, 300.0, 180.0, 300.0),
+        area=8_000,
+        bottom_touch_px=120,
+        bottom_cx=320.0,
+    )
+    offset_higher_confidence = road.RoadInstance(
+        mask=mask,
+        score=0.93,
+        box_xywh=(520.0, 220.0, 100.0, 180.0),
+        area=3_000,
+        bottom_touch_px=20,
+        bottom_cx=520.0,
+    )
+    monkeypatch.setattr(
+        road,
+        "_INSTANCE_SELECTION_MODE",
+        road.INSTANCE_SELECTION_HIGHEST_CONFIDENCE,
+    )
+
+    selected = road._select_current_instance(
+        [centred_lower_confidence, offset_higher_confidence],
+        w=640,
+        h=480,
+    )
+
+    assert selected is offset_higher_confidence
 
 
 def test_semantic_preprocess_matches_training_contract() -> None:

@@ -292,6 +292,7 @@ class YOLOInferenceThread:
         npu_model_path: str = "FlightController/Solutions/model/new_road_seg_v5_final_fp32.nb",
         inference_backend: str = "npu",
         postprocess_mode: str = "fast-main",
+        instance_selection: str = "geometry",
         flight_height_m: float = 1.0,
         wb_enable: bool = False,
         wb_r: float = 2.78,
@@ -306,6 +307,7 @@ class YOLOInferenceThread:
         self._npu_model_path = npu_model_path
         self._inference_backend = inference_backend
         self._postprocess_mode = postprocess_mode
+        self._instance_selection = instance_selection
         self._flight_height_m = flight_height_m
         self._wb_enable = wb_enable
         self._wb_r = wb_r
@@ -345,6 +347,7 @@ class YOLOInferenceThread:
             cpu_model_path=self._model_path,
             npu_model_path=self._npu_model_path,
             postprocess_mode=self._postprocess_mode,
+            instance_selection=self._instance_selection,
         )
         io_info = road_perception.get_model_io_info()
 
@@ -363,7 +366,8 @@ class YOLOInferenceThread:
         self._log(
             f"started backend={self._inference_backend} model={selected_model} "
             f"provider={io_info['provider']} kind={io_info['model_kind']} "
-            f"postprocess={io_info['postprocess_mode']}"
+            f"postprocess={io_info['postprocess_mode']} "
+            f"instance_selection={io_info['instance_selection']}"
         )
 
     def stop(self) -> None:
@@ -512,6 +516,7 @@ class PerceptionPipeline:
         npu_model_path: str = "FlightController/Solutions/model/new_road_seg_v5_final_fp32.nb",
         inference_backend: str = "npu",
         postprocess_mode: str = "fast-main",
+        instance_selection: str = "geometry",
         flight_height_m: float = 1.0,
         wb_enable: bool = False,
         wb_r: float = 1.00,
@@ -531,6 +536,7 @@ class PerceptionPipeline:
             npu_model_path=npu_model_path,
             inference_backend=inference_backend,
             postprocess_mode=postprocess_mode,
+            instance_selection=instance_selection,
             flight_height_m=flight_height_m,
             wb_enable=wb_enable,
             wb_r=wb_r,

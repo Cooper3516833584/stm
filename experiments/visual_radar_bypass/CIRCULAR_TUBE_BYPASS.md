@@ -26,15 +26,11 @@
 真实飞行参数示例：
 
 ```bash
-PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \
-  -m experiments.visual_radar_bypass.main \
-  --bypass-planner legacy \
-  --circular-tube-bypass \
-  --enable-flight \
-  --auto-takeoff \
-  --confirm-visual-radar-flight-test \
-  --takeoff-height-cm 100 \
-  --duration-s 60
+python3 circular_tube_bypass_main.py
 ```
+
+该专用入口无参数运行时会真实连接飞控、解锁并起飞至 100 cm，运行 60 秒。
+底层通用入口仍保持无飞控默认值。可以在文件名后覆盖安全范围内的参数，例如
+`python3 circular_tube_bypass_main.py --duration-s 30 --takeoff-height-cm 80`。
 
 该开关不能和 `--right-half-radar-then-visual` 或 `smooth-sidestep` 同时使用。

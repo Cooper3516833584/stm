@@ -19,6 +19,7 @@ def test_trajectory_entry_selects_adaptive_fast_point_controller_defaults():
     args = road_follow_main.parse_args(road_trajectory_main.build_argv([]))
 
     assert args.road_controller == "trajectory-point"
+    assert args.road_instance_selection == "highest-confidence"
     assert args.loop_hz == 12.0
     assert args.trajectory_reach_radius_px == 30.0
     assert args.trajectory_min_forward_lookahead_px == 24.0
@@ -42,12 +43,20 @@ def test_trajectory_entry_selects_adaptive_fast_point_controller_defaults():
 def test_explicit_trajectory_cli_values_override_program_defaults():
     args = road_follow_main.parse_args(
         road_trajectory_main.build_argv(
-            ["--max-vx-cm-s", "6", "--trajectory-reach-radius-px", "24"]
+            [
+                "--max-vx-cm-s",
+                "6",
+                "--trajectory-reach-radius-px",
+                "24",
+                "--road-instance-selection",
+                "geometry",
+            ]
         )
     )
 
     assert args.max_vx_cm_s == 6.0
     assert args.trajectory_reach_radius_px == 24.0
+    assert args.road_instance_selection == "geometry"
 
 
 def test_plain_trajectory_invocation_is_valid_production_auto_flight():

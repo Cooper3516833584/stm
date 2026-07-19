@@ -28,6 +28,8 @@ TAKEOFF_HEIGHT_CM = 100
 DEFAULT_ARGUMENTS = [
     "--road-controller",
     "trajectory-point",
+    "--road-instance-selection",
+    "highest-confidence",
     "--loop-hz",
     "12",
     "--max-vx-cm-s",

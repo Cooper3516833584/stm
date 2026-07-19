@@ -132,6 +132,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Road postprocess: fast sparse main road (default) or full-resolution main road",
     )
     parser.add_argument(
+        "--road-instance-selection",
+        choices=["geometry", "highest-confidence"],
+        default="geometry",
+        help="Select the current road by flight geometry (default) or maximum model confidence",
+    )
+    parser.add_argument(
         "--model",
         default="FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
         help="Legacy lightweight YOLO ONNX path used by --road-model-backend cpu",
@@ -586,6 +592,7 @@ def main(argv: list[str] | None = None) -> None:
                 npu_model_path=args.model_npu,
                 inference_backend=args.road_model_backend,
                 postprocess_mode=args.road_postprocess_mode,
+                instance_selection=args.road_instance_selection,
                 flight_height_m=args.flight_height_m,
                 wb_enable=bool(args.wb_enable),
                 wb_r=args.wb_r,
@@ -608,7 +615,7 @@ def main(argv: list[str] | None = None) -> None:
 
         logger.info(
             "[ROAD] started dry_run={} no_radar={} mode=single-road controller={} camera={} "
-            "backend={} model={} postprocess={}".format(
+            "backend={} model={} postprocess={} instance_selection={}".format(
                 actual_dry_run,
                 args.no_radar,
                 args.road_controller,
@@ -616,6 +623,7 @@ def main(argv: list[str] | None = None) -> None:
                 args.road_model_backend,
                 selected_model,
                 args.road_postprocess_mode,
+                args.road_instance_selection,
             )
         )
         loop_count = 0

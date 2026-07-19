@@ -214,6 +214,17 @@ POSTPROCESS_MODES = {POSTPROCESS_FAST_MAIN, POSTPROCESS_FULL}
 # detection for compatibility and offline diagnostics.
 _POSTPROCESS_MODE = POSTPROCESS_FAST_MAIN
 
+INSTANCE_SELECTION_GEOMETRY = "geometry"
+INSTANCE_SELECTION_HIGHEST_CONFIDENCE = "highest-confidence"
+INSTANCE_SELECTION_MODES = {
+    INSTANCE_SELECTION_GEOMETRY,
+    INSTANCE_SELECTION_HIGHEST_CONFIDENCE,
+}
+# Preserve the established bottom/centre geometry heuristic for existing
+# entry points.  The trajectory entry point explicitly opts into selecting
+# the highest-confidence road instance.
+_INSTANCE_SELECTION_MODE = INSTANCE_SELECTION_GEOMETRY
+
 FAST_MASK_WIDTH = 192
 FAST_MASK_HEIGHT = 144
 FAST_CENTERLINE_ROW_STEP = 2
@@ -383,6 +394,7 @@ def configure_model(
     cpu_model_path: str | None = None,
     npu_model_path: str | None = None,
     postprocess_mode: str = POSTPROCESS_FAST_MAIN,
+    instance_selection: str = INSTANCE_SELECTION_GEOMETRY,
 ) -> None:
     """Configure the road model and reset the cached inference session.
 
@@ -400,10 +412,17 @@ def configure_model(
             f"unsupported road postprocess mode: {postprocess_mode!r}; "
             f"expected one of {sorted(POSTPROCESS_MODES)}"
         )
+    normalized_instance_selection = str(instance_selection).strip().lower()
+    if normalized_instance_selection not in INSTANCE_SELECTION_MODES:
+        raise ValueError(
+            f"unsupported road instance selection mode: {instance_selection!r}; "
+            f"expected one of {sorted(INSTANCE_SELECTION_MODES)}"
+        )
 
     global MODEL_PATH, MODEL_PATH_NPU, _AUTO_USE_NPU, _CPU_ONLY
     global _SESSION, _INPUT_NAME, _MODEL_INPUT_SIZE, _SESSION_PROVIDER
     global _MODEL_KIND, _USE_CROP_PREPROCESS, _POSTPROCESS_MODE
+    global _INSTANCE_SELECTION_MODE
 
     if cpu_model_path is not None:
         MODEL_PATH = str(cpu_model_path)
@@ -415,6 +434,7 @@ def configure_model(
     # operators that are known to crash the board's VSINPU execution provider.
     _CPU_ONLY = True
     _POSTPROCESS_MODE = normalized_postprocess
+    _INSTANCE_SELECTION_MODE = normalized_instance_selection
 
     _SESSION = None
     _INPUT_NAME = None
@@ -1469,6 +1489,12 @@ def _select_current_instance(
     if not candidates:
         return None
 
+    if _INSTANCE_SELECTION_MODE == INSTANCE_SELECTION_HIGHEST_CONFIDENCE:
+        return max(
+            candidates,
+            key=lambda inst: (inst.score, inst.area, inst.bottom_touch_px),
+        )
+
     bottom_candidates = [
         inst
         for inst in candidates
@@ -1755,6 +1781,7 @@ def get_model_io_info() -> dict[str, Any]:
         "provider": _SESSION_PROVIDER,
         "model_kind": _MODEL_KIND,
         "postprocess_mode": _POSTPROCESS_MODE,
+        "instance_selection": _INSTANCE_SELECTION_MODE,
         "input_size": _MODEL_INPUT_SIZE or INP_SIZE,
         "inputs": [
             {"name": item.name, "shape": item.shape, "type": item.type}
@@ -1920,7 +1947,7 @@ def get_road_perception(
             pixel_error=float(pixel_error),
             centerline_angle=float(centerline_angle),
             path_width_px=float(path_width_px),
-            confidence=float(confidence),
+            confidence=float(current.score),
             corrected_pixel_error=float(corrected_pixel_error),
             centerline_points=[(float(p[0]), float(p[1])) for p in points],
             trajectory_points=[(float(p[0]), float(p[1])) for p in points],
@@ -1929,15 +1956,17 @@ def get_road_perception(
             branch_decision="disabled",
             debug_msg=(
                 f"instances={len(valid_instances)}, "
+                f"instance_selection={_INSTANCE_SELECTION_MODE}, "
+                f"selected_conf={current.score:.3f}, "
                 "branch_detection=disabled, "
                 f"offset_corr_px={correction_px:.1f}, "
                 f"corrected_error={corrected_pixel_error:.1f}"
             ),
-            debug_mask=merged_mask,
+            debug_mask=current.mask,
         )
 
         if debug_save_path:
-            _save_debug_image(frame_bgr, merged_mask, result, debug_save_path)
+            _save_debug_image(frame_bgr, current.mask, result, debug_save_path)
 
         return result
     except Exception as exc:

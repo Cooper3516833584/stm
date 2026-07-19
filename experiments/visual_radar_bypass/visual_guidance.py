@@ -57,9 +57,9 @@ class FrozenVisualConfig:
     max_planar_accel_cm_s2: float = 24.0
     max_yaw_accel_deg_s2: float = 20.0
     degraded_speed_scale: float = 0.85
-    curvature_slowdown_start_deg: float = 8.0
-    curvature_full_slowdown_deg: float = 35.0
-    min_curve_speed_cm_s: float = 10.0
+    curvature_slowdown_start_deg: float = 12.0
+    curvature_full_slowdown_deg: float = 42.0
+    min_curve_speed_cm_s: float = 12.0
 
 
 @dataclass(frozen=True)

@@ -38,6 +38,12 @@ DEFAULT_ARGUMENTS = [
     "12",
     "--max-yaw-rate-deg-s",
     "10",
+    "--trajectory-min-curve-speed-cm-s",
+    "12",
+    "--trajectory-curvature-slowdown-start-deg",
+    "12",
+    "--trajectory-curvature-full-slowdown-deg",
+    "42",
     "--require-model",
     "--no-radar",
 ]

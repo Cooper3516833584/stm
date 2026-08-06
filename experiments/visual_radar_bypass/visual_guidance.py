@@ -1,11 +1,11 @@
-"""Frozen copy of the current trajectory-vision orchestration.
+"""Isolated copy of the final trajectory-vision orchestration.
 
 This module deliberately does not add radar behavior to the production visual
 files.  It calls their stable public APIs, while keeping the NPU model,
-postprocess and trajectory-controller configuration used by
-``road_trajectory_main.py`` at commit e76e2d3 in this isolated experiment.
-Future obstacle-test work should not edit this file unless the visual snapshot
-itself is intentionally refreshed.
+postprocess and compatible trajectory-controller configuration used by the
+current ``road_trajectory_main.py``.  The obstacle experiment intentionally
+retains lower 14/10 cm/s planar limits; geometry, filtering, latency
+compensation and curve handling match the final visual entry.
 """
 
 from __future__ import annotations
@@ -29,28 +29,38 @@ class FrozenVisualConfig:
     camera_height: int = 480
     camera_fps: int = 30
     npu_model_path: str = (
-        "FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb"
+        "FlightController/Solutions/model/new_road_seg_v5_final_fp32.nb"
     )
     postprocess_mode: str = "fast-main"
+    instance_selection: str = "highest-confidence"
     flight_height_m: float = 1.0
 
-    max_vx_cm_s: float = 10.0
-    max_vy_cm_s: float = 8.0
+    max_vx_cm_s: float = 14.0
+    max_vy_cm_s: float = 10.0
     max_yaw_rate_deg_s: float = 10.0
-    reach_radius_px: float = 20.0
-    min_forward_lookahead_px: float = 12.0
-    tangent_window_points: int = 3
+    reach_radius_px: float = 30.0
+    min_forward_lookahead_px: float = 24.0
+    max_forward_lookahead_px: float = 64.0
+    lookahead_speed_gain_px_per_cm_s: float = 1.2
+    latency_compensation_s: float = 0.134
+    physical_road_width_cm: float = 50.0
+    max_latency_prediction_px: float = 16.0
+    tangent_window_points: int = 5
     tangent_kp_yaw: float = 0.25
     angle_deadband_deg: float = 3.0
+    lateral_deadband_px: float = 8.0
     yaw_sign: float = 1.0
     lateral_sign: float = -1.0
-    target_filter_tau_s: float = 0.20
-    tangent_filter_tau_s: float = 0.25
+    target_filter_tau_s: float = 0.15
+    tangent_filter_tau_s: float = 0.20
     target_filter_max_rate_px_s: float = 300.0
     tangent_filter_max_rate_deg_s: float = 45.0
-    max_planar_accel_cm_s2: float = 16.0
+    max_planar_accel_cm_s2: float = 24.0
     max_yaw_accel_deg_s2: float = 20.0
-    degraded_speed_scale: float = 0.75
+    degraded_speed_scale: float = 0.85
+    curvature_slowdown_start_deg: float = 12.0
+    curvature_full_slowdown_deg: float = 42.0
+    min_curve_speed_cm_s: float = 12.0
 
 
 @dataclass(frozen=True)
@@ -80,6 +90,7 @@ class FrozenVisualGuidance:
             npu_model_path=cfg.npu_model_path,
             inference_backend="npu",
             postprocess_mode=cfg.postprocess_mode,
+            instance_selection=cfg.instance_selection,
             flight_height_m=cfg.flight_height_m,
             wb_enable=False,
             wb_r=1.0,
@@ -96,9 +107,17 @@ class FrozenVisualGuidance:
                 max_yaw_rate_deg_s=cfg.max_yaw_rate_deg_s,
                 reach_radius_px=cfg.reach_radius_px,
                 min_forward_lookahead_px=cfg.min_forward_lookahead_px,
+                max_forward_lookahead_px=cfg.max_forward_lookahead_px,
+                lookahead_speed_gain_px_per_cm_s=(
+                    cfg.lookahead_speed_gain_px_per_cm_s
+                ),
+                latency_compensation_s=cfg.latency_compensation_s,
+                physical_road_width_cm=cfg.physical_road_width_cm,
+                max_latency_prediction_px=cfg.max_latency_prediction_px,
                 tangent_window_points=cfg.tangent_window_points,
                 tangent_kp_yaw=cfg.tangent_kp_yaw,
                 tangent_deadband_deg=cfg.angle_deadband_deg,
+                lateral_deadband_px=cfg.lateral_deadband_px,
                 yaw_sign=cfg.yaw_sign,
                 lateral_sign=cfg.lateral_sign,
                 target_filter_tau_s=cfg.target_filter_tau_s,
@@ -108,6 +127,9 @@ class FrozenVisualGuidance:
                 max_planar_accel_cm_s2=cfg.max_planar_accel_cm_s2,
                 max_yaw_accel_deg_s2=cfg.max_yaw_accel_deg_s2,
                 degraded_speed_scale=cfg.degraded_speed_scale,
+                curvature_slowdown_start_deg=cfg.curvature_slowdown_start_deg,
+                curvature_full_slowdown_deg=cfg.curvature_full_slowdown_deg,
+                min_curve_speed_cm_s=cfg.min_curve_speed_cm_s,
             )
         )
 

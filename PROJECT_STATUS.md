@@ -2,7 +2,7 @@
 
 **项目名称**: Cooper_drone (基于 MYiR 开发板的无人机机载/伴随计算机开发)
 **当前阶段**: M8 阶段 — 新道路语义分割模型已通过板端 NPU 验收并接入默认寻路链路
-**最后更新**: 2026年7月17日 (`new_road_seg_v4_final_fp32.nb` 已作为默认 NPU 模型；V4 保持 V3 接口和结构，仅更新权重并提升特殊路面精度；原 128×128 YOLO ONNX CPU 实现保留为显式回退)
+**最后更新**: 2026年7月19日 (`new_road_seg_v5_final_fp32.nb` 已作为默认 NPU 模型；V5 保持 V4 接口和结构，仅更新权重以适配新增特殊场地并抑制负样本误检；原 128×128 YOLO ONNX CPU 实现保留为显式回退)
 
 ## 0. 2026-07-17 新道路语义分割 NPU 模型接入
 
@@ -20,8 +20,13 @@
   范围活动，候选与障碍距离必须严格大于 75cm。当前左侧树地图默认
   `--road-bypass-known-clear-side right`，只在右侧选路并忽略该已确认空侧的杂散回波；
   非演示环境必须改为 `auto`
-- 默认 NPU 模型：`FlightController/Solutions/model/new_road_seg_v4_final_fp32.nb`
-- V4 模型 SHA-256：`1172334fd1e24d597add9cb7d982493c1a59a2d09e740977875fe42d1c18a386`
+- 默认 NPU 模型：`FlightController/Solutions/model/new_road_seg_v5_final_fp32.nb`
+- V5 模型 SHA-256：`c307a7321f91ce94ab290cbf34def16f66bda9ca5f96b241fe01750dc521774d`
+- V5 相对 V4：结构和输入输出合同完全不变；旧 576 张道路 Road IoU 由 0.936883 变为
+  0.933920（回退 0.002962），Recall 提升至 0.973331；新增特殊场地 137 张道路 Road IoU
+  由 0.476675 提升至 0.908729，Recall 由 0.943512 提升至 0.965789
+- V5 负样本盲测：16 张非道路图的误检像素占比由 V4 的 0.776596 降至 0.013550；
+  仍不能保证对未来未覆盖负样本完全零误检
 - V4 相对 V3：结构、输入输出合同和后处理保持不变；两折基础道路 Road IoU 平均 0.8629，
   特殊道路平均 0.8705；31 张应用回归全部找到道路，原始 mask 平均 IoU 由 V3 的 0.8919
   提升至 0.9308
@@ -30,7 +35,7 @@
 - CPU 回退：`--road-model-backend cpu`，继续使用 `road_yolo11n_seg_128.onnx`，后处理同样为单主路
 - V4 板端验收：冷启动 45.99ms，100 轮稳态平均 25.21ms，已记录 `/dev/galcore` 成功 ioctl；
   冻结输入 NBG 对 ONNX relative L2 为 0.0004025，mask 一致率 100%
-- 生产代码板测：未传 `--model-npu` 时明确加载 V4，静态道路图 5/5 找到道路；当前摄像头
+- 生产代码板测：未传 `--model-npu` 时明确加载默认模型；V4 静态道路图 5/5 找到道路；当前摄像头
   画面对 V3/V4 均因中心线点不足返回 lost，因此不将该场景的 road-found 结果归因于 V4
 - V3 同结构后处理性能基线：`fast-main` 在 192×144 mask 上隔行提取主路中线，三轮各 100 帧平均
   73.7/74.8/74.6ms，综合 74.4ms，p95 最高 77.8ms，最慢单帧 80.8ms，road found 300/300。
@@ -55,16 +60,122 @@
 ## 1. 项目概述与硬件底盘状态
 本项目旨在配置和开发一套适配于无人机的机载计算机系统，负责上层逻辑处理、激光雷达避障算法以及与底层匿名飞控（灵霄）的二进制串口协议通信（非 MAVLink）。
 
+新 SD 卡重烧录后的已完成事项与恢复待办见
+[SYSTEM_REFLASH_RECOVERY_CHECKLIST.md](SYSTEM_REFLASH_RECOVERY_CHECKLIST.md)。
+
 * **核心板**: MYiR MYD-LD25X (STM32MP257, Cortex-A35 双核架构)。
-* **操作系统**: ~~Debian 12 (Bookworm)~~ → **OpenSTLinux v6.0** (Yocto Scarthgap) aarch64, Linux 内核 6.6.48, gcnano 6.4.19.4。
+* **操作系统**: 当前重烧录系统为 **OpenSTLinux 5.0.3-snapshot-20250320** (Yocto Scarthgap) aarch64，Linux 内核 `6.6.48-gbebcf479fd77`。
 * **飞控通信**: 匿名飞控（灵霄）二进制协议，UART 串口 500000 baud。协议栈位于 `FlightController/Base.py` → `Protocal.py` → `Application.py`。
 * **存储与内存**:
   * 板载 RAM **2GB**，严禁将日志或大文件写入 `/tmp`（tmpfs 占用 RAM），否则触发 OOM 系统卡死。
-  * SD 卡 (30G) 现为系统盘 (rootfs + userfs)，eMMC (7.3G) 已同步烧录可独立启动。
-  * 代码仓库位于 `/usr/local/ObstacleAvoidanceDrone` (userfs 分区, 1.3G)，虚拟环境位于 `/usr/local/UFC_venv`。
-  * WiFi 已配置开机自启 (`wpa_supplicant@wlan0.service`)，IP 固定 192.168.31.199。
+  * 新 SD 卡 (29.1G) 为当前系统盘；rootfs 为 4G，userfs 为 1.3G，剩余大部分容量尚未规划。
+  * 当前 `/usr/local/ObstacleAvoidanceDrone` 和 `/usr/local/UFC_venv` 均不存在，等待完成 SD 卡空间规划后恢复。
+  * eMMC (7.3G) 暂不启用、不同步、不重烧，后续主要操作新 SD 卡。
+  * WiFi 历史配置为开机启动 (`wpa_supplicant@wlan0.service`) 和固定地址 `192.168.31.199`；
+    系统重新烧录后的实测状态为：`wlan0` 处于 `DOWN`、未连接 WiFi，
+    `wpa_supplicant@wlan0.service` 为 `disabled/inactive`，且 `/etc/wpa_supplicant` 下没有接口配置文件。
+    因此当前没有 WiFi 开机自连，不能沿用历史地址。
+
+### 1.1 开发板联网与 SSH
+
+完整配置与排障过程见 [BLUETOOTH_PAN_HOST_NETWORKING.md](BLUETOOTH_PAN_HOST_NETWORKING.md)。
+
+#### 当前可用方案：Windows 蓝牙 PAN/NAP
+
+开发板当前充当蓝牙 **NAP**，Windows 电脑充当 **PANU** 客户端并通过 Windows NAT
+转发电脑的上游网络。该方案不依赖板端 WiFi，可用于 SSH 登录和板端访问互联网。
+
+| 项目 | 当前值 |
+| --- | --- |
+| Windows 蓝牙网络接口 | `蓝牙网络连接`，`192.168.137.1/24` |
+| Windows NAT | `MYIR-Bluetooth-NAT`，内部网段 `192.168.137.0/24` |
+| 开发板蓝牙网桥 | `pan0`，`192.168.137.2/24` |
+| 蓝牙数据接口 | `bnep0`，连接后自动加入 `pan0` |
+| 板端默认路由 | `default via 192.168.137.1 dev pan0 metric 50` |
+| 板端 NAP 服务 | `myir-bt-nap.service`，已设为开机启动 |
+| NAP 注册脚本 | `/usr/local/sbin/myir-bt-nap-register.py` |
+| SSH 服务 | Dropbear，由 `dropbear.socket` 监听 TCP 22 |
+| 蓝牙 SSH 地址 | `root@192.168.137.2` |
+
+已验证板端可以通过该链路访问 `1.1.1.1`，也能解析并访问 `github.com`。当前烧录镜像
+没有安装 `git`，所以“网络可用”不等于已经能执行 `git fetch/pull`；安装软件包属于系统修改，
+应另行确认后再执行。
+
+Windows/开发板重启后的恢复顺序：
+
+1. 确认电脑本身已连接互联网，并打开蓝牙。
+2. 在经典“设备和打印机”中找到 `myd-ld25x`，选择“连接方式 → 接入点”。Windows 11
+   的新“蓝牙和其他设备”页面只显示配对/音频状态，不一定提供 PAN 接入点操作。
+3. 确认 Windows 的“蓝牙网络连接”处于已连接状态，地址仍为 `192.168.137.1/24`。
+4. 通过 `ssh root@192.168.137.2` 登录开发板。
+
+常用只读检查：
+
+```powershell
+# Windows
+Get-NetAdapter -Name '蓝牙网络连接'
+Get-NetIPAddress -InterfaceAlias '蓝牙网络连接' -AddressFamily IPv4
+Get-NetNat -Name 'MYIR-Bluetooth-NAT'
+ping 192.168.137.2
+ssh root@192.168.137.2
+```
+
+```bash
+# 开发板串口
+systemctl status myir-bt-nap.service --no-pager
+systemctl status dropbear.socket --no-pager
+ip -brief address show pan0
+ip -brief link show bnep0
+ip route
+ping -c 3 1.1.1.1
+```
+
+注意事项：
+
+- 重启验证尚未执行。仅开发板重启时，板端 NAP 服务会自动启动且不需要重新配置，但原有
+  BNEP 会话会随重启断开；Windows 不保证自动重连，若“蓝牙网络连接”没有恢复，仍需手动执行
+  “连接方式 → 接入点”。PC 重启时同样按需要重新执行该操作，配对本身通常无需重做。
+- `bnep0` 只有建立 PAN 连接后才会出现；仅“已配对”不代表网络已连接。
+- 蓝牙 NAP 注册器常驻运行是必要条件，不能用一次性的 D-Bus 命令代替；调用进程退出后
+  BlueZ 会撤销 NAP 注册。
+- 当前板端蓝牙设为不可发现、不可配对，已配对电脑仍可连接。若需要配对新设备，应临时
+  打开可发现/可配对，完成后再关闭。
+- 若重烧录导致 Dropbear 主机密钥变化，Windows 会报告 SSH host key 不匹配。只删除该地址
+  的旧记录：`ssh-keygen -R 192.168.137.2`，不要清空整个 `known_hosts`。
+- 本项目源码不得在板端通过 SSH 直接修改；源码修改先在本地/云端 Git 仓库完成，板端只拉取
+  已批准并已提交的版本，且板端不得向远端 push。
+
+#### 当前不执行：通过 WiFi/手机热点使用 SSH
+
+当前已经决定使用蓝牙 PAN/NAT 作为主要联网方式，不恢复板端 WiFi。以下内容仅保留为未来需求
+变化时的注意事项，不属于本次系统恢复待办：
+
+1. 电脑和开发板必须同时连接同一个手机热点。手机必须允许热点客户端之间互访；若启用了
+   “AP/客户端隔离”，两台设备即使都能上网也无法互相 SSH。
+2. 首次配置建议使用 **2.4 GHz + WPA2-Personal**，SSID 和密码先使用 ASCII 字符；避免
+   WPA3-only、隐藏 SSID 和 6 GHz，以减少嵌入式驱动兼容变量。
+3. 不要把现有 WiFi 固定地址 `192.168.31.199` 直接套用到手机热点。应先使用 DHCP，并从
+   串口执行 `ip -4 address show wlan0`、`ip route` 获取实际地址和网关，确认无地址冲突后再
+   决定是否固定地址。
+4. 如果手机热点也使用 `192.168.137.0/24`，它会与当前蓝牙 PAN 网段冲突。此时应断开蓝牙
+   PAN 后再测试 WiFi，或经批准后修改其中一个网段；不要让 `wlan0` 和 `pan0` 同时承载相同
+   IPv4 子网。
+5. 同时保留 WiFi 和蓝牙时要检查两条默认路由的 metric。SSH 使用哪个接口由目标 IP 决定，
+   板端访问远端仓库则走 metric 更低的默认路由；出现“能 SSH 但不能联网”时先看 `ip route`。
+6. 手机热点通常采用动态地址，重连后板端 IP 可能变化。优先通过串口查看地址；
+   `myd-ld25x.local` 仅在 Windows mDNS 与热点组播未被隔离时可作为辅助，不能当作唯一入口。
+7. 切换网络不会改变 SSH 用户和服务，但重烧录会生成新的 Dropbear 主机密钥。连接新 IP 时
+   首次确认指纹；只有确认是本板重烧录后，才对具体 IP 使用 `ssh-keygen -R <旧地址>`。
+8. 若 SSH 正常而远端仓库失败，应分别检查 DNS、运营商网络和 `git` 是否已安装，不要直接
+   归因于 WiFi 硬件。
+9. 仓库 `AGENTS.md` 中的 SSH 主机别名 `myd-ld25x` 当前指向蓝牙地址 `192.168.137.2`。
+   即使 PC 更换上游网络，该地址也保持不变；前提是蓝牙 PAN 仍处于连接状态。
 
 ## 2. 混合架构 Python 隔离舱 (UFC_venv) 状态
+> 本节及后续涉及项目环境的“已就绪”结论主要记录重烧录前的历史状态。当前系统尚未恢复
+> 项目仓库、`UFC_venv` 和 Python/NPU 用户态依赖；以
+> [SYSTEM_REFLASH_RECOVERY_CHECKLIST.md](SYSTEM_REFLASH_RECOVERY_CHECKLIST.md) 的实测清单为准。
+
 为了在羸弱的 ARM64 算力下规避现场编译导致的 OOM (内存爆满) 宕机，本项目采用**"APT底层预编译 + PIP上层轻量包"的半透膜沙盒架构**。
 
 * **隔离舱机制**: 使用 `virtualenv --system-site-packages /usr/local/UFC_venv` 建立，允许虚拟环境向下继承操作系统的底层 C++ 依赖。所有终端自动激活 (`.bashrc` + `.bash_profile`)。

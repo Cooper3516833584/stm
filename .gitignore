@@ -34,3 +34,5 @@ dist/
 # Archived untracked files
 /_codex_files/
 /_other_untracked/
+
+/tmp/

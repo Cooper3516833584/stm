@@ -3,12 +3,17 @@ from types import SimpleNamespace
 
 import pytest
 
+import road_follow_main
+import road_trajectory_main
 from experiments.visual_radar_bypass import main
 from experiments.visual_radar_bypass.flight_runtime import (
     wait_for_radars,
     wait_for_visual_road,
 )
-from experiments.visual_radar_bypass.visual_guidance import FrozenVisualConfig
+from experiments.visual_radar_bypass.visual_guidance import (
+    FrozenVisualConfig,
+    FrozenVisualGuidance,
+)
 
 
 def _model(tmp_path: Path) -> str:
@@ -27,7 +32,152 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.camera_index == 7
     assert args.upper_port == "/dev/ttySTM4"
     assert args.lower_port == "/dev/ttySTM9"
+    assert args.loop_hz == 10.0
+    assert args.bypass_planner == "legacy"
+    assert args.bypass_forward_transition_s == 2.0
+    assert not args.right_half_radar_then_visual
+    assert not args.circular_tube_bypass
+    assert args.tube_radius_cm == 15.0
+    assert args.tube_safety_radius_cm == 75.0
     assert not hasattr(args, "synthetic_radar")
+
+
+def test_smooth_sidestep_is_explicit_and_does_not_replace_legacy_default(tmp_path):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--bypass-planner",
+            "smooth-sidestep",
+        ]
+    )
+
+    main.validate_args(args)
+    assert args.bypass_planner == "smooth-sidestep"
+
+
+def test_legacy_forward_transition_duration_is_configurable(tmp_path):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--bypass-forward-transition-s",
+            "3.25",
+        ]
+    )
+
+    main.validate_args(args)
+    assert args.bypass_forward_transition_s == 3.25
+
+
+def test_negative_forward_transition_duration_is_rejected(tmp_path):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--bypass-forward-transition-s",
+            "-0.1",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="forward-transition"):
+        main.validate_args(args)
+
+
+def test_right_half_radar_then_visual_is_explicit(tmp_path):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--right-half-radar-then-visual",
+        ]
+    )
+
+    main.validate_args(args)
+    assert args.right_half_radar_then_visual
+
+
+@pytest.mark.parametrize(
+    "incompatible",
+    [
+        ["--bypass-planner", "smooth-sidestep"],
+        ["--bypass-forward-transition-s", "0"],
+    ],
+)
+def test_right_half_handoff_requires_legacy_three_stage_mode(
+    tmp_path,
+    incompatible,
+):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--right-half-radar-then-visual",
+            *incompatible,
+        ]
+    )
+
+    with pytest.raises(ValueError, match="right-half-radar"):
+        main.validate_args(args)
+
+
+def test_circular_tube_bypass_is_an_independent_explicit_mode(tmp_path):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--circular-tube-bypass",
+            "--tube-radius-cm",
+            "7.5",
+            "--tube-safety-radius-cm",
+            "65",
+        ]
+    )
+
+    main.validate_args(args)
+    assert args.circular_tube_bypass
+    assert args.tube_radius_cm == 7.5
+    assert args.tube_safety_radius_cm == 65.0
+
+
+@pytest.mark.parametrize(
+    "incompatible",
+    [
+        ["--bypass-planner", "smooth-sidestep"],
+        ["--right-half-radar-then-visual"],
+    ],
+)
+def test_circular_tube_mode_rejects_other_experimental_planners(
+    tmp_path,
+    incompatible,
+):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--circular-tube-bypass",
+            *incompatible,
+        ]
+    )
+
+    with pytest.raises(ValueError, match="circular-tube-bypass"):
+        main.validate_args(args)
+
+
+@pytest.mark.parametrize(
+    "radius_option",
+    [
+        ["--tube-radius-cm", "0"],
+        ["--tube-safety-radius-cm", "-1"],
+    ],
+)
+def test_circular_tube_radii_must_be_positive(tmp_path, radius_option):
+    args = main.parse_args(
+        ["--model-npu", _model(tmp_path), *radius_option]
+    )
+
+    with pytest.raises(ValueError, match="radius-cm"):
+        main.validate_args(args)
 
 
 def test_real_flight_requires_both_takeoff_and_explicit_confirmation(tmp_path):
@@ -84,15 +234,82 @@ def test_real_flight_rejects_unsafe_overrides(tmp_path, unsafe):
         main.validate_args(main.parse_args([*base, *unsafe]))
 
 
-def test_visual_snapshot_matches_existing_trajectory_defaults():
+def test_visual_snapshot_matches_final_trajectory_defaults():
     config = FrozenVisualConfig()
+    production = road_follow_main.parse_args(road_trajectory_main.build_argv([]))
 
     assert config.postprocess_mode == "fast-main"
-    assert config.max_vx_cm_s == 10.0
-    assert config.max_vy_cm_s == 8.0
-    assert config.max_yaw_rate_deg_s == 10.0
-    assert config.reach_radius_px == 20.0
-    assert config.min_forward_lookahead_px == 12.0
+    assert config.instance_selection == production.road_instance_selection
+    assert config.npu_model_path == production.model_npu
+    # The radar flight experiment deliberately stays below production speed.
+    assert config.max_vx_cm_s == 14.0
+    assert config.max_vy_cm_s == 10.0
+    assert config.max_yaw_rate_deg_s == production.max_yaw_rate_deg_s
+    assert config.reach_radius_px == production.trajectory_reach_radius_px
+    assert (
+        config.min_forward_lookahead_px
+        == production.trajectory_min_forward_lookahead_px
+    )
+    assert (
+        config.max_forward_lookahead_px
+        == production.trajectory_max_forward_lookahead_px
+    )
+    assert (
+        config.lookahead_speed_gain_px_per_cm_s
+        == production.trajectory_lookahead_speed_gain_px_per_cm_s
+    )
+    assert (
+        config.latency_compensation_s
+        == production.trajectory_latency_compensation_s
+    )
+    assert config.physical_road_width_cm == 50.0
+    assert config.max_latency_prediction_px == 16.0
+    assert config.tangent_window_points == production.trajectory_tangent_window_points
+    assert config.lateral_deadband_px == production.trajectory_lateral_deadband_px
+    assert config.target_filter_tau_s == production.trajectory_target_filter_tau_s
+    assert config.tangent_filter_tau_s == production.trajectory_tangent_filter_tau_s
+    assert (
+        config.max_planar_accel_cm_s2
+        == production.trajectory_max_planar_accel_cm_s2
+    )
+    assert config.degraded_speed_scale == production.trajectory_degraded_speed_scale
+    assert (
+        config.curvature_slowdown_start_deg
+        == production.trajectory_curvature_slowdown_start_deg
+    )
+    assert (
+        config.curvature_full_slowdown_deg
+        == production.trajectory_curvature_full_slowdown_deg
+    )
+    assert config.min_curve_speed_cm_s == production.trajectory_min_curve_speed_cm_s
+
+
+def test_visual_guidance_passes_final_adaptive_parameters_to_follower():
+    guidance = FrozenVisualGuidance()
+    snapshot = guidance.config
+    follower = guidance.follower.config
+
+    assert guidance.pipeline.yolo._instance_selection == snapshot.instance_selection
+
+    for field_name in (
+        "reach_radius_px",
+        "min_forward_lookahead_px",
+        "max_forward_lookahead_px",
+        "lookahead_speed_gain_px_per_cm_s",
+        "latency_compensation_s",
+        "physical_road_width_cm",
+        "max_latency_prediction_px",
+        "tangent_window_points",
+        "lateral_deadband_px",
+        "target_filter_tau_s",
+        "tangent_filter_tau_s",
+        "max_planar_accel_cm_s2",
+        "degraded_speed_scale",
+        "curvature_slowdown_start_deg",
+        "curvature_full_slowdown_deg",
+        "min_curve_speed_cm_s",
+    ):
+        assert getattr(follower, field_name) == getattr(snapshot, field_name)
 
 
 class _ReadyRadars:

@@ -1,0 +1,7 @@
+ssh root@10.45.108.226
+cd /media/sdcard/projects/ObstacleAvoidanceDrone
+python3 road_trajectory_main.py#单巡线
+
+
+cd /media/sdcard/projects/ObstacleAvoidanceDrone
+python3 circular_tube_bypass_main.py

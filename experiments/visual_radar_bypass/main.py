@@ -36,7 +36,13 @@ from .flight_runtime import (
     wait_for_radars,
     wait_for_visual_road,
 )
-from .radar_bypass import ObstacleBypassPlanner
+from .circular_tube_bypass import (
+    CircularTubeBypassConfig,
+    CircularTubeBypassPlanner,
+)
+from .radar_bypass import ObstacleBypassConfig, ObstacleBypassPlanner
+from .right_half_handoff import RightHalfRadarHandoff
+from .smooth_sidestep import SmoothSidestepPlanner
 from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance
 
 
@@ -52,6 +58,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--loop-hz", type=float, default=10.0)
     parser.add_argument("--duration-s", type=float, default=60.0)
     parser.add_argument("--radar-timeout-s", type=float, default=0.5)
+    parser.add_argument(
+        "--bypass-planner",
+        choices=("legacy", "smooth-sidestep"),
+        default="legacy",
+        help="Select the unchanged legacy planner or the isolated smooth sidestep",
+    )
+    parser.add_argument(
+        "--bypass-forward-transition-s",
+        type=float,
+        default=2.0,
+        help="Legacy planner forward-priority radar-to-vision handoff duration",
+    )
+    parser.add_argument(
+        "--right-half-radar-then-visual",
+        action="store_true",
+        help=(
+            "Use only clockwise 0..180 degree radar points, then stop radar "
+            "after forward recovery has remained normal for 5 seconds"
+        ),
+    )
+    parser.add_argument(
+        "--circular-tube-bypass",
+        action="store_true",
+        help="Follow a low-complexity inflated circle around the detected tube",
+    )
+    parser.add_argument("--tube-radius-cm", type=float, default=15.0)
+    parser.add_argument("--tube-safety-radius-cm", type=float, default=75.0)
     parser.add_argument("--record-dir", default="/media/sdcard/stm_records")
     parser.add_argument("--no-record", action="store_true")
     parser.add_argument("--enable-flight", action="store_true")
@@ -72,6 +105,28 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--loop-hz must be greater than zero")
     if args.duration_s <= 0.0:
         raise ValueError("--duration-s must be greater than zero")
+    if args.bypass_forward_transition_s < 0.0:
+        raise ValueError("--bypass-forward-transition-s cannot be negative")
+    if args.right_half_radar_then_visual:
+        if args.bypass_planner != "legacy":
+            raise ValueError("--right-half-radar-then-visual requires legacy planner")
+        if args.bypass_forward_transition_s <= 0.0:
+            raise ValueError(
+                "--right-half-radar-then-visual requires a positive "
+                "--bypass-forward-transition-s"
+            )
+    if args.circular_tube_bypass:
+        if args.bypass_planner != "legacy":
+            raise ValueError("--circular-tube-bypass requires legacy planner selection")
+        if args.right_half_radar_then_visual:
+            raise ValueError(
+                "--circular-tube-bypass and --right-half-radar-then-visual "
+                "are independent experiments and cannot be combined"
+            )
+    if args.tube_radius_cm <= 0.0:
+        raise ValueError("--tube-radius-cm must be greater than zero")
+    if args.tube_safety_radius_cm <= 0.0:
+        raise ValueError("--tube-safety-radius-cm must be greater than zero")
     if args.enable_flight:
         missing = []
         if not args.auto_takeoff:
@@ -101,11 +156,17 @@ def main(argv: list[str] | None = None) -> None:
     flight_config = FlightRuntimeConfig(
         takeoff_height_cm=args.takeoff_height_cm,
     )
+    if args.circular_tube_bypass:
+        session_mode = "isolated_visual_radar_circular_tube"
+    elif args.bypass_planner == "smooth-sidestep":
+        session_mode = "isolated_visual_radar_smooth_sidestep"
+    else:
+        session_mode = "isolated_visual_radar_tube_obstacle"
     recorder = SessionRecorder(
         SessionRecorderConfig(
             root_dir=args.record_dir,
             enabled=not args.no_record,
-            mode="isolated_visual_radar_tube_obstacle",
+            mode=session_mode,
             frame_every_n=10,
             radar_every_n=1,
             video_enabled=True,
@@ -118,6 +179,11 @@ def main(argv: list[str] | None = None) -> None:
                     "real movable tube; position is inferred from physical radar points"
                 ),
                 "radar_points": "physical only; no synthetic injection",
+                "bypass_planner": args.bypass_planner,
+                "right_half_radar_then_visual": args.right_half_radar_then_visual,
+                "circular_tube_bypass": args.circular_tube_bypass,
+                "tube_radius_cm": args.tube_radius_cm,
+                "tube_safety_radius_cm": args.tube_safety_radius_cm,
             },
         )
     )
@@ -135,7 +201,24 @@ def main(argv: list[str] | None = None) -> None:
             forward_corridor_half_width_cm=75.0,
         )
     )
-    planner = ObstacleBypassPlanner()
+    if args.circular_tube_bypass:
+        planner = CircularTubeBypassPlanner(
+            CircularTubeBypassConfig(
+                tube_radius_cm=args.tube_radius_cm,
+                safety_radius_cm=args.tube_safety_radius_cm,
+            )
+        )
+    elif args.bypass_planner == "smooth-sidestep":
+        planner = SmoothSidestepPlanner()
+    else:
+        planner = ObstacleBypassPlanner(
+            ObstacleBypassConfig(
+                forward_recovery_s=args.bypass_forward_transition_s,
+            )
+        )
+    right_half_handoff = (
+        RightHalfRadarHandoff() if args.right_half_radar_then_visual else None
+    )
     arbiter = SafetyArbiter(
         SafetyConfig(
             require_fc=actual_flight,
@@ -143,12 +226,24 @@ def main(argv: list[str] | None = None) -> None:
             require_unlocked=actual_flight,
             require_radar=True,
             radar_timeout_s=args.radar_timeout_s,
-            max_vx_cm_s=10.0,
-            max_vy_cm_s=8.0,
-            max_yaw_rate_deg_s=10.0,
+            max_vx_cm_s=visual_config.max_vx_cm_s,
+            max_vy_cm_s=visual_config.max_vy_cm_s,
+            max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
             obstacle_stop_distance_cm=80.0,
             obstacle_slow_distance_cm=150.0,
             slow_speed_limit_cm_s=10.0,
+        )
+    )
+    visual_only_arbiter = SafetyArbiter(
+        SafetyConfig(
+            require_fc=actual_flight,
+            require_hold_pos_mode=actual_flight,
+            require_unlocked=actual_flight,
+            require_radar=False,
+            radar_timeout_s=args.radar_timeout_s,
+            max_vx_cm_s=visual_config.max_vx_cm_s,
+            max_vy_cm_s=visual_config.max_vy_cm_s,
+            max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
         )
     )
 
@@ -181,26 +276,61 @@ def main(argv: list[str] | None = None) -> None:
         while time.perf_counter() - start_s < args.duration_s:
             loop_start = time.perf_counter()
             sample = guidance.sample(loop_start)
-            points = radars.get_obstacle_points_body_cm(max_distance_cm=300.0)
-            radar_field.update(points, loop_start)
-            radar_age_s = multi_radar_age_s(radars)
-            radar_fresh = bool(
-                radars.connected
-                and radars.is_fresh(max_age_s=args.radar_timeout_s)
+            radar_retired = bool(
+                right_half_handoff is not None
+                and right_half_handoff.radar_disabled
             )
-            planned = planner.update(
-                desired=sample.desired,
-                perception=sample.perception,
-                radar_field=radar_field,
-                now_s=loop_start,
-            )
+            if radar_retired:
+                radar_age_s = None
+                radar_fresh = False
+                planned = sample.desired
+            else:
+                points = radars.get_obstacle_points_body_cm(max_distance_cm=300.0)
+                if right_half_handoff is not None:
+                    points = right_half_handoff.filter_right_half_plane(points)
+                radar_field.update(points, loop_start)
+                radar_age_s = multi_radar_age_s(radars)
+                radar_fresh = bool(
+                    radars.connected
+                    and radars.is_fresh(max_age_s=args.radar_timeout_s)
+                )
+                previous_planner_state = planner.state
+                planned = planner.update(
+                    desired=sample.desired,
+                    perception=sample.perception,
+                    radar_field=radar_field,
+                    now_s=loop_start,
+                )
+                if (
+                    right_half_handoff is not None
+                    and right_half_handoff.observe(
+                        previous_planner_state,
+                        planner.state,
+                        loop_start,
+                        bypass_pending=bool(
+                            planner.diagnostics().get("intrusion_count", 0)
+                        ),
+                    )
+                ):
+                    logger.warning(
+                        "[VIS-RADAR] right-half radar phase complete; "
+                        "stopping radars and continuing with visual trajectory only"
+                    )
+                    radars.stop()
+                    radars_started = False
+                    radar_field.update(np.empty((0, 2), dtype=float), loop_start)
+                    radar_age_s = None
+                    radar_fresh = False
+                    radar_retired = True
+                    planned = sample.desired
+            active_arbiter = visual_only_arbiter if radar_retired else arbiter
             health = flight_health_from_sources(
                 fc=fc,
-                multi_radar=radars,
+                multi_radar=None if radar_retired else radars,
                 radar_timeout_s=args.radar_timeout_s,
                 camera_ok=sample.camera_ok,
             )
-            safe = arbiter.filter(
+            safe = active_arbiter.filter(
                 planned,
                 flight=flight_status_from_fc(fc),
                 radar_connected=radar_fresh,
@@ -211,7 +341,7 @@ def main(argv: list[str] | None = None) -> None:
             decision = send_command_safely(
                 fc,
                 safe.command,
-                arbiter,
+                active_arbiter,
                 health,
                 dry_run=not actual_flight,
             )
@@ -235,6 +365,11 @@ def main(argv: list[str] | None = None) -> None:
                     "controller": sample.diagnostics,
                 },
                 "tube_obstacle_bypass": planner.diagnostics(),
+                "right_half_handoff": (
+                    right_half_handoff.diagnostics()
+                    if right_half_handoff is not None
+                    else None
+                ),
                 "sent": bool(actual_flight and decision.allowed),
             }
             if recorder.frame_due(loop_count):
@@ -246,18 +381,19 @@ def main(argv: list[str] | None = None) -> None:
                     source_time_s=sample.frame_time_s,
                     extra=extra,
                 )
-            recorder.record_radar(
-                loop_count=loop_count,
-                now_s=loop_start,
-                radar_field=radar_field,
-                multi_radar=radars,
-                radar_age_s=radar_age_s,
-                radar_connected=radar_fresh,
-                desired=sample.desired,
-                safe_command=safe.command,
-                decision_reason=decision.reason,
-                extra=extra,
-            )
+            if not radar_retired:
+                recorder.record_radar(
+                    loop_count=loop_count,
+                    now_s=loop_start,
+                    radar_field=radar_field,
+                    multi_radar=radars,
+                    radar_age_s=radar_age_s,
+                    radar_connected=radar_fresh,
+                    desired=sample.desired,
+                    safe_command=safe.command,
+                    decision_reason=decision.reason,
+                    extra=extra,
+                )
             recorder.record_command(
                 loop_count=loop_count,
                 now_s=loop_start,
@@ -269,7 +405,7 @@ def main(argv: list[str] | None = None) -> None:
             if loop_start - last_log_s >= 1.0:
                 last_log_s = loop_start
                 logger.info(
-                    "[VIS-RADAR] road={} err={} angle={} radar={} bypass={} "
+                    "[VIS-RADAR] road={} err={} angle={} radar={} retired={} bypass={} "
                     "target_y={} desired={} planned={} safe={} sent={}",
                     getattr(sample.perception, "is_road_found", False),
                     _float_or_none(
@@ -279,6 +415,7 @@ def main(argv: list[str] | None = None) -> None:
                         getattr(sample.perception, "centerline_angle", None)
                     ),
                     radar_fresh,
+                    radar_retired,
                     planner.state.value,
                     planner.target_y_cm,
                     sample.desired.as_fc_tuple(),

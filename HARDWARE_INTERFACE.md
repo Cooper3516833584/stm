@@ -331,7 +331,7 @@ cd ~/Desktop/ObstacleAvoidanceDrone
 PYTHONPATH=. python record_data.py --no-camera --output-dir /media/sdcard/recordings
 
 # PC: 下载录制的数据
-scp -r root@192.168.31.199:/media/sdcard/recordings/<session_dir> .
+scp -r root@192.168.137.2:/media/sdcard/recordings/<session_dir> .
 
 # PC: 渲染可视化
 python visualize_radar_data.py <session_dir> --video --video-fps 10

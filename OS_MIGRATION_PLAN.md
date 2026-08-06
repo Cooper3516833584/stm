@@ -269,7 +269,7 @@ myd-ld25x login: root
 **方式 2：SSH（需先配网络，见 §5.1）**
 
 ```
-ssh root@<board_ip>
+ssh root@192.168.137.2
 ```
 
 **方式 3：HDMI + USB 键鼠**
@@ -423,7 +423,7 @@ connmanctl
 ip addr show wlan0
 
 # 如果使用 SSH:
-# 从 PC: ssh root@<board_ip>
+# 从 PC: ssh root@192.168.137.2
 ```
 
 ### 5.2 存储配置

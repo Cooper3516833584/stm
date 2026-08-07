@@ -218,6 +218,24 @@ class StaticRouteBypassPlanner:
         if self.state in {StaticRouteBypassState.DIVERGE_LEFT, StaticRouteBypassState.DIVERGE_RIGHT}:
             if observation is None:
                 return self._enter_track_hold(desired, now, "unexpected_loss_during_diverge")
+            # A tube can reach the 80--90 degree edge before the nominal 85 cm
+            # clearance is established (as in the 2026-08-06 flight).  Once it
+            # is on the locked side, moving rearward for consecutive frames,
+            # and still above the existing 75 cm hysteresis floor, treat this
+            # as a valid side pass instead of waiting for an impossible 85 cm
+            # reading and turning the expected edge exit into a tracking fault.
+            if (
+                observation.lateral_clearance_cm >= self.config.reshift_surface_clearance_cm
+                and self._edge_ready(observation)
+            ):
+                self._edge_armed = True
+                self._clearance_count = 0
+                self._transition(
+                    StaticRouteBypassState.SIDE_PASS_CONFIRM,
+                    "edge_reached_with_hysteresis_clearance",
+                    now,
+                )
+                return self._avoidance_command(desired, now)
             if observation.lateral_clearance_cm >= self.config.target_surface_clearance_cm:
                 self._clearance_count += 1
             else:

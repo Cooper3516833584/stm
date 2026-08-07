@@ -265,6 +265,34 @@ def test_expected_edge_exit_does_not_switch_to_opposite_background_cluster():
     assert command.vx_cm_s == pytest.approx(8.4)
 
 
+def test_diverge_accepts_valid_80_degree_edge_before_nominal_clearance():
+    """Regression for the 2026-08-06 left-side hover at about +84 degrees."""
+    planner = StaticRouteBypassPlanner()
+    left_obstacle = _field(_cluster(100.0, 40.0))
+    _update(planner, left_obstacle, 1.0)
+    _update(planner, left_obstacle, 1.1)
+    assert planner.state == StaticRouteBypassState.DIVERGE_RIGHT
+
+    # Clearance remains below the nominal 85 cm target while the same static
+    # tube moves monotonically to the locked-side 80--90 degree edge.
+    for index, point in enumerate(((75.0, 65.0), (45.0, 78.0), (9.0, 82.0))):
+        command = _update(planner, _field(_cluster(*point)), 1.2 + index * 0.1)
+
+    diagnostics = planner.diagnostics()
+    assert diagnostics["obstacle_surface_clearance_cm"] < planner.config.target_surface_clearance_cm
+    assert planner.state == StaticRouteBypassState.SIDE_PASS_CONFIRM
+    assert planner.active_bypass_side == -1
+    assert planner.transition_reason == "edge_reached_with_hysteresis_clearance"
+    assert command.vx_cm_s == pytest.approx(8.4)
+    assert command.vy_cm_s <= 0.0
+
+    for index in range(3):
+        command = _update(planner, _field([]), 1.6 + index * 0.1)
+
+    assert planner.state == StaticRouteBypassState.CLEARANCE_RUN
+    assert command.vx_cm_s == pytest.approx(8.4)
+
+
 def test_timeout_is_latched_stop():
     planner = StaticRouteBypassPlanner(replace(StaticRouteBypassConfig(), max_encounter_s=0.5))
     _activate_right(planner)

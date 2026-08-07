@@ -131,6 +131,8 @@ class SafetyResult:
     state: str
     reasons: list[str] = field(default_factory=list)
     nearest_forward_obstacle_cm: float | None = None
+    left_side_clearance_cm: float | None = None
+    right_side_clearance_cm: float | None = None
 
 
 @dataclass
@@ -140,6 +142,10 @@ class RadarFieldConfig:
     body_y_half_cm: float = 25.0
     forward_corridor_half_width_cm: float = 50.0
     min_obstacle_distance_cm: float = 10.0
+    # Side stops only apply to the finite fore/aft envelope swept by the body.
+    # Without this gate, a return far behind the aircraft with y close to zero
+    # can incorrectly block lateral motion on that side.
+    side_corridor_x_half_cm: float = 25.0
 
 
 class RadarObstacleField:
@@ -179,10 +185,12 @@ class RadarObstacleField:
         points = self.points_body_cm
         if points.size == 0:
             return None
+        cfg = self.config
+        in_swept_x = np.abs(points[:, 0]) <= cfg.side_corridor_x_half_cm
         if side == "left":
-            selected = points[points[:, 1] > 0]
+            selected = points[in_swept_x & (points[:, 1] >= cfg.body_y_half_cm)]
         elif side == "right":
-            selected = points[points[:, 1] < 0]
+            selected = points[in_swept_x & (points[:, 1] <= -cfg.body_y_half_cm)]
         else:
             raise ValueError("side must be 'left' or 'right'")
         if selected.size == 0:
@@ -214,6 +222,13 @@ class SafetyArbiter:
         self.config = config or SafetyConfig()
 
     def evaluate(self, desired: Command, health: FlightHealth) -> SafetyDecision:
+        if not _command_is_finite(desired):
+            return SafetyDecision(
+                command=Command.zero("safety_stop:invalid_command"),
+                allowed=False,
+                hard_stop=True,
+                reason="invalid_command",
+            )
         hard_stop_reason = self._evaluate_hard_stop(health)
         if hard_stop_reason is not None:
             return SafetyDecision(
@@ -252,8 +267,17 @@ class SafetyArbiter:
         )
         decision = self.evaluate(desired, health)
         nearest = radar_field.nearest_forward_obstacle_cm()
+        left_clearance = radar_field.side_clearance_cm("left")
+        right_clearance = radar_field.side_clearance_cm("right")
         if decision.hard_stop:
-            return SafetyResult(decision.command, "HARD_STOP", [decision.reason], nearest)
+            return SafetyResult(
+                decision.command,
+                "HARD_STOP",
+                [decision.reason],
+                nearest,
+                left_clearance,
+                right_clearance,
+            )
 
         cmd = decision.command
         reasons: list[str] = []
@@ -267,7 +291,6 @@ class SafetyArbiter:
                 cmd.yaw_rate_deg_s,
                 _append_reason(cmd.reason, "front_obstacle_stop"),
             )
-            return SafetyResult(cmd, "OBSTACLE_STOP", reasons, nearest)
 
         if nearest is not None and nearest <= self.config.obstacle_slow_distance_cm:
             if cmd.vx_cm_s > self.config.slow_speed_limit_cm_s:
@@ -280,7 +303,6 @@ class SafetyArbiter:
                     _append_reason(cmd.reason, "front_obstacle_slow"),
                 )
 
-        left_clearance = radar_field.side_clearance_cm("left")
         if left_clearance is not None and left_clearance <= self.config.side_stop_distance_cm and cmd.vy_cm_s > 0:
             reasons.append("left_side_blocked")
             cmd = Command(
@@ -291,7 +313,6 @@ class SafetyArbiter:
                 _append_reason(cmd.reason, "left_side_blocked"),
             )
 
-        right_clearance = radar_field.side_clearance_cm("right")
         if right_clearance is not None and right_clearance <= self.config.side_stop_distance_cm and cmd.vy_cm_s < 0:
             reasons.append("right_side_blocked")
             cmd = Command(
@@ -302,8 +323,11 @@ class SafetyArbiter:
                 _append_reason(cmd.reason, "right_side_blocked"),
             )
 
-        state = "OK" if not reasons else "LIMITED"
-        return SafetyResult(cmd, state, reasons, nearest)
+        if "front_obstacle_stop" in reasons:
+            state = "OBSTACLE_STOP"
+        else:
+            state = "OK" if not reasons else "LIMITED"
+        return SafetyResult(cmd, state, reasons, nearest, left_clearance, right_clearance)
 
     def _evaluate_hard_stop(self, health: FlightHealth) -> str | None:
         cfg = self.config
@@ -315,12 +339,20 @@ class SafetyArbiter:
             return "fc_locked"
         if cfg.require_radar and not health.radar_fresh:
             return "radar_not_fresh"
-        if health.roll_deg is not None and abs(health.roll_deg) > cfg.max_abs_roll_deg:
-            return "roll_too_large"
-        if health.pitch_deg is not None and abs(health.pitch_deg) > cfg.max_abs_pitch_deg:
-            return "pitch_too_large"
+        if health.roll_deg is not None:
+            if not _is_finite_number(health.roll_deg):
+                return "invalid_attitude"
+            if abs(float(health.roll_deg)) > cfg.max_abs_roll_deg:
+                return "roll_too_large"
+        if health.pitch_deg is not None:
+            if not _is_finite_number(health.pitch_deg):
+                return "invalid_attitude"
+            if abs(float(health.pitch_deg)) > cfg.max_abs_pitch_deg:
+                return "pitch_too_large"
         if cfg.min_battery_v is not None:
-            if health.battery_v is not None and health.battery_v < cfg.min_battery_v:
+            if health.battery_v is None or not _is_finite_number(health.battery_v):
+                return "battery_unavailable"
+            if float(health.battery_v) < cfg.min_battery_v:
                 return "low_battery"
         return None
 
@@ -430,7 +462,27 @@ def _normalize_points(points_body_cm: np.ndarray) -> np.ndarray:
     points = np.asarray(points_body_cm, dtype=float)
     if points.size == 0:
         return np.empty((0, 2), dtype=float)
-    return points.reshape(-1, 2)
+    points = points.reshape(-1, 2)
+    return points[np.all(np.isfinite(points), axis=1)]
+
+
+def _is_finite_number(value: Any) -> bool:
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _command_is_finite(command: Command) -> bool:
+    return all(
+        _is_finite_number(value)
+        for value in (
+            command.vx_cm_s,
+            command.vy_cm_s,
+            command.vz_cm_s,
+            command.yaw_rate_deg_s,
+        )
+    )
 
 
 def _clip(value: float, low: float, high: float) -> float:

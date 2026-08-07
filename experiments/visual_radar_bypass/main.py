@@ -228,6 +228,7 @@ def main(argv: list[str] | None = None) -> None:
             body_x_half_cm=25.0,
             body_y_half_cm=25.0,
             forward_corridor_half_width_cm=75.0,
+            side_corridor_x_half_cm=25.0,
         )
     )
     if args.circular_tube_bypass:
@@ -438,6 +439,9 @@ def main(argv: list[str] | None = None) -> None:
                     "final": decision.command.as_fc_tuple(),
                     "safety_state": safe.state,
                     "safety_reasons": safe.reasons,
+                    "nearest_forward_obstacle_cm": safe.nearest_forward_obstacle_cm,
+                    "left_side_clearance_cm": safe.left_side_clearance_cm,
+                    "right_side_clearance_cm": safe.right_side_clearance_cm,
                     "safety_override": bool(
                         safe.command != planned or decision.command != safe.command
                     ),

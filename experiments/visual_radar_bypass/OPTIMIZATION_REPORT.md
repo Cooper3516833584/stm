@@ -104,7 +104,14 @@ legacy basic、legacy recovery、smooth sidestep、circular bypass 均通过实�
 
 ## 19. 开发板与 Git 审计
 
-待本地最终 diff 审计后提交并推送 `origin/main`。开发板仅通过 Git 更新，使用
-`/usr/local/UFC_venv/bin/python3` 执行 compile、离线断言、benchmark、历史记录回放和
-真实摄像头/双雷达 dry-run；严禁连接飞控、解锁、起飞或发送控制命令。板端实测结果在
-完成后补入本节。
+本地 `main` 通过两个 revert 和实现提交推送，开发板从干净的 `bd991c0` 仅经
+`git fetch`、`git pull --ff-only` 快进至 `729dc23`。板端 compile、直线/弯路闭环断言和
+旧规划器兼容断言全部通过；2000 次同源输入下 static-route 为
+mean/p50/p95=`2617.79/2583.71/2868.58 µs`，远低于 100 ms 控制周期。
+
+历史实体雷达会话回放 16 帧全部形成有效观测，共处理 12,079 个前半平面点，且
+`command_progress_applied=0.0`。真实摄像头和双雷达 20 秒 dry-run 会话为
+`/media/sdcard/stm_records/20260806_230139_isolated_visual_radar_static_route`：摄像头/NPU、
+`/dev/ttySTM4`、`/dev/ttySTM9` 均正常，记录 31 条命令、13 个雷达快照，`sent=true` 为 0。
+运行未传入任何飞行参数，日志明确为 `actual_flight=False`，未连接飞控、未解锁、未起飞、
+未发送飞控命令。最终 Git 审计确认提交范围仅为实验目录，用户四个文档修改保持未暂存。

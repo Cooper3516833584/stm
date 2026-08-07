@@ -10,6 +10,7 @@ import time
 
 import numpy as np
 from loguru import logger
+from road_perception import CameraOffsetCompensationConfig
 
 from FlightController.Components import MultiRadar, RadarConfig
 from FlightController.Components.FCConnector import FCConnectConfig, connect_fc
@@ -49,6 +50,12 @@ from .static_route_bypass import (
     StaticRouteBypassConfig,
     StaticRouteBypassPlanner,
 )
+from FlightController.Runtime import (
+    LoopRateMonitor,
+    ProcessRadarClient,
+    ProcessRuntime,
+    ProcessRuntimeConfig,
+)
 from .parameter_registry import build_parameter_registry
 from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance
 
@@ -67,6 +74,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lower-port", default="/dev/ttySTM9")
     parser.add_argument("--fc-port", default=None)
     parser.add_argument("--loop-hz", type=float, default=10.0)
+    parser.add_argument(
+        "--runtime-mode",
+        choices=("process", "threaded"),
+        default="process",
+        help="Isolate vision/radar in spawned processes (default) or use the legacy threads",
+    )
     parser.add_argument("--duration-s", type=float, default=60.0)
     parser.add_argument("--radar-timeout-s", type=float, default=0.5)
     parser.add_argument(
@@ -190,6 +203,25 @@ def main(argv: list[str] | None = None) -> None:
         tuning_log_every_n=args.tuning_log_every_n,
         radar_snapshot_every_n=args.radar_snapshot_every_n,
     )
+    process_runtime = None
+    if args.runtime_mode == "process":
+        process_runtime = ProcessRuntime(
+            ProcessRuntimeConfig(
+                camera_index=visual_config.camera_index,
+                camera_width=visual_config.camera_width,
+                camera_height=visual_config.camera_height,
+                camera_fps=visual_config.camera_fps,
+                npu_model_path=visual_config.npu_model_path,
+                inference_backend="npu",
+                postprocess_mode=visual_config.postprocess_mode,
+                instance_selection=visual_config.instance_selection,
+                flight_height_m=visual_config.flight_height_m,
+                offset_comp_config=CameraOffsetCompensationConfig(enabled=False),
+                upper_port=args.upper_port,
+                lower_port=args.lower_port,
+                radar_timeout_s=args.radar_timeout_s,
+            )
+        )
     if args.circular_tube_bypass:
         session_mode = "isolated_visual_radar_circular_tube"
     elif args.bypass_planner == "smooth-sidestep":
@@ -205,9 +237,15 @@ def main(argv: list[str] | None = None) -> None:
             mode=session_mode,
             frame_every_n=10,
             radar_every_n=args.radar_snapshot_every_n,
+            frame_rate_hz=1.0,
+            radar_rate_hz=10.0 / max(1, args.radar_snapshot_every_n),
+            command_rate_hz=10.0 / max(1, args.tuning_log_every_n),
             video_enabled=True,
             video_every_n=2,
             video_fps=5.0,
+            frame_ring_descriptor=(
+                process_runtime.frame_ring_descriptor if process_runtime is not None else None
+            ),
             metadata={
                 "argv": list(sys.argv),
                 "visual_config": vars(visual_config),
@@ -234,12 +272,18 @@ def main(argv: list[str] | None = None) -> None:
             },
         )
     )
-    if actual_flight and not recorder.enabled:
+    if actual_flight and not recorder.healthy:
+        if process_runtime is not None:
+            process_runtime.stop()
         raise RuntimeError("flight test refused because session recording is unavailable")
-    sink_id = _setup_logging(recorder.runtime_log_path)
+    sink_id = _setup_logging(recorder.log_sink if recorder.enabled else None)
 
-    guidance = FrozenVisualGuidance(visual_config)
-    radars = MultiRadar(_radar_configs(args.upper_port, args.lower_port))
+    guidance = FrozenVisualGuidance(visual_config, process_runtime=process_runtime)
+    radars = (
+        ProcessRadarClient(process_runtime, max_age_s=args.radar_timeout_s)
+        if process_runtime is not None
+        else MultiRadar(_radar_configs(args.upper_port, args.lower_port))
+    )
     radar_field = RadarObstacleField(
         RadarFieldConfig(
             max_distance_cm=300.0,
@@ -304,7 +348,10 @@ def main(argv: list[str] | None = None) -> None:
     guidance_started = False
     radars_started = False
     period_s = 1.0 / args.loop_hz
+    loop_monitor = LoopRateMonitor(args.loop_hz)
     try:
+        if process_runtime is not None:
+            process_runtime.start()
         guidance.start()
         guidance_started = True
         radars.start()
@@ -472,7 +519,7 @@ def main(argv: list[str] | None = None) -> None:
                 ),
                 "sent": command_applied,
             }
-            if recorder.frame_due(loop_count):
+            if recorder.frame_due(loop_count, loop_start):
                 recorder.record_frame(
                     loop_count=loop_count,
                     now_s=loop_start,
@@ -524,6 +571,32 @@ def main(argv: list[str] | None = None) -> None:
                     safe.command.as_fc_tuple(),
                     bool(actual_flight and decision.allowed),
                 )
+                timing = loop_monitor.snapshot()
+                runtime_health = process_runtime.health(loop_start) if process_runtime else None
+                logger.info(
+                    "[RUNTIME] target_hz={:.1f} actual_hz={:.2f} work_p95_ms={:.2f} "
+                    "work_p99_ms={:.2f} jitter_p99_ms={:.2f} deadline_miss={} "
+                    "vision_age_ms={} radar_age_ms={} vision_drop={} radar_drop={} vq={} rq={}",
+                    timing.target_hz,
+                    timing.achieved_hz,
+                    timing.work_p95_ms,
+                    timing.work_p99_ms,
+                    timing.jitter_p99_ms,
+                    timing.deadline_misses,
+                    _float_or_none(
+                        runtime_health.vision_age_s * 1000.0
+                        if runtime_health else sample.perception_age_s * 1000.0
+                    ),
+                    _float_or_none(
+                        runtime_health.radar_age_s * 1000.0
+                        if runtime_health else (radar_age_s or 0.0) * 1000.0
+                    ),
+                    runtime_health.vision_publish_drops if runtime_health else None,
+                    runtime_health.radar_publish_drops if runtime_health else None,
+                    runtime_health.vision_queue_depth if runtime_health else None,
+                    runtime_health.radar_queue_depth if runtime_health else None,
+                )
+            loop_monitor.record(loop_start, time.perf_counter())
             loop_count += 1
             _sleep_to_rate(loop_start, period_s)
     except KeyboardInterrupt:
@@ -542,14 +615,18 @@ def main(argv: list[str] | None = None) -> None:
             guidance.stop()
         if radars_started:
             radars.stop()
-        recorder.close()
-        if sink_id is not None:
-            logger.remove(sink_id)
         logger.info(
             "[VIS-RADAR] stopped interrupted={} actual_flight={}",
             interrupted,
             actual_flight,
         )
+        if process_runtime is not None:
+            process_runtime.stop_workers()
+        if sink_id is not None:
+            logger.remove(sink_id)
+        recorder.close()
+        if process_runtime is not None:
+            process_runtime.stop()
 
 
 def _radar_configs(upper_port: str, lower_port: str) -> list[RadarConfig]:
@@ -566,10 +643,12 @@ def _radar_configs(upper_port: str, lower_port: str) -> list[RadarConfig]:
     ]
 
 
-def _setup_logging(log_path: Path | None) -> int | None:
-    if log_path is None:
+def _setup_logging(log_target) -> int | None:
+    if log_target is None:
         return None
-    return logger.add(str(log_path), enqueue=True, encoding="utf-8")
+    if callable(log_target):
+        return logger.add(log_target, enqueue=False)
+    return logger.add(str(log_target), enqueue=True, encoding="utf-8")
 
 
 def _sleep_to_rate(loop_start: float, period_s: float) -> None:

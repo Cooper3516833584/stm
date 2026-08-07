@@ -78,26 +78,31 @@ class VisualSample:
 class FrozenVisualGuidance:
     """Own the unchanged NPU perception and trajectory-point controller."""
 
-    def __init__(self, config: FrozenVisualConfig | None = None) -> None:
+    def __init__(self, config: FrozenVisualConfig | None = None, *, process_runtime=None) -> None:
         self.config = config or FrozenVisualConfig()
         cfg = self.config
-        self.pipeline = PerceptionPipeline(
-            camera_index=cfg.camera_index,
-            camera_width=cfg.camera_width,
-            camera_height=cfg.camera_height,
-            camera_fps=cfg.camera_fps,
-            model_path="FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
-            npu_model_path=cfg.npu_model_path,
-            inference_backend="npu",
-            postprocess_mode=cfg.postprocess_mode,
-            instance_selection=cfg.instance_selection,
-            flight_height_m=cfg.flight_height_m,
-            wb_enable=False,
-            wb_r=1.0,
-            wb_g=1.0,
-            wb_b=1.0,
-            offset_comp_config=CameraOffsetCompensationConfig(enabled=False),
-        )
+        if process_runtime is None:
+            self.pipeline = PerceptionPipeline(
+                camera_index=cfg.camera_index,
+                camera_width=cfg.camera_width,
+                camera_height=cfg.camera_height,
+                camera_fps=cfg.camera_fps,
+                model_path="FlightController/Solutions/model/road_yolo11n_seg_128.onnx",
+                npu_model_path=cfg.npu_model_path,
+                inference_backend="npu",
+                postprocess_mode=cfg.postprocess_mode,
+                instance_selection=cfg.instance_selection,
+                flight_height_m=cfg.flight_height_m,
+                wb_enable=False,
+                wb_r=1.0,
+                wb_g=1.0,
+                wb_b=1.0,
+                offset_comp_config=CameraOffsetCompensationConfig(enabled=False),
+            )
+        else:
+            from FlightController.Runtime import ProcessVisionPipeline
+
+            self.pipeline = ProcessVisionPipeline(process_runtime)
         self.follower = TrajectoryPointFollower(
             TrajectoryPointFollowerConfig(
                 image_width=cfg.camera_width,

@@ -69,6 +69,11 @@ def test_session_recorder_writes_frame_and_radar_snapshot(tmp_path):
     assert manifest["video_frames_written"] == 1
     assert manifest["keyframes_written"] == 1
     assert manifest["metadata"]["test_case"] == "road-diagnostics"
+    stats = recorder.stats()
+    assert stats["frames_written"] == 1
+    assert stats["frame_ref_misses"] == 0
+    assert stats["radar_point_files_written"] == 1
+    assert stats["worker_media_errors"] == 0
 
 
 def test_frame_due_combines_keyframes_and_sampled_video(tmp_path):

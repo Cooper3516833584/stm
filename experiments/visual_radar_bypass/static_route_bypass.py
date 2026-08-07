@@ -136,6 +136,7 @@ class StaticRouteBypassPlanner:
         self._phase_started_s: float | None = None
         self._hold_started_s: float | None = None
         self._last_update_s: float | None = None
+        self._last_confirmation_s: float | None = None
         self._last_seen_s: float | None = None
         self._last_observed_x_cm: float | None = None
         self._resume_state: StaticRouteBypassState | None = None
@@ -172,10 +173,11 @@ class StaticRouteBypassPlanner:
     ) -> Command:
         now = float(now_s)
         dt = self._step_dt(now)
+        confirmation_due = self._confirmation_due(now)
         road_usable = self._road_usable(perception, desired)
         observation = self._observe(radar_field, tracking=self.state != StaticRouteBypassState.NORMAL)
         self._last_radar_forward_clear = radar_field.nearest_forward_obstacle_cm() is None
-        self._accept_observation(observation, now)
+        self._accept_observation(observation, now, advance_counters=confirmation_due)
 
         if self.state in {StaticRouteBypassState.FAILSAFE_STOP, StaticRouteBypassState.TIMEOUT_STOP}:
             return self._stop_command(desired, self.state.value)
@@ -187,7 +189,8 @@ class StaticRouteBypassPlanner:
             if observation is None:
                 self._intrusion_count = 0
                 return desired
-            self._intrusion_count += 1
+            if confirmation_due:
+                self._intrusion_count += 1
             if self._intrusion_count < max(1, int(self.config.activation_frames)):
                 return desired
             self._start_encounter(observation, radar_field, now)
@@ -241,10 +244,11 @@ class StaticRouteBypassPlanner:
                     now,
                 )
                 return self._avoidance_command(desired, now)
-            if observation.lateral_clearance_cm >= self.config.target_surface_clearance_cm:
-                self._clearance_count += 1
-            else:
-                self._clearance_count = 0
+            if confirmation_due:
+                if observation.lateral_clearance_cm >= self.config.target_surface_clearance_cm:
+                    self._clearance_count += 1
+                else:
+                    self._clearance_count = 0
             if self._clearance_count >= max(1, int(self.config.clearance_frames)):
                 self._transition(self._pass_state(), "target_lateral_clearance", now)
             return self._avoidance_command(desired, now)
@@ -262,12 +266,14 @@ class StaticRouteBypassPlanner:
 
         if self.state == StaticRouteBypassState.SIDE_PASS_CONFIRM:
             if observation is not None:
-                self._missing_count = 0
+                if confirmation_due:
+                    self._missing_count = 0
                 if not self._on_locked_side(observation) or abs(observation.bearing_deg) < self.config.edge_arm_deg:
                     self._edge_armed = False
                     self._transition(self._pass_state(), "obstacle_returned_from_side_band", now)
                 return self._avoidance_command(desired, now)
-            self._missing_count += 1
+            if confirmation_due:
+                self._missing_count += 1
             if self._edge_armed and self._missing_count >= max(1, int(self.config.edge_missing_frames)):
                 self._transition(StaticRouteBypassState.CLEARANCE_RUN, "expected_90_degree_edge_exit", now)
                 return self._avoidance_command(desired, now)
@@ -282,10 +288,11 @@ class StaticRouteBypassPlanner:
                     now,
                 )
                 return self._avoidance_command(desired, now)
-            if self._pass_complete():
-                self._pass_complete_count += 1
-            else:
-                self._pass_complete_count = 0
+            if confirmation_due:
+                if self._pass_complete():
+                    self._pass_complete_count += 1
+                else:
+                    self._pass_complete_count = 0
             if self._pass_complete_count >= max(1, int(self.config.pass_complete_frames)):
                 self._transition(StaticRouteBypassState.WAIT_VISUAL, "tube_fully_behind_margin", now)
                 return self._stop_command(desired, "wait_visual")
@@ -348,6 +355,7 @@ class StaticRouteBypassPlanner:
         self._phase_started_s = None
         self._hold_started_s = None
         self._last_seen_s = None
+        self._last_confirmation_s = None
         self._last_observed_x_cm = None
         self._resume_state = None
         self._observation = None
@@ -407,9 +415,18 @@ class StaticRouteBypassPlanner:
         self._edge_armed = False
         self._transition(self._diverge_state(), "confirmed_static_obstacle", now)
 
-    def _accept_observation(self, observation: StaticTubeObservation | None, now: float) -> None:
+    def _accept_observation(
+        self,
+        observation: StaticTubeObservation | None,
+        now: float,
+        *,
+        advance_counters: bool = True,
+    ) -> None:
         self._observation = observation
         if observation is None:
+            return
+        self._last_seen_s = now
+        if not advance_counters:
             return
         measured = np.asarray([observation.center_x_cm, observation.center_y_cm], dtype=float)
         if self._predicted_center.size == 2:
@@ -422,7 +439,6 @@ class StaticRouteBypassPlanner:
         else:
             self._last_static_model_error_cm = None
         self._predicted_center = measured
-        self._last_seen_s = now
         if self._last_observed_x_cm is not None and observation.center_x_cm <= self._last_observed_x_cm + 2.0:
             self._forward_decrease_count += 1
         else:
@@ -655,6 +671,17 @@ class StaticRouteBypassPlanner:
             dt = max(0.0, min(0.5, now - self._last_update_s))
         self._last_update_s = now
         return dt
+
+    def _confirmation_due(self, now: float) -> bool:
+        """Advance frame-confirmation counters at the flight-validated 10 Hz cadence."""
+        if self._last_confirmation_s is None:
+            self._last_confirmation_s = now
+            return True
+        if now - self._last_confirmation_s + 1e-9 < self.config.nominal_dt_s:
+            return False
+        periods = max(1, int((now - self._last_confirmation_s) / self.config.nominal_dt_s))
+        self._last_confirmation_s += periods * self.config.nominal_dt_s
+        return True
 
 
 def _side_name(side: int | None) -> str | None:

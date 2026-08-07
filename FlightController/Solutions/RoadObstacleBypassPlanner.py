@@ -62,6 +62,7 @@ class RoadBypassConfig:
     bypass_yaw_sign: float = -1.0
 
     activate_frames: int = 2
+    confirmation_period_s: float = 0.1
     release_s: float = 0.5
 
     min_confidence: float = 0.4
@@ -101,6 +102,7 @@ class RoadObstacleBypassPlanner:
         self._last_intrusion_s: float | None = None
         self._last_target_y_cm: float | None = None
         self._active_side: int | None = None
+        self._last_confirmation_s: float | None = None
 
     @property
     def last_target_y_cm(self) -> float | None:
@@ -130,10 +132,12 @@ class RoadObstacleBypassPlanner:
         intrusion = self._intrusion_points(points)
         has_intrusion = bool(intrusion.size > 0)
 
+        confirmation_due = self._confirmation_due(float(now_s))
         if has_intrusion:
-            self._intrusion_count += 1
+            if confirmation_due:
+                self._intrusion_count += 1
             self._last_intrusion_s = now_s
-        else:
+        elif confirmation_due:
             self._intrusion_count = 0
 
         if self.state == RoadBypassState.NORMAL:
@@ -349,6 +353,18 @@ class RoadObstacleBypassPlanner:
         self._last_intrusion_s = None
         self._last_target_y_cm = None
         self._active_side = None
+        self._last_confirmation_s = None
+
+    def _confirmation_due(self, now_s: float) -> bool:
+        if self._last_confirmation_s is None:
+            self._last_confirmation_s = now_s
+            return True
+        period = max(0.001, float(self.config.confirmation_period_s))
+        if now_s - self._last_confirmation_s + 1e-9 < period:
+            return False
+        steps = max(1, int((now_s - self._last_confirmation_s) / period))
+        self._last_confirmation_s += steps * period
+        return True
 
 
 def _clamp(value: float, low: float, high: float) -> float:

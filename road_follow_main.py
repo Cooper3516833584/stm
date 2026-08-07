@@ -193,6 +193,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--takeoff-low-battery-confirm-frames", type=int, default=3)
     parser.add_argument("--landing-timeout-s", type=float, default=30.0)
     parser.add_argument("--loop-hz", type=float, default=10.0)
+    parser.add_argument(
+        "--runtime-mode",
+        choices=("process", "threaded"),
+        default="process",
+        help="Use isolated spawned sensor processes (default) or legacy threads",
+    )
     parser.add_argument("--wb-enable", action="store_true",
                         help="Enable software white balance correction for camera color cast")
     parser.add_argument("--wb-r", type=float, default=1.00,
@@ -361,6 +367,13 @@ def main(argv: list[str] | None = None) -> None:
         TrajectoryPointFollowerConfig,
     )
     from FlightController.Solutions.SessionRecorder import SessionRecorder, SessionRecorderConfig
+    from FlightController.Runtime import (
+        LoopRateMonitor,
+        ProcessRadarClient,
+        ProcessRuntime,
+        ProcessRuntimeConfig,
+        ProcessVisionPipeline,
+    )
     from FlightController.Solutions.Safety import (
         Command,
         RadarFieldConfig,
@@ -431,6 +444,44 @@ def main(argv: list[str] | None = None) -> None:
             if args.road_controller == "trajectory-point"
             else "heading-yaw+lateral-cross-track"
         )
+    offset_comp = CameraOffsetCompensationConfig(
+        enabled=bool(args.offset_comp_enable or args.enable_offset_comp),
+        cam_forward_offset_m=args.cam_forward_offset_m,
+        meters_per_pixel_x=args.meters_per_pixel_x,
+        correction_sign=args.offset_correction_sign,
+        max_correction_px=args.offset_max_correction_px,
+        pipeline_latency_s=args.pipeline_latency_s,
+    )
+    process_runtime = None
+    if args.runtime_mode == "process":
+        process_runtime = ProcessRuntime(
+            ProcessRuntimeConfig(
+                camera_index=args.camera_index,
+                camera_width=args.camera_width,
+                camera_height=args.camera_height,
+                camera_fps=args.camera_fps,
+                model_path=args.model,
+                npu_model_path=args.model_npu,
+                inference_backend=args.road_model_backend,
+                postprocess_mode=args.road_postprocess_mode,
+                instance_selection=args.road_instance_selection,
+                flight_height_m=args.flight_height_m,
+                wb_enable=bool(args.wb_enable),
+                wb_r=args.wb_r,
+                wb_g=args.wb_g,
+                wb_b=args.wb_b,
+                offset_comp_config=offset_comp,
+                upper_port=args.upper_port,
+                lower_port=args.lower_port,
+                radar_timeout_s=args.radar_timeout_s,
+                enable_vision=not synthetic_straight_road,
+                enable_radar=not args.no_radar,
+            )
+        )
+    # Preserve the physical recording cadence of the proven entry points when
+    # control_hz is raised. Trajectory mode historically ran at 12 Hz; the
+    # other road controller ran at 10 Hz.
+    nominal_record_hz = 12.0 if args.road_controller == "trajectory-point" else 10.0
     recorder = SessionRecorder(
         SessionRecorderConfig(
             root_dir=args.record_dir,
@@ -443,6 +494,14 @@ def main(argv: list[str] | None = None) -> None:
             video_every_n=args.record_video_every_n,
             video_fps=args.record_video_fps,
             frame_queue_size=args.record_frame_queue_size,
+            frame_rate_hz=nominal_record_hz / max(1, args.record_frame_every_n),
+            radar_rate_hz=nominal_record_hz / max(1, args.record_radar_every_n),
+            command_rate_hz=nominal_record_hz,
+            frame_ring_descriptor=(
+                process_runtime.frame_ring_descriptor
+                if process_runtime is not None and not synthetic_straight_road
+                else None
+            ),
             metadata={
                 "argv": list(sys.argv),
                 "arguments": dict(vars(args)),
@@ -450,8 +509,8 @@ def main(argv: list[str] | None = None) -> None:
             },
         )
     )
-    default_log_path = recorder.runtime_log_path
-    log_sink_id = _setup_logging(args.log_file or default_log_path)
+    default_log_target = recorder.log_sink if recorder.enabled else None
+    log_sink_id = _setup_logging(args.log_file or default_log_target)
     radar_field = RadarObstacleField(
         RadarFieldConfig(
             max_distance_cm=args.max_distance_cm,
@@ -567,24 +626,23 @@ def main(argv: list[str] | None = None) -> None:
             max_yaw_rate_deg_s=args.max_yaw_rate_deg_s,
         )
     )
-    offset_comp = CameraOffsetCompensationConfig(
-        enabled=bool(args.offset_comp_enable or args.enable_offset_comp),
-        cam_forward_offset_m=args.cam_forward_offset_m,
-        meters_per_pixel_x=args.meters_per_pixel_x,
-        correction_sign=args.offset_correction_sign,
-        max_correction_px=args.offset_max_correction_px,
-        pipeline_latency_s=args.pipeline_latency_s,
-    )
     period_s = 1.0 / max(args.loop_hz, 0.1)
+    loop_monitor = LoopRateMonitor(args.loop_hz)
     telemetry_tracker = _FCTelemetryTracker()
 
     try:
+        if process_runtime is not None:
+            process_runtime.start()
         if not args.no_fc:
             fc = connect_fc(FCConnectConfig(port=args.fc_port, mode=2, timeout_s=10.0))
             logger.info("[ROAD] FC connected and switched to HOLD_POS mode")
 
         if not args.no_radar:
-            multi_radar = MultiRadar(_radar_configs(args.upper_port, args.lower_port))
+            multi_radar = (
+                ProcessRadarClient(process_runtime, max_age_s=args.radar_timeout_s)
+                if process_runtime is not None
+                else MultiRadar(_radar_configs(args.upper_port, args.lower_port))
+            )
             multi_radar.start()
 
         if synthetic_straight_road:
@@ -593,7 +651,7 @@ def main(argv: list[str] | None = None) -> None:
                 image_height=args.camera_height,
             )
         else:
-            pipeline = PerceptionPipeline(
+            pipeline = ProcessVisionPipeline(process_runtime) if process_runtime is not None else PerceptionPipeline(
                 camera_index=args.camera_index,
                 camera_width=args.camera_width,
                 camera_height=args.camera_height,
@@ -718,17 +776,19 @@ def main(argv: list[str] | None = None) -> None:
                 "sent": bool(not actual_dry_run and fc is not None),
             }
             frame_record_path = None
-            if recorder.frame_due(loop_count):
-                diagnostic_frame = _annotate_road_frame(
-                    frame,
-                    perception=perception,
-                    loop_count=loop_count,
-                    controller_diagnostics=controller_diagnostics,
-                    safe_command=safe.command,
-                    fc_telemetry=fc_telemetry,
-                    perception_age_s=percept_age_s,
-                    perception_stale=percept_stale,
-                )
+            if recorder.frame_due(loop_count, loop_start):
+                diagnostic_frame = frame
+                if process_runtime is None:
+                    diagnostic_frame = _annotate_road_frame(
+                        frame,
+                        perception=perception,
+                        loop_count=loop_count,
+                        controller_diagnostics=controller_diagnostics,
+                        safe_command=safe.command,
+                        fc_telemetry=fc_telemetry,
+                        perception_age_s=percept_age_s,
+                        perception_stale=percept_stale,
+                    )
                 frame_record_path = recorder.record_frame(
                     loop_count=loop_count,
                     now_s=loop_start,
@@ -788,7 +848,31 @@ def main(argv: list[str] | None = None) -> None:
                     frame_age_s=frame_age_s,
                     fc_telemetry=fc_telemetry,
                 )
+                timing = loop_monitor.snapshot()
+                runtime_health = process_runtime.health(loop_start) if process_runtime else None
+                logger.info(
+                    "[RUNTIME] target_hz={:.1f} actual_hz={:.2f} work_p95_ms={:.2f} "
+                    "work_p99_ms={:.2f} jitter_p99_ms={:.2f} deadline_miss={} "
+                    "vision_age_ms={} radar_age_ms={} vision_drop={} radar_drop={} vq={} rq={}",
+                    timing.target_hz,
+                    timing.achieved_hz,
+                    timing.work_p95_ms,
+                    timing.work_p99_ms,
+                    timing.jitter_p99_ms,
+                    timing.deadline_misses,
+                    _float_or_none(
+                        runtime_health.vision_age_s * 1000.0 if runtime_health else percept_age_s * 1000.0
+                    ),
+                    _float_or_none(
+                        runtime_health.radar_age_s * 1000.0 if runtime_health else radar_age_s * 1000.0
+                    ),
+                    runtime_health.vision_publish_drops if runtime_health else None,
+                    runtime_health.radar_publish_drops if runtime_health else None,
+                    runtime_health.vision_queue_depth if runtime_health else None,
+                    runtime_health.radar_queue_depth if runtime_health else None,
+                )
 
+            loop_monitor.record(loop_start, time.perf_counter())
             loop_count += 1
             _sleep_to_rate(loop_start, period_s)
     except KeyboardInterrupt:
@@ -821,9 +905,13 @@ def main(argv: list[str] | None = None) -> None:
         if multi_radar is not None:
             multi_radar.stop()
         logger.info("[ROAD] stopped")
-        recorder.close()
+        if process_runtime is not None:
+            process_runtime.stop_workers()
         if log_sink_id is not None:
             logger.remove(log_sink_id)
+        recorder.close()
+        if process_runtime is not None:
+            process_runtime.stop()
 
 
 def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
@@ -1645,9 +1733,11 @@ def _point_extra(point) -> list[float] | None:
         return None
 
 
-def _setup_logging(log_file: str | Path | None) -> int | None:
+def _setup_logging(log_file) -> int | None:
     if not log_file:
         return None
+    if callable(log_file):
+        return logger.add(log_file, enqueue=False, level="DEBUG")
     path = Path(log_file)
     if str(path).replace("\\", "/").startswith("/tmp/"):
         logger.warning("Avoid writing logs to /tmp on the target board")

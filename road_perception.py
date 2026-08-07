@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, List, Tuple
 
@@ -1804,6 +1805,7 @@ def get_road_perception(
     branch_preference: str = "auto",
     previous_branch_label: str | None = None,
     wb_config: CameraWhiteBalanceConfig | None = None,
+    timing: dict[str, float] | None = None,
 ) -> RoadPerceptionResult:
     """Run one-frame, single-road perception on an OpenCV BGR frame.
 
@@ -1816,9 +1818,12 @@ def get_road_perception(
     if frame_error is not None:
         return _lost_result(frame_error)
 
+    normalize_started_s = time.perf_counter()
     frame_bgr = _normalize_frame(frame)
     if wb_config is not None:
         frame_bgr = _apply_white_balance(frame_bgr, wb_config)
+    if timing is not None:
+        timing["normalize_ms"] = (time.perf_counter() - normalize_started_s) * 1000.0
     debug_mask: np.ndarray | None = None
 
     try:
@@ -1826,6 +1831,7 @@ def get_road_perception(
 
         session, input_name = _get_session()
         input_size = _MODEL_INPUT_SIZE or INP_SIZE
+        preprocess_started_s = time.perf_counter()
         if _MODEL_KIND == MODEL_KIND_SEMANTIC:
             blob = _preprocess_semantic(frame_bgr, input_size)
             pad_x = 0.0
@@ -1834,12 +1840,18 @@ def get_road_perception(
             blob, _scale, pad_x, pad_y = _preprocess_crop(frame_bgr, input_size)
         else:
             blob, _scale, pad_x, pad_y = _preprocess(frame_bgr, input_size)
+        if timing is not None:
+            timing["preprocess_ms"] = (time.perf_counter() - preprocess_started_s) * 1000.0
+        npu_started_s = time.perf_counter()
         outputs = session.run(None, {input_name: blob})
+        if timing is not None:
+            timing["npu_ms"] = (time.perf_counter() - npu_started_s) * 1000.0
 
         if (
             _MODEL_KIND == MODEL_KIND_SEMANTIC
             and _POSTPROCESS_MODE == POSTPROCESS_FAST_MAIN
         ):
+            postprocess_started_s = time.perf_counter()
             result = _build_fast_main_result(
                 outputs,
                 orig_w=orig_w,
@@ -1848,6 +1860,10 @@ def get_road_perception(
                 cam_offset_m=cam_offset_m,
                 offset_comp_config=offset_comp_config,
             )
+            if timing is not None:
+                timing["postprocess_ms"] = (
+                    time.perf_counter() - postprocess_started_s
+                ) * 1000.0
             if debug_save_path:
                 _save_debug_image(frame_bgr, result.debug_mask, result, debug_save_path)
             return result

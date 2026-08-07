@@ -330,6 +330,9 @@ class YOLOInferenceThread:
         self._interval_inference_ms_total: float = 0.0
         self._interval_inference_ms_max: float = 0.0
         self._interval_input_age_ms_max: float = 0.0
+        self.last_inference_ms: float = 0.0
+        self.last_input_age_ms: float = 0.0
+        self.last_stage_timing: dict[str, float] = {}
 
     # ── lifecycle ───────────────────────────────────────────────────
 
@@ -436,12 +439,14 @@ class YOLOInferenceThread:
 
             try:
                 inference_started_s = time.monotonic()
+                stage_timing: dict[str, float] = {}
                 result = road_perception.get_road_perception(
                     frame,
                     flight_height_m=self._flight_height_m,
                     debug_save_path=None,
                     offset_comp_config=self._offset_comp_config,
                     wb_config=wb_config,
+                    timing=stage_timing,
                 )
                 inference_finished_s = time.monotonic()
             except Exception as exc:
@@ -456,6 +461,9 @@ class YOLOInferenceThread:
             self.inference_count += 1
             inference_ms = max(0.0, inference_finished_s - inference_started_s) * 1000.0
             input_age_ms = max(0.0, inference_finished_s - frame_ts) * 1000.0
+            self.last_inference_ms = inference_ms
+            self.last_input_age_ms = input_age_ms
+            self.last_stage_timing = stage_timing
             self._interval_inference_ms_total += inference_ms
             self._interval_inference_ms_max = max(
                 self._interval_inference_ms_max,

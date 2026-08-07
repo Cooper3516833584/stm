@@ -1,9 +1,12 @@
 # 独立视觉 + 实体雷达静态路线绕障最终报告
 
+进度更新：2026-08-07。当前默认方案已冻结为 `static-route-flight-v1`。
+
 ## 1. 实验目标
 
-在不修改生产视觉巡线与 `SafetyArbiter` 的前提下，使飞机绕开指定路线中的单个静止
-管状障碍，并在确认整个管体已经越过后继续视觉寻路。
+在不修改生产视觉巡线的前提下，使飞机绕开指定路线中的单个静止管状障碍，并在确认整个
+管体已经越过后继续视觉寻路。实飞复盘后对 `SafetyArbiter` 的侧向几何和组合仲裁进行了
+修正，但最大速度、80 cm 前向停车、45 cm 侧向停车和雷达 freshness 门均未降低。
 
 ## 2. 问题根因
 
@@ -53,7 +56,8 @@ WAIT_VISUAL → BLEND_BACK → NORMAL`。选边在整个 encounter 中锁存。
 ## 11. 正侧越过确认
 
 管体必须在锁定侧到达至少 80°、前向坐标连续减小，并从 90°边缘连续消失三帧，才可
-进入无直接观测的短距离确认。中心区域掉点不会被当作越过。
+进入无直接观测的短距离确认。若管体在 `DIVERGE` 阶段先到达侧缘，只要净空不低于
+75 cm 回差线，也可直接进入 `SIDE_PASS_CONFIRM`；中心区域掉点仍不会被当作越过。
 
 ## 12. 二维指令里程
 
@@ -69,7 +73,10 @@ Safety 且实际成功下发的命令，平移按 0.7 系数保守计入。完�
 ## 14. 安全不变量
 
 最大 `vx=14`、`vy=10 cm/s`、`yaw_rate=10°/s`、前向停车 80 cm、侧向停车 45 cm 和
-雷达 freshness gate 均未降低。Safety 继续接收完整实体点云。
+雷达 freshness gate 均未降低。Safety 继续接收完整实体点云。侧向碰撞判断按
+`50 cm × 50 cm` 机身建模，只检查 `|x|≤25 cm` 的有限扫掠走廊，排除远后方和近中心线
+杂点；前向停车与左右侧向阻挡会在同一帧完成组合仲裁。安全层同时新增非有限指令、
+非有限姿态和已启用电池门限时数据缺失的硬停车检查。
 
 ## 15. 兼容性
 
@@ -78,13 +85,14 @@ legacy basic、legacy recovery、smooth sidestep、circular bypass 均通过实�
 
 ## 16. 本地测试
 
-使用现有 `yolo11` Conda 环境的完整运行依赖，并加载 base 环境 pytest。实验测试结果为
-实验、Safety、yaw 符号与记录器测试合计 `96 passed`。闭环断言同时覆盖直线路径和持续
-`2°/s` yaw 的弯线路径。
+使用现有 `yolo11` Conda 环境运行。Safety/状态机扩展回归为 `170 passed`，另有一个既有
+且与本任务无关的 `RelativeGoalNavigator` yaw 符号断言失败；冻结版本专项测试为
+`59 passed`。benchmark 纯断言通过，并覆盖直线路径、持续 `2°/s` yaw 的弯线路径及
+legacy basic、legacy recovery、smooth sidestep、circular bypass 兼容入口。
 
 ## 17. 闭环稳定性
 
-- 直路：315 帧完成，side switch 0，状态切换 7，最小径向表面距离 84.76 cm。
+- 直路：315 帧完成，side switch 0，状态切换 8，最小径向表面距离 84.76 cm。
 - 弯路：207 帧完成，side switch 0，状态切换 7，最小径向表面距离 88.75 cm。
 - 两者在越过确认前均未出现视觉反向横移；最大相邻 `Δvy=1.47 cm/s`。
 
@@ -94,20 +102,21 @@ legacy basic、legacy recovery、smooth sidestep、circular bypass 均通过实�
 
 | 规划器 | mean | p50 | p95 |
 |---|---:|---:|---:|
-| legacy basic | 174.30 | 122.10 | 335.92 |
-| legacy recovery | 162.17 | 120.85 | 338.52 |
-| smooth sidestep | 44.66 | 38.55 | 80.31 |
-| circular bypass | 44.70 | 36.15 | 80.00 |
-| static route | 88.18 | 78.10 | 124.53 |
+| legacy basic | 182.80 | 169.40 | 230.92 |
+| legacy recovery | 186.09 | 168.85 | 274.41 |
+| smooth sidestep | 46.03 | 39.50 | 87.34 |
+| circular bypass | 55.37 | 53.00 | 63.50 |
+| static route | 141.37 | 127.70 | 202.95 |
 
 新规划器耗时远低于 10 Hz 控制周期的 100 ms；视觉 NPU 推理仍是主耗时。
 
 ## 19. 开发板与 Git 审计
 
-本地 `main` 通过两个 revert 和实现提交推送，开发板从干净的 `bd991c0` 仅经
-`git fetch`、`git pull --ff-only` 快进至 `729dc23`。板端 compile、直线/弯路闭环断言和
-旧规划器兼容断言全部通过；2000 次同源输入下 static-route 为
-mean/p50/p95=`2617.79/2583.71/2868.58 µs`，远低于 100 ms 控制周期。
+本地 `main` 已推送至 `origin/main`。关键进度提交为：`729dc23`（static-route 初版）、
+`6f47d30`（禁止 encounter 内切换到全局背景点簇）、`1a0f2df`（重刷后路径与访问记录）、
+`70b4828`（Safety 侧向走廊、组合仲裁和 DIVERGE 侧缘修复）、`4c84333`（冻结默认 v1）。
+Git 标签 `static-route-flight-v1` 指向 `4c84333`。本次文档更新没有通过 SSH 拉取或修改
+开发板源码；下次板端测试前应确认板端通过 Git 快进到目标提交。
 
 历史实体雷达会话回放 16 帧全部形成有效观测，共处理 12,079 个前半平面点，且
 `command_progress_applied=0.0`。真实摄像头和双雷达 20 秒 dry-run 会话为
@@ -122,4 +131,14 @@ mean/p50/p95=`2617.79/2583.71/2868.58 µs`，远低于 100 ms 控制周期。
 状态机，禁止全局换目标。对应实飞轨迹回归用例确认正常进入 `CLEARANCE_RUN`，不再累计模型
 失配。重刷后持久分区确认为 `/data`，SessionRecorder 及主要记录入口默认改为
 `/data/stm_records`（原始数据记录为 `/data/recordings`）；完整参数表仅保存在 `session.json`，
-不再打印到终端。用户四个既有文档修改保持未暂存。
+不再打印到终端。
+
+后续一次实飞中，管体位于飞机正左侧附近时悬停。日志确认两项原因叠加：状态机在
+`DIVERGE_RIGHT` 中坚持等待 85 cm 三帧净空，虽然目标已到约 `+84°`；同时 Safety 将
+`(-235..-296, -0.0) cm` 的远后方杂点按 `y<0` 误判为右侧贴近障碍，反复输出
+`right_side_blocked`。`70b4828` 修复后，DIVERGE 可在 ≥80°且净空 ≥75 cm 时进入侧缘确认，
+Safety 只在 `|x|≤25 cm` 的机体扫掠走廊判断侧向阻挡。用户随后实飞确认绕障平滑、无左右
+摇摆并能正常完成，因此当前方案以 `static-route-flight-v1` 冻结为默认。
+
+冻结仅约束 v1 默认参数。`StaticRouteBypassConfig` 保持可配置，为后续提高前向速度比例或
+横移上限保留空间；提速应新增 v2 档并重新完成安全、闭环和实飞验收，不能覆盖 v1 标签。

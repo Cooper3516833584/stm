@@ -119,6 +119,7 @@ class ProcessRuntimeConfig:
     upper_port: str = "/dev/ttySTM4"
     lower_port: str = "/dev/ttySTM9"
     radar_timeout_s: float = 0.5
+    radar_batch_period_s: float = 0.01
     radar_publish_hz: float = 50.0
     frame_slots: int = 8
     radar_slots: int = 2

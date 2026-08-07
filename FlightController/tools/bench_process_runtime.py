@@ -240,6 +240,7 @@ def _run_rate(runtime, recorder, rate_hz: float, warmup_s: float, sample_s: floa
                 vision_snapshot.publish_drops if vision_snapshot is not None else 0
             ),
             "radar_publish_drops": radar.publish_drops if radar is not None else 0,
+            "radar_health": list(radar.radar_health) if radar is not None else [],
             "recorder": recorder.stats() if recorder is not None else None,
         }
     )

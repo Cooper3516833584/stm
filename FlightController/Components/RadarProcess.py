@@ -284,29 +284,33 @@ def radar_worker_main(config, radar_ring_descriptor, output, ready_event, stop_e
         ready_event.set()
         sequence = 0
         publish_drops = 0
+        batch_period_s = max(0.001, float(config.radar_batch_period_s))
         publish_period_s = 1.0 / max(1.0, float(config.radar_publish_hz))
-        next_publish_s = time.perf_counter()
+        next_batch_s = time.perf_counter()
+        next_publish_s = next_batch_s
         while not stop_event.is_set():
-            did_work = False
-            for device, state in zip(serials, states):
-                waiting = int(device.in_waiting)
-                state["in_waiting_peak"] = max(state["in_waiting_peak"], waiting)
-                if waiting <= 0:
-                    continue
-                chunk = device.read(waiting)
-                read_time_s = time.perf_counter()
-                state["bytes_read"] += len(chunk)
-                state["read_batches"] += 1
-                batch = state["parser"].feed(chunk)
-                if batch is not None:
-                    state["map"].update_batch(batch, read_time_s)
-                    state["last_frame_time_s"] = read_time_s
-                    state["last_device_timestamp_ms"] = int(batch.timestamps_ms[-1])
-                    extended = state["timestamp_tracker"].update_many(batch.timestamps_ms)
-                    state["last_device_timestamp_extended_ms"] = int(extended[-1])
-                did_work = True
-
             now_s = time.perf_counter()
+            if now_s >= next_batch_s:
+                for device, state in zip(serials, states):
+                    waiting = int(device.in_waiting)
+                    state["in_waiting_peak"] = max(state["in_waiting_peak"], waiting)
+                    if waiting <= 0:
+                        continue
+                    chunk = device.read(waiting)
+                    read_time_s = time.perf_counter()
+                    state["bytes_read"] += len(chunk)
+                    state["read_batches"] += 1
+                    batch = state["parser"].feed(chunk)
+                    if batch is not None:
+                        state["map"].update_batch(batch, read_time_s)
+                        state["last_frame_time_s"] = read_time_s
+                        state["last_device_timestamp_ms"] = int(batch.timestamps_ms[-1])
+                        extended = state["timestamp_tracker"].update_many(batch.timestamps_ms)
+                        state["last_device_timestamp_extended_ms"] = int(extended[-1])
+                now_s = time.perf_counter()
+                while next_batch_s <= now_s:
+                    next_batch_s += batch_period_s
+
             if now_s >= next_publish_s:
                 point_sets = []
                 for state, (mount_xy, mount_yaw, mirror) in zip(states, mounts):
@@ -379,8 +383,9 @@ def radar_worker_main(config, radar_ring_descriptor, output, ready_event, stop_e
                 )
                 while next_publish_s <= now_s:
                     next_publish_s += publish_period_s
-            if not did_work:
-                time.sleep(0.001)
+            delay_s = min(next_batch_s, next_publish_s) - time.perf_counter()
+            if delay_s > 0.0:
+                time.sleep(min(0.005, delay_s))
     finally:
         ready_event.clear()
         for device in serials:

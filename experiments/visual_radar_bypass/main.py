@@ -36,24 +36,17 @@ from .flight_runtime import (
     wait_for_radars,
     wait_for_visual_road,
 )
-from .diagnostics import ExperimentDiagnosticsTracker
 from .circular_tube_bypass import (
     CircularTubeBypassConfig,
     CircularTubeBypassPlanner,
 )
 from .radar_bypass import ObstacleBypassConfig, ObstacleBypassPlanner
 from .right_half_handoff import RightHalfRadarHandoff
-from .smooth_sidestep import SmoothSidestepConfig, SmoothSidestepPlanner
-from .parameter_registry import (
-    ExperimentLoggingConfig,
-    ExperimentSafetyConfig,
-    build_parameter_registry,
-)
+from .smooth_sidestep import SmoothSidestepPlanner
 from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
         description="Isolated real-vision/physical-radar tubular-obstacle test"
     )
@@ -64,16 +57,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fc-port", default=None)
     parser.add_argument("--loop-hz", type=float, default=10.0)
     parser.add_argument("--duration-s", type=float, default=60.0)
-    parser.add_argument(
-        "--radar-timeout-s",
-        type=float,
-        default=ExperimentSafetyConfig().radar_timeout_s,
-    )
+    parser.add_argument("--radar-timeout-s", type=float, default=0.5)
     parser.add_argument(
         "--bypass-planner",
         choices=("legacy", "smooth-sidestep"),
-        default="smooth-sidestep",
-        help="Select the optimized smooth sidestep or the unchanged legacy planner",
+        default="legacy",
+        help="Select the unchanged legacy planner or the isolated smooth sidestep",
     )
     parser.add_argument(
         "--bypass-forward-transition-s",
@@ -97,18 +86,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tube-radius-cm", type=float, default=15.0)
     parser.add_argument("--tube-safety-radius-cm", type=float, default=75.0)
     parser.add_argument("--record-dir", default="/media/sdcard/stm_records")
-    parser.add_argument(
-        "--tuning-log-every-n",
-        type=int,
-        default=ExperimentLoggingConfig().tuning_log_every_n,
-        help="Write structured command tuning data every N control frames",
-    )
-    parser.add_argument(
-        "--radar-snapshot-every-n",
-        type=int,
-        default=ExperimentLoggingConfig().radar_snapshot_every_n,
-        help="Write radar point snapshots every N control frames",
-    )
     parser.add_argument("--no-record", action="store_true")
     parser.add_argument("--enable-flight", action="store_true")
     parser.add_argument("--auto-takeoff", action="store_true")
@@ -118,14 +95,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Acknowledge real unlock/takeoff using live camera and physical radars",
     )
     parser.add_argument("--takeoff-height-cm", type=int, default=100)
-    args = parser.parse_args(raw_argv)
-    if (
-        args.right_half_radar_then_visual or args.circular_tube_bypass
-    ) and "--bypass-planner" not in raw_argv:
-        # Compatibility: these pre-existing mode flags historically selected
-        # their legacy-based planner without an extra --bypass-planner option.
-        args.bypass_planner = "legacy"
-    return args
+    return parser.parse_args(argv)
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -137,10 +107,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--duration-s must be greater than zero")
     if args.bypass_forward_transition_s < 0.0:
         raise ValueError("--bypass-forward-transition-s cannot be negative")
-    if args.tuning_log_every_n <= 0:
-        raise ValueError("--tuning-log-every-n must be a positive integer")
-    if args.radar_snapshot_every_n <= 0:
-        raise ValueError("--radar-snapshot-every-n must be a positive integer")
     if args.right_half_radar_then_visual:
         if args.bypass_planner != "legacy":
             raise ValueError("--right-half-radar-then-visual requires legacy planner")
@@ -190,28 +156,6 @@ def main(argv: list[str] | None = None) -> None:
     flight_config = FlightRuntimeConfig(
         takeoff_height_cm=args.takeoff_height_cm,
     )
-    smooth_config = SmoothSidestepConfig()
-    experiment_safety = ExperimentSafetyConfig(
-        radar_timeout_s=args.radar_timeout_s,
-    )
-    if (
-        visual_config.max_vx_cm_s != experiment_safety.max_vx_cm_s
-        or visual_config.max_vy_cm_s != experiment_safety.max_vy_cm_s
-        or visual_config.max_yaw_rate_deg_s
-        != experiment_safety.max_yaw_rate_deg_s
-    ):
-        raise RuntimeError(
-            "experiment safety caps must match the frozen visual command caps"
-        )
-    experiment_logging = ExperimentLoggingConfig(
-        tuning_log_every_n=args.tuning_log_every_n,
-        radar_snapshot_every_n=args.radar_snapshot_every_n,
-    )
-    parameter_registry = build_parameter_registry(
-        smooth_config,
-        experiment_safety,
-        experiment_logging,
-    )
     if args.circular_tube_bypass:
         session_mode = "isolated_visual_radar_circular_tube"
     elif args.bypass_planner == "smooth-sidestep":
@@ -224,7 +168,7 @@ def main(argv: list[str] | None = None) -> None:
             enabled=not args.no_record,
             mode=session_mode,
             frame_every_n=10,
-            radar_every_n=experiment_logging.radar_snapshot_every_n,
+            radar_every_n=1,
             video_enabled=True,
             video_every_n=2,
             video_fps=5.0,
@@ -240,28 +184,21 @@ def main(argv: list[str] | None = None) -> None:
                 "circular_tube_bypass": args.circular_tube_bypass,
                 "tube_radius_cm": args.tube_radius_cm,
                 "tube_safety_radius_cm": args.tube_safety_radius_cm,
-                "parameter_registry": parameter_registry,
             },
         )
     )
     if actual_flight and not recorder.enabled:
         raise RuntimeError("flight test refused because session recording is unavailable")
     sink_id = _setup_logging(recorder.runtime_log_path)
-    logger.info(
-        "[VIS-RADAR][PARAMETERS] {}",
-        parameter_registry,
-    )
 
     guidance = FrozenVisualGuidance(visual_config)
     radars = MultiRadar(_radar_configs(args.upper_port, args.lower_port))
     radar_field = RadarObstacleField(
         RadarFieldConfig(
-            max_distance_cm=experiment_safety.radar_max_distance_cm,
-            body_x_half_cm=experiment_safety.radar_body_x_half_cm,
-            body_y_half_cm=experiment_safety.radar_body_y_half_cm,
-            forward_corridor_half_width_cm=(
-                experiment_safety.radar_forward_corridor_half_width_cm
-            ),
+            max_distance_cm=300.0,
+            body_x_half_cm=25.0,
+            body_y_half_cm=25.0,
+            forward_corridor_half_width_cm=75.0,
         )
     )
     if args.circular_tube_bypass:
@@ -272,7 +209,7 @@ def main(argv: list[str] | None = None) -> None:
             )
         )
     elif args.bypass_planner == "smooth-sidestep":
-        planner = SmoothSidestepPlanner(smooth_config)
+        planner = SmoothSidestepPlanner()
     else:
         planner = ObstacleBypassPlanner(
             ObstacleBypassConfig(
@@ -288,18 +225,13 @@ def main(argv: list[str] | None = None) -> None:
             require_hold_pos_mode=actual_flight,
             require_unlocked=actual_flight,
             require_radar=True,
-            radar_timeout_s=experiment_safety.radar_timeout_s,
-            max_vx_cm_s=experiment_safety.max_vx_cm_s,
-            max_vy_cm_s=experiment_safety.max_vy_cm_s,
-            max_yaw_rate_deg_s=experiment_safety.max_yaw_rate_deg_s,
-            obstacle_stop_distance_cm=(
-                experiment_safety.obstacle_stop_distance_cm
-            ),
-            obstacle_slow_distance_cm=(
-                experiment_safety.obstacle_slow_distance_cm
-            ),
-            slow_speed_limit_cm_s=experiment_safety.slow_speed_limit_cm_s,
-            side_stop_distance_cm=experiment_safety.side_stop_distance_cm,
+            radar_timeout_s=args.radar_timeout_s,
+            max_vx_cm_s=visual_config.max_vx_cm_s,
+            max_vy_cm_s=visual_config.max_vy_cm_s,
+            max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
+            obstacle_stop_distance_cm=80.0,
+            obstacle_slow_distance_cm=150.0,
+            slow_speed_limit_cm_s=10.0,
         )
     )
     visual_only_arbiter = SafetyArbiter(
@@ -308,10 +240,10 @@ def main(argv: list[str] | None = None) -> None:
             require_hold_pos_mode=actual_flight,
             require_unlocked=actual_flight,
             require_radar=False,
-            radar_timeout_s=experiment_safety.radar_timeout_s,
-            max_vx_cm_s=experiment_safety.max_vx_cm_s,
-            max_vy_cm_s=experiment_safety.max_vy_cm_s,
-            max_yaw_rate_deg_s=experiment_safety.max_yaw_rate_deg_s,
+            radar_timeout_s=args.radar_timeout_s,
+            max_vx_cm_s=visual_config.max_vx_cm_s,
+            max_vy_cm_s=visual_config.max_vy_cm_s,
+            max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
         )
     )
 
@@ -321,7 +253,6 @@ def main(argv: list[str] | None = None) -> None:
     guidance_started = False
     radars_started = False
     period_s = 1.0 / args.loop_hz
-    diagnostics_tracker = ExperimentDiagnosticsTracker()
     try:
         guidance.start()
         guidance_started = True
@@ -340,15 +271,11 @@ def main(argv: list[str] | None = None) -> None:
             )
 
         start_s = time.perf_counter()
-        previous_loop_s = start_s
         last_log_s = 0.0
         loop_count = 0
         while time.perf_counter() - start_s < args.duration_s:
             loop_start = time.perf_counter()
-            dt_s = max(0.0, loop_start - previous_loop_s)
-            previous_loop_s = loop_start
             sample = guidance.sample(loop_start)
-            planner_elapsed_us = 0.0
             radar_retired = bool(
                 right_half_handoff is not None
                 and right_half_handoff.radar_disabled
@@ -358,9 +285,7 @@ def main(argv: list[str] | None = None) -> None:
                 radar_fresh = False
                 planned = sample.desired
             else:
-                points = radars.get_obstacle_points_body_cm(
-                    max_distance_cm=experiment_safety.radar_max_distance_cm
-                )
+                points = radars.get_obstacle_points_body_cm(max_distance_cm=300.0)
                 if right_half_handoff is not None:
                     points = right_half_handoff.filter_right_half_plane(points)
                 radar_field.update(points, loop_start)
@@ -370,16 +295,12 @@ def main(argv: list[str] | None = None) -> None:
                     and radars.is_fresh(max_age_s=args.radar_timeout_s)
                 )
                 previous_planner_state = planner.state
-                planner_started_ns = time.perf_counter_ns()
                 planned = planner.update(
                     desired=sample.desired,
                     perception=sample.perception,
                     radar_field=radar_field,
                     now_s=loop_start,
                 )
-                planner_elapsed_us = (
-                    time.perf_counter_ns() - planner_started_ns
-                ) / 1000.0
                 if (
                     right_half_handoff is not None
                     and right_half_handoff.observe(
@@ -424,31 +345,6 @@ def main(argv: list[str] | None = None) -> None:
                 health,
                 dry_run=not actual_flight,
             )
-            planner_diagnostics = planner.diagnostics()
-            tuning_diagnostics, diagnostic_events = diagnostics_tracker.observe(
-                frame_id=loop_count,
-                now_s=loop_start,
-                dt_s=dt_s,
-                planner_elapsed_us=planner_elapsed_us,
-                desired=sample.desired,
-                planned=planned,
-                safe=safe.command,
-                final=decision.command,
-                planner_diagnostics=planner_diagnostics,
-                safety_state=safe.state,
-                safety_reasons=safe.reasons,
-                decision_reason=decision.reason,
-                nearest_forward_cm=safe.nearest_forward_obstacle_cm,
-                raw_radar_point_count=len(radar_field.raw_points_body_cm),
-                radar_point_count=len(radar_field.points_body_cm),
-            )
-            for event in diagnostic_events:
-                logger.info(
-                    "[VIS-RADAR][EVENT] event={} reason={} payload={}",
-                    event.event,
-                    event.reason,
-                    event.payload,
-                )
             extra = {
                 "visual": {
                     "road_found": bool(
@@ -468,8 +364,7 @@ def main(argv: list[str] | None = None) -> None:
                     "camera_ok": sample.camera_ok,
                     "controller": sample.diagnostics,
                 },
-                "tube_obstacle_bypass": planner_diagnostics,
-                "tuning": tuning_diagnostics,
+                "tube_obstacle_bypass": planner.diagnostics(),
                 "right_half_handoff": (
                     right_half_handoff.diagnostics()
                     if right_half_handoff is not None
@@ -495,19 +390,18 @@ def main(argv: list[str] | None = None) -> None:
                     radar_age_s=radar_age_s,
                     radar_connected=radar_fresh,
                     desired=sample.desired,
-                    safe_command=decision.command,
+                    safe_command=safe.command,
                     decision_reason=decision.reason,
                     extra=extra,
                 )
-            if loop_count % experiment_logging.tuning_log_every_n == 0:
-                recorder.record_command(
-                    loop_count=loop_count,
-                    now_s=loop_start,
-                    desired=sample.desired,
-                    safe_command=decision.command,
-                    decision_reason=decision.reason,
-                    extra=extra,
-                )
+            recorder.record_command(
+                loop_count=loop_count,
+                now_s=loop_start,
+                desired=sample.desired,
+                safe_command=safe.command,
+                decision_reason=decision.reason,
+                extra=extra,
+            )
             if loop_start - last_log_s >= 1.0:
                 last_log_s = loop_start
                 logger.info(
@@ -526,7 +420,7 @@ def main(argv: list[str] | None = None) -> None:
                     planner.target_y_cm,
                     sample.desired.as_fc_tuple(),
                     planned.as_fc_tuple(),
-                    decision.command.as_fc_tuple(),
+                    safe.command.as_fc_tuple(),
                     bool(actual_flight and decision.allowed),
                 )
             loop_count += 1

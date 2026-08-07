@@ -33,7 +33,7 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.upper_port == "/dev/ttySTM4"
     assert args.lower_port == "/dev/ttySTM9"
     assert args.loop_hz == 10.0
-    assert args.bypass_planner == "smooth-sidestep"
+    assert args.bypass_planner == "legacy"
     assert args.bypass_forward_transition_s == 2.0
     assert not args.right_half_radar_then_visual
     assert not args.circular_tube_bypass
@@ -42,33 +42,18 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert not hasattr(args, "synthetic_radar")
 
 
-def test_legacy_planner_remains_explicitly_selectable(tmp_path):
+def test_smooth_sidestep_is_explicit_and_does_not_replace_legacy_default(tmp_path):
     args = main.parse_args(
         [
             "--model-npu",
             _model(tmp_path),
             "--bypass-planner",
-            "legacy",
+            "smooth-sidestep",
         ]
     )
 
     main.validate_args(args)
-    assert args.bypass_planner == "legacy"
-
-
-def test_logging_sampling_defaults_and_validation(tmp_path):
-    args = main.parse_args(["--model-npu", _model(tmp_path)])
-
-    main.validate_args(args)
-    assert args.tuning_log_every_n == 2
-    assert args.radar_snapshot_every_n == 5
-
-    for option in ("--tuning-log-every-n", "--radar-snapshot-every-n"):
-        invalid = main.parse_args(
-            ["--model-npu", _model(tmp_path), option, "0"]
-        )
-        with pytest.raises(ValueError, match="positive integer"):
-            main.validate_args(invalid)
+    assert args.bypass_planner == "smooth-sidestep"
 
 
 def test_legacy_forward_transition_duration_is_configurable(tmp_path):
@@ -110,7 +95,6 @@ def test_right_half_radar_then_visual_is_explicit(tmp_path):
 
     main.validate_args(args)
     assert args.right_half_radar_then_visual
-    assert args.bypass_planner == "legacy"
 
 
 @pytest.mark.parametrize(
@@ -152,7 +136,6 @@ def test_circular_tube_bypass_is_an_independent_explicit_mode(tmp_path):
 
     main.validate_args(args)
     assert args.circular_tube_bypass
-    assert args.bypass_planner == "legacy"
     assert args.tube_radius_cm == 7.5
     assert args.tube_safety_radius_cm == 65.0
 

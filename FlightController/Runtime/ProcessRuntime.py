@@ -119,7 +119,7 @@ class ProcessRuntimeConfig:
     upper_port: str = "/dev/ttySTM4"
     lower_port: str = "/dev/ttySTM9"
     radar_timeout_s: float = 0.5
-    radar_batch_period_s: float = 0.01
+    radar_batch_period_s: float = 0.02
     radar_publish_hz: float = 25.0
     frame_slots: int = 8
     radar_slots: int = 2
@@ -278,7 +278,7 @@ class ProcessRuntime:
         # A few feeder slots let the consumer drain to the newest snapshot
         # without relying on a producer-side get_nowait() racing Queue's
         # background feeder thread. The channel remains bounded/latest-only.
-        self._radar_queue = self._ctx.Queue(maxsize=4)
+        self._radar_queue = self._ctx.Queue(maxsize=8)
         self._frame_ring = _SharedArrayRing(
             slots=self.config.frame_slots,
             shape=(self.config.camera_height, self.config.camera_width, 3),

@@ -89,7 +89,7 @@ def test_ramp_in_is_monotonic_and_reaches_configured_lateral_speed():
     lateral = [command.vy_cm_s for command in outputs]
     assert lateral == sorted(lateral)
     assert lateral[-1] == 10.0
-    assert outputs[-1].vx_cm_s == 8.0
+    assert outputs[-1].vx_cm_s == 0.0
 
 
 def test_clear_hold_prevents_short_radar_dropout_from_returning_to_vision():
@@ -217,6 +217,45 @@ def test_diagnostics_expose_locked_side_and_smooth_weight():
     diagnostics = planner.diagnostics()
 
     assert diagnostics["planner"] == "smooth_sidestep"
+    assert diagnostics["previous_state"] == "normal"
+    assert diagnostics["transition_reason"] == "confirmed_obstacle_encounter"
+    assert diagnostics["encounter_id"] == 1
     assert diagnostics["active_bypass_side"] == "left"
+    assert diagnostics["selected_side"] == "left"
+    assert diagnostics["selected_side_reason"] == "obstacle_right_select_left"
+    assert diagnostics["side_locked"]
     assert 0.0 < diagnostics["blend_alpha"] < 1.0
     assert diagnostics["obstacle_side"] == "right"
+    assert diagnostics["observation_valid"]
+    assert diagnostics["obstacle_surface_x_cm"] == 79.0
+    assert diagnostics["fallback_id"] is None
+
+
+def test_opposite_side_noise_keeps_one_encounter_and_locked_side():
+    planner = SmoothSidestepPlanner()
+    _activate_right(planner)
+
+    encounter_id = planner.encounter_id
+    outputs = [
+        _update(planner, field, 1.2 + index * 0.1)
+        for index, field in enumerate(
+            [LEFT_OBSTACLE, RIGHT_OBSTACLE] * 12
+        )
+    ]
+
+    assert planner.encounter_id == encounter_id
+    assert planner.active_bypass_side == 1
+    assert all(command.vy_cm_s > _desired().vy_cm_s for command in outputs)
+
+
+def test_completed_blend_unlocks_side_and_preserves_encounter_counter():
+    planner = SmoothSidestepPlanner()
+    _activate_right(planner)
+    for step in range(1, 60):
+        output = _update(planner, EMPTY, 1.2 + step * 0.1)
+
+    assert output == _desired()
+    assert planner.state == SmoothSidestepState.NORMAL
+    assert planner.active_bypass_side is None
+    assert planner.encounter_id == 1
+    assert planner.diagnostics()["transition_reason"] == "blend_complete"

@@ -27,6 +27,8 @@ class SmoothSidestepState(str, Enum):
 
 @dataclass(frozen=True)
 class SmoothSidestepConfig:
+    # EXISTING_PROJECT: physical road/radar geometry retained from the
+    # isolated legacy experiment.
     road_half_width_cm: float = 25.0
     intrusion_half_width_cm: float = 75.0
     clearance_cm: float = 75.0
@@ -37,7 +39,10 @@ class SmoothSidestepConfig:
     side_deadband_cm: float = 5.0
     center_obstacle_default_bypass_side: str = "right"
 
-    shift_forward_speed_cm_s: float = 8.0
+    # UNVERIFIED_TUNING: keep the selected manoeuvre purely lateral so the
+    # 80 cm production SafetyArbiter gate cannot repeatedly toggle forward
+    # velocity while radar distance jitters at its threshold.
+    shift_forward_speed_cm_s: float = 0.0
     shift_lateral_speed_cm_s: float = 10.0
     ramp_in_s: float = 1.0
     clear_hold_s: float = 2.0
@@ -60,6 +65,7 @@ class SmoothSidestepConfig:
 class ObstacleObservation:
     center_x_cm: float
     center_y_cm: float
+    nearest_x_cm: float
     point_count: int
     obstacle_side: int  # +1 left, -1 right, 0 centre
 
@@ -70,7 +76,11 @@ class SmoothSidestepPlanner:
     def __init__(self, config: SmoothSidestepConfig | None = None) -> None:
         self.config = config or SmoothSidestepConfig()
         self.state = SmoothSidestepState.NORMAL
+        self.previous_state = SmoothSidestepState.NORMAL
+        self.transition_reason = "initialized"
+        self.encounter_id = 0
         self._locked_side: int | None = None
+        self._selected_side_reason: str | None = None
         self._blend_linear = 0.0
         self._intrusion_count = 0
         self._last_update_s: float | None = None
@@ -122,39 +132,54 @@ class SmoothSidestepPlanner:
         if self.state == SmoothSidestepState.TIMEOUT_STOP:
             if self._recently_seen(now):
                 return Command.zero(_append_reason(desired.reason, "smooth_sidestep_timeout_stop"))
-            self.state = SmoothSidestepState.BLEND_BACK
+            self._transition(
+                SmoothSidestepState.BLEND_BACK,
+                "timeout_obstacle_clear",
+            )
 
         if self.state in {
             SmoothSidestepState.SHIFT_LEFT,
             SmoothSidestepState.SHIFT_RIGHT,
         }:
             if self._sidestep_timed_out(now):
-                self.state = SmoothSidestepState.TIMEOUT_STOP
+                self._transition(
+                    SmoothSidestepState.TIMEOUT_STOP,
+                    "max_sidestep_timeout",
+                )
                 return Command.zero(_append_reason(desired.reason, "smooth_sidestep_timeout_stop"))
             if observation is not None or self._recently_seen(now):
                 self._move_blend_toward(1.0, dt, self.config.ramp_in_s)
                 return self._blended_command(desired)
-            self.state = SmoothSidestepState.BLEND_BACK
+            self._transition(
+                SmoothSidestepState.BLEND_BACK,
+                "clear_hold_elapsed",
+            )
 
         if self.state == SmoothSidestepState.BLEND_BACK:
             if observation is not None:
                 # A noisy reappearance belongs to the same encounter.  Resume
                 # the already selected side instead of choosing again.
-                self.state = self._shift_state(self._locked_side or 1)
+                self._transition(
+                    self._shift_state(self._locked_side or 1),
+                    "radar_reappeared_same_encounter",
+                )
                 self._move_blend_toward(1.0, dt, self.config.ramp_in_s)
                 return self._blended_command(desired)
             self._move_blend_toward(0.0, dt, self.config.blend_back_s)
             if self._blend_linear <= 0.0:
-                self.reset()
+                self.reset("blend_complete")
                 return desired
             return self._blended_command(desired)
 
-        self.reset()
+        # Pre-existing defensive behaviour retained for public compatibility;
+        # Enum-controlled normal operation cannot reach this branch.
+        self.reset("legacy_invalid_state_reset")
         return desired
 
-    def reset(self) -> None:
-        self.state = SmoothSidestepState.NORMAL
+    def reset(self, reason: str = "manual_reset") -> None:
+        self._transition(SmoothSidestepState.NORMAL, reason)
         self._locked_side = None
+        self._selected_side_reason = None
         self._blend_linear = 0.0
         self._intrusion_count = 0
         self._last_seen_s = None
@@ -166,23 +191,61 @@ class SmoothSidestepPlanner:
         return {
             "planner": "smooth_sidestep",
             "state": self.state.value,
+            "previous_state": self.previous_state.value,
+            "transition_reason": self.transition_reason,
+            "encounter_id": self.encounter_id,
             "target_y_cm": self.target_y_cm,
             "active_bypass_side": _side_name(self._locked_side),
+            "selected_side": _side_name(self._locked_side),
+            "selected_side_reason": self._selected_side_reason,
+            "side_locked": self._locked_side is not None,
             "blend_linear": self._blend_linear,
             "blend_alpha": _smoothstep(self._blend_linear),
             "intrusion_count": self._intrusion_count,
+            "observation_valid": observation is not None,
             "cluster_point_count": 0 if observation is None else observation.point_count,
+            "obstacle_surface_x_cm": None if observation is None else observation.nearest_x_cm,
             "obstacle_center_x_cm": None if observation is None else observation.center_x_cm,
             "obstacle_center_y_cm": None if observation is None else observation.center_y_cm,
             "obstacle_side": None if observation is None else _side_name(observation.obstacle_side),
+            "fallback_id": None,
+            "fallback_reason": None,
             "config": asdict(self.config),
         }
 
     def _start(self, bypass_side: int, now_s: float) -> None:
+        observation = self._observation
+        self.encounter_id += 1
         self._locked_side = 1 if bypass_side > 0 else -1
+        self._selected_side_reason = self._side_selection_reason(observation)
         self._blend_linear = 0.0
         self._sidestep_started_s = float(now_s)
-        self.state = self._shift_state(self._locked_side)
+        self._transition(
+            self._shift_state(self._locked_side),
+            "confirmed_obstacle_encounter",
+        )
+
+    def _transition(
+        self,
+        new_state: SmoothSidestepState,
+        reason: str,
+    ) -> None:
+        self.previous_state = self.state
+        self.state = new_state
+        self.transition_reason = str(reason)
+
+    def _side_selection_reason(
+        self,
+        observation: ObstacleObservation | None,
+    ) -> str:
+        if observation is None or observation.obstacle_side == 0:
+            return (
+                "center_obstacle_default_"
+                + self.config.center_obstacle_default_bypass_side
+            )
+        obstacle = "left" if observation.obstacle_side > 0 else "right"
+        bypass = "right" if observation.obstacle_side > 0 else "left"
+        return f"obstacle_{obstacle}_select_{bypass}"
 
     def _blended_command(self, desired: Command) -> Command:
         side = self._locked_side or 1
@@ -269,6 +332,7 @@ class SmoothSidestepPlanner:
         return ObstacleObservation(
             center_x_cm=center_x,
             center_y_cm=center_y,
+            nearest_x_cm=float(np.min(selected[:, 0])),
             point_count=int(len(selected)),
             obstacle_side=obstacle_side,
         )

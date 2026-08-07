@@ -70,7 +70,13 @@ p50 25.50 µs、p95 70.00 µs。
 
 本地算法隔离测试：56 passed。覆盖旧 legacy、forward recovery、circular、
 right-half、SafetyArbiter，以及新锁向、融合、相反侧噪声、80 cm 阈值、诊断和参数
-登记。板端离线及真实视觉/雷达 dry-run 结果在完成 Git 拉取验证后补充。
+登记。开发板 `main@304f6a1` compile 和离线验证通过；默认、legacy、关闭/启用
+forward recovery、circular、right-half 五组 CLI 均通过解析与校验。
+
+板端完成 20 秒真实摄像头 + 双实体雷达 dry-run，未传入任何飞行参数：两只雷达与
+NPU 正常启动/停止，`fc=None`，全部结构化记录的 `sent=False`。本次现场环境存在
+两侧近距离回波，SafetyArbiter 正确阻止了受阻方向横移，规划器最终按 9 秒上限进入
+`TIMEOUT_STOP`；未绕过安全仲裁。
 
 ## 11. Performance
 
@@ -85,9 +91,22 @@ Windows/Anaconda，同一固定种子 synthetic 序列，warm-up 200，采样 30
 
 这些数字只表示 planner update，不代表摄像头/NPU 端到端 FPS。
 
+开发板相同 synthetic 输入结果：
+
+| 方案 | mean µs | p50 µs | p95 µs |
+| --- | ---: | ---: | ---: |
+| legacy basic | 3815.01 | 4568.21 | 5292.96 |
+| legacy forward recovery | 3822.99 | 4568.28 | 5298.38 |
+| smooth sidestep | 701.68 | 808.69 | 1012.23 |
+| circular tube bypass | 1605.22 | 1937.14 | 2241.71 |
+
+真实传感器 dry-run 的 38 个采样帧中，planner mean/p50/p95 为
+32039.85/29581.45/76861.32 µs；实际完整点云远多于 synthetic 点，但 NPU 推理
+约 317 ms，当前端到端节拍仍主要受视觉推理限制。
+
 ## 12. Smoothness / Stability
 
-完成渐入后对障碍表面 `x=79/81cm` 交替 40 帧：state switch=0、side switch=0、
+本地及开发板完成渐入后对障碍表面 `x=79/81cm` 交替 40 帧：state switch=0、side switch=0、
 SafetyArbiter override=0、max `|Δvx|=0`、max `|Δvy|=0`、max
 `|Δyaw_rate|=0`。相反侧点簇噪声测试保持同一 encounter 和原锁定侧。
 
@@ -139,6 +158,9 @@ Safety override。调参日志查看 obstacle/nearest distance、desired/planned
 blend alpha、选边原因和命令增量。性能字段为 `planner_elapsed_us`。命令默认 5 Hz、
 雷达快照默认 2 Hz，避免原先每帧重复同步 flush。
 
+板端 20 秒 dry-run 实际生成 38 条命令记录、16 条雷达快照和 6 条事件记录；所有
+命令记录的 `sent` 均为 false。
+
 ## 17. Recommended Tuning Order
 
 1. 先保持 Safety 参数不变，检查雷达距离/点数和 side-blocked 日志。
@@ -154,7 +176,8 @@ blend alpha、选边原因和命令增量。性能字段为 `planner_elapsed_us`
 - 尚未真实飞行验证这些 `UNVERIFIED_TUNING` 参数。
 - 单矩形中位数依赖实验场景“管状物附近无相邻障碍”的前提。
 - 纯横移可能比圆绕行慢，但能避免前向安全门振荡。
-- SessionRecorder 仍同步 flush；降低采样后需在板端确认端到端 FPS。
+- SessionRecorder 仍同步 flush；板端采样已降低，但真实 planner p95 约 76.9 ms，
+  后续可结合点云数量继续分析，不应牺牲诊断或安全过滤换取小幅性能。
 
 ## 19. Git Diff Review
 
@@ -162,4 +185,4 @@ blend alpha、选边原因和命令增量。性能字段为 `planner_elapsed_us`
 - 无 Agent 新增 fallback；无静默安全阈值修改。
 - 经验参数均登记为 `UNVERIFIED_TUNING`，关键数值集中配置。
 - 用户原有四个未提交文档不会暂存或提交。
-- 最终提交前再次执行 whitespace、diff、测试和板端无飞控验证审计。
+- 本地 whitespace、diff、测试以及板端无飞控验证均已完成；板端仅通过 Git 拉取。

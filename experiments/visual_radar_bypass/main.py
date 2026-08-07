@@ -88,7 +88,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--tube-radius-cm", type=float, default=15.0)
     parser.add_argument("--tube-safety-radius-cm", type=float, default=75.0)
-    parser.add_argument("--record-dir", default="/media/sdcard/stm_records")
+    parser.add_argument("--record-dir", default="/data/stm_records")
     parser.add_argument("--tuning-log-every-n", type=int, default=2)
     parser.add_argument("--radar-snapshot-every-n", type=int, default=5)
     parser.add_argument("--no-record", action="store_true")
@@ -219,7 +219,6 @@ def main(argv: list[str] | None = None) -> None:
     if actual_flight and not recorder.enabled:
         raise RuntimeError("flight test refused because session recording is unavailable")
     sink_id = _setup_logging(recorder.runtime_log_path)
-    logger.info("[VIS-RADAR][PARAMETERS] {}", parameter_registry)
 
     guidance = FrozenVisualGuidance(visual_config)
     radars = MultiRadar(_radar_configs(args.upper_port, args.lower_port))

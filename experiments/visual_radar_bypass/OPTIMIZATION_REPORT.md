@@ -79,7 +79,7 @@ legacy basic、legacy recovery、smooth sidestep、circular bypass 均通过实�
 ## 16. 本地测试
 
 使用现有 `yolo11` Conda 环境的完整运行依赖，并加载 base 环境 pytest。实验测试结果为
-实验、Safety 与 yaw 符号测试合计 `92 passed`。闭环断言同时覆盖直线路径和持续
+实验、Safety、yaw 符号与记录器测试合计 `96 passed`。闭环断言同时覆盖直线路径和持续
 `2°/s` yaw 的弯线路径。
 
 ## 17. 闭环稳定性
@@ -94,11 +94,11 @@ legacy basic、legacy recovery、smooth sidestep、circular bypass 均通过实�
 
 | 规划器 | mean | p50 | p95 |
 |---|---:|---:|---:|
-| legacy basic | 191.55 | 160.15 | 315.72 |
-| legacy recovery | 243.23 | 253.05 | 342.71 |
-| smooth sidestep | 63.44 | 61.40 | 85.10 |
-| circular bypass | 36.06 | 31.60 | 48.40 |
-| static route | 111.39 | 90.40 | 207.61 |
+| legacy basic | 174.30 | 122.10 | 335.92 |
+| legacy recovery | 162.17 | 120.85 | 338.52 |
+| smooth sidestep | 44.66 | 38.55 | 80.31 |
+| circular bypass | 44.70 | 36.15 | 80.00 |
+| static route | 88.18 | 78.10 | 124.53 |
 
 新规划器耗时远低于 10 Hz 控制周期的 100 ms；视觉 NPU 推理仍是主耗时。
 
@@ -111,7 +111,15 @@ mean/p50/p95=`2617.79/2583.71/2868.58 µs`，远低于 100 ms 控制周期。
 
 历史实体雷达会话回放 16 帧全部形成有效观测，共处理 12,079 个前半平面点，且
 `command_progress_applied=0.0`。真实摄像头和双雷达 20 秒 dry-run 会话为
-`/media/sdcard/stm_records/20260806_230139_isolated_visual_radar_static_route`：摄像头/NPU、
+`/data/stm_records/20260806_230139_isolated_visual_radar_static_route`：摄像头/NPU、
 `/dev/ttySTM4`、`/dev/ttySTM9` 均正常，记录 31 条命令、13 个雷达快照，`sent=true` 为 0。
 运行未传入任何飞行参数，日志明确为 `actual_flight=False`，未连接飞控、未解锁、未起飞、
-未发送飞控命令。最终 Git 审计确认提交范围仅为实验目录，用户四个文档修改保持未暂存。
+未发送飞控命令。
+
+2026-08-06 首次真实飞行中，原管体在 `+83.1°` 离开前半平面后，旧关联逻辑错误退回全局
+最密点簇，把反侧约 `-84.6°` 的背景回波接成同一目标，最终触发 `static_model_mismatch`
+锁存停车。修复后 encounter 内只接受预测中心 50 cm 门内的点簇；门内无匹配即作为掉点交给
+状态机，禁止全局换目标。对应实飞轨迹回归用例确认正常进入 `CLEARANCE_RUN`，不再累计模型
+失配。重刷后持久分区确认为 `/data`，SessionRecorder 及主要记录入口默认改为
+`/data/stm_records`（原始数据记录为 `/data/recordings`）；完整参数表仅保存在 `session.json`，
+不再打印到终端。用户四个既有文档修改保持未暂存。

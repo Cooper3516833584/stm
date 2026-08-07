@@ -143,6 +143,9 @@ class StaticRouteBypassPlanner:
         self._last_applied = False
         self._last_radar_forward_clear = False
         self._last_outward_vy_cm_s = 0.0
+        self._association_status = "idle"
+        self._nearest_candidate_to_prediction_cm: float | None = None
+        self._last_static_model_error_cm: float | None = None
 
     @property
     def active_bypass_side(self) -> int | None:
@@ -329,6 +332,9 @@ class StaticRouteBypassPlanner:
         self._edge_armed = False
         self._blend_started_s = None
         self._last_outward_vy_cm_s = 0.0
+        self._association_status = "idle"
+        self._nearest_candidate_to_prediction_cm = None
+        self._last_static_model_error_cm = None
 
     def diagnostics(self) -> dict[str, object]:
         observation = self._observation
@@ -362,6 +368,9 @@ class StaticRouteBypassPlanner:
             "credited_yaw_deg": self._credited_yaw_deg,
             "last_applied": self._last_applied,
             "static_model_bad_count": self._static_model_bad_count,
+            "static_model_error_cm": self._last_static_model_error_cm,
+            "association_status": self._association_status,
+            "nearest_candidate_to_prediction_cm": self._nearest_candidate_to_prediction_cm,
             "front_corridor_clear": self._last_radar_forward_clear,
             "config": asdict(self.config),
         }
@@ -382,10 +391,13 @@ class StaticRouteBypassPlanner:
         measured = np.asarray([observation.center_x_cm, observation.center_y_cm], dtype=float)
         if self._predicted_center.size == 2:
             error = float(np.linalg.norm(measured - self._predicted_center))
+            self._last_static_model_error_cm = error
             if self._last_applied and error > self.config.static_model_tolerance_cm:
                 self._static_model_bad_count += 1
             else:
                 self._static_model_bad_count = 0
+        else:
+            self._last_static_model_error_cm = None
         self._predicted_center = measured
         self._last_seen_s = now
         if self._last_observed_x_cm is not None and observation.center_x_cm <= self._last_observed_x_cm + 2.0:
@@ -397,6 +409,8 @@ class StaticRouteBypassPlanner:
     def _observe(self, radar_field: RadarObstacleField, *, tracking: bool) -> StaticTubeObservation | None:
         points = np.asarray(getattr(radar_field, "points_body_cm", np.empty((0, 2))), dtype=float)
         if points.size == 0:
+            self._association_status = "no_points"
+            self._nearest_candidate_to_prediction_cm = None
             return None
         points = points.reshape(-1, 2)
         angles = np.degrees(np.arctan2(points[:, 1], points[:, 0]))
@@ -411,6 +425,8 @@ class StaticRouteBypassPlanner:
             )
         candidates = points[mask]
         if len(candidates) < self.config.min_cluster_points:
+            self._association_status = "insufficient_candidates"
+            self._nearest_candidate_to_prediction_cm = None
             return None
         cluster = self._associated_cluster(candidates, tracking)
         if cluster is None or len(cluster) < self.config.min_cluster_points:
@@ -438,17 +454,33 @@ class StaticRouteBypassPlanner:
 
     def _associated_cluster(self, candidates: np.ndarray, tracking: bool) -> np.ndarray | None:
         cfg = self.config
-        if tracking and self._predicted_center.size == 2:
+        if tracking:
+            if self._predicted_center.size != 2:
+                self._association_status = "tracking_without_prediction"
+                self._nearest_candidate_to_prediction_cm = None
+                return None
             distances = np.linalg.norm(candidates - self._predicted_center, axis=1)
+            self._nearest_candidate_to_prediction_cm = float(np.min(distances))
             associated = candidates[distances <= cfg.association_radius_cm]
             if len(associated) >= cfg.min_cluster_points:
+                self._association_status = "prediction_gate_match"
                 return associated
+            # An active encounter must never silently switch to the globally
+            # densest cluster.  In real flight the tracked tube can leave the
+            # front half-plane at the expected 90-degree edge while unrelated
+            # background returns remain visible.  Returning None lets the
+            # state machine distinguish that expected exit from a central
+            # dropout instead of adopting a different object.
+            self._association_status = "prediction_gate_miss"
+            return None
+        self._nearest_candidate_to_prediction_cm = None
         grid = max(1.0, cfg.cluster_grid_cm)
         cells: dict[tuple[int, int], list[int]] = {}
         for index, point in enumerate(candidates):
             key = (math.floor(float(point[0]) / grid), math.floor(float(point[1]) / grid))
             cells.setdefault(key, []).append(index)
         if not cells:
+            self._association_status = "no_cluster_cells"
             return None
         peak = min(
             cells.values(),
@@ -459,6 +491,7 @@ class StaticRouteBypassPlanner:
             ),
         )
         seed = np.median(candidates[peak], axis=0)
+        self._association_status = "acquisition_cluster"
         return candidates[
             (np.abs(candidates[:, 0] - seed[0]) <= cfg.cluster_radius_x_cm)
             & (np.abs(candidates[:, 1] - seed[1]) <= cfg.cluster_radius_y_cm)

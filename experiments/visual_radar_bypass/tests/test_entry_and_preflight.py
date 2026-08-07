@@ -39,6 +39,7 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert not args.circular_tube_bypass
     assert args.tube_radius_cm == 15.0
     assert args.tube_safety_radius_cm == 75.0
+    assert args.record_dir == "/data/stm_records"
     assert args.tuning_log_every_n == 2
     assert args.radar_snapshot_every_n == 5
     assert not hasattr(args, "synthetic_radar")

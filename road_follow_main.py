@@ -205,7 +205,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--debug-every-n", type=int, default=30)
     parser.add_argument("--debug-image-dir", default=None, help="Deprecated alias for --debug-dir")
     parser.add_argument("--debug-image-every", type=int, default=None, help="Deprecated alias for --debug-every-n")
-    parser.add_argument("--record-dir", default="/media/sdcard/stm_records",
+    parser.add_argument("--record-dir", default="/data/stm_records",
                         help="Directory on SD card for session recording")
     parser.add_argument("--no-record", action="store_true",
                         help="Disable camera/radar session recording")

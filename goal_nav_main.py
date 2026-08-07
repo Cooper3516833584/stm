@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-step-s", type=float, default=2.0)
     parser.add_argument("--turn-step-s", type=float, default=0.45)
     parser.add_argument("--hold-after-step-s", type=float, default=0.35)
-    parser.add_argument("--record-dir", default="/media/sdcard/stm_records",
+    parser.add_argument("--record-dir", default="/data/stm_records",
                         help="Directory on SD card for session recording")
     parser.add_argument("--no-record", action="store_true",
                         help="Disable camera/radar session recording")

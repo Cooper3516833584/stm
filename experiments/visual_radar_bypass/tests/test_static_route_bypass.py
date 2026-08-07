@@ -96,6 +96,9 @@ def test_tracking_accepts_points_between_old_75_and_new_90_degree_edges():
     planner = StaticRouteBypassPlanner()
     angle = math.radians(85.0)
     points = _cluster(100.0 * math.cos(angle), -100.0 * math.sin(angle))
+    planner._predicted_center = np.asarray(
+        [100.0 * math.cos(angle), -100.0 * math.sin(angle)], dtype=float
+    )
 
     observation = planner._observe(_field(points), tracking=True)
 
@@ -114,6 +117,8 @@ def test_target_clearance_moves_to_forward_pass_without_side_switch():
     planner = StaticRouteBypassPlanner()
     _activate_right(planner)
     clear = _field(_cluster(70.0, -90.0))
+    _update(planner, _field(_cluster(90.0, -65.0)), 1.2)
+    _update(planner, _field(_cluster(80.0, -80.0)), 1.25)
 
     for index in range(3):
         command = _update(planner, clear, 1.3 + index * 0.1)
@@ -121,7 +126,9 @@ def test_target_clearance_moves_to_forward_pass_without_side_switch():
     assert planner.state == StaticRouteBypassState.PASS_FORWARD_LEFT
     assert planner.active_bypass_side == 1
     assert command.vx_cm_s == pytest.approx(8.4)
-    assert command.vy_cm_s == 0.0
+    assert command.vy_cm_s >= 0.0
+    decayed = _update(planner, clear, 2.6)
+    assert decayed.vy_cm_s == 0.0
 
 
 def test_unexpected_central_dropout_stops_instead_of_claiming_passage():
@@ -192,8 +199,9 @@ def test_expected_90_degree_exit_requires_rear_margin_before_visual_blend():
     )
     planner = StaticRouteBypassPlanner(config)
     _activate_right(planner)
-    for index in range(3):
-        _update(planner, _field(_cluster(30.0 - index * 5.0, -80.0)), 1.3 + index * 0.1)
+    _update(planner, _field(_cluster(90.0, -60.0)), 1.2)
+    for index, point in enumerate(((65.0, -75.0), (45.0, -80.0), (30.0, -80.0))):
+        _update(planner, _field(_cluster(*point)), 1.3 + index * 0.1)
     assert planner.state == StaticRouteBypassState.PASS_FORWARD_LEFT
 
     _update(planner, _field(_cluster(12.0, -90.0)), 1.7)
@@ -220,6 +228,41 @@ def test_expected_90_degree_exit_requires_rear_margin_before_visual_blend():
     assert not visual_return_seen_early
     assert planner.state == StaticRouteBypassState.BLEND_BACK
     assert planner.diagnostics()["predicted_center_x_cm"] + config.tube_radius_cm + config.rear_margin_cm <= 0.0
+
+
+def test_expected_edge_exit_does_not_switch_to_opposite_background_cluster():
+    """Regression for the 2026-08-06 flight's static_model_mismatch stop."""
+    config = replace(
+        StaticRouteBypassConfig(),
+        target_surface_clearance_cm=70.0,
+        reshift_surface_clearance_cm=60.0,
+    )
+    planner = StaticRouteBypassPlanner(config)
+    left_obstacle = _field(_cluster(100.0, 40.0))
+    _update(planner, left_obstacle, 1.0)
+    _update(planner, left_obstacle, 1.1)
+    assert planner.state == StaticRouteBypassState.DIVERGE_RIGHT
+
+    for index, point in enumerate(
+        ((90.0, 60.0), (70.0, 75.0), (45.0, 85.0), (20.0, 95.0), (12.0, 100.0))
+    ):
+        _update(planner, _field(_cluster(*point)), 1.2 + index * 0.1)
+    assert planner.state == StaticRouteBypassState.SIDE_PASS_CONFIRM
+    assert planner.active_bypass_side == -1
+
+    # The tracked tube has just left through +90 degrees.  A dense cluster on
+    # the opposite side must not be adopted as the same physical tube.
+    opposite_background = _field(_cluster(20.0, -210.0))
+    for index in range(3):
+        command = _update(planner, opposite_background, 1.8 + index * 0.1)
+
+    diagnostics = planner.diagnostics()
+    assert planner.state == StaticRouteBypassState.CLEARANCE_RUN
+    assert planner.active_bypass_side == -1
+    assert diagnostics["association_status"] == "prediction_gate_miss"
+    assert diagnostics["nearest_candidate_to_prediction_cm"] > config.association_radius_cm
+    assert diagnostics["static_model_bad_count"] == 0
+    assert command.vx_cm_s == pytest.approx(8.4)
 
 
 def test_timeout_is_latched_stop():

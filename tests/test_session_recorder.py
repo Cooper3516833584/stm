@@ -6,6 +6,10 @@ from FlightController.Solutions.Safety import Command, RadarObstacleField
 from FlightController.Solutions.SessionRecorder import SessionRecorder, SessionRecorderConfig
 
 
+def test_default_record_root_uses_persistent_data_partition():
+    assert SessionRecorderConfig().root_dir == "/data/stm_records"
+
+
 def test_session_recorder_writes_frame_and_radar_snapshot(tmp_path):
     recorder = SessionRecorder(
         SessionRecorderConfig(

@@ -1,7 +1,7 @@
 """Radar + camera raw data recorder — no FC control.
 
 Captures raw radar bin data (both upper/lower D500), radar-local point clouds,
-and camera frames to the SD card at /media/sdcard/recordings/.
+and camera frames to the persistent data partition at /data/recordings/.
 Runs until Ctrl+C, never sends any command to the flight controller.
 """
 
@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
     parser.add_argument("--camera-fps", type=int, default=30)
-    parser.add_argument("--output-dir", default="/media/sdcard/recordings",
+    parser.add_argument("--output-dir", default="/data/recordings",
                         help="Base output directory on SD card")
     parser.add_argument("--loop-hz", type=float, default=10.0,
                         help="Recording loop rate, default 10Hz")

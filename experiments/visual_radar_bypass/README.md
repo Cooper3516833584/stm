@@ -38,7 +38,7 @@ PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \
 
 PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \
   -m experiments.visual_radar_bypass.replay_radar_session \
-  /media/sdcard/stm_records/<session>
+  /data/stm_records/<session>
 ```
 
 ## 旧模式兼容入口

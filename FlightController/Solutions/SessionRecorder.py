@@ -22,7 +22,7 @@ from loguru import logger
 
 @dataclass
 class SessionRecorderConfig:
-    root_dir: str | None = "/media/sdcard/stm_records"
+    root_dir: str | None = "/data/stm_records"
     enabled: bool = True
     mode: str = "session"
     frame_every_n: int = 10

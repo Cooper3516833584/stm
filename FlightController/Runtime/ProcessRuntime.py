@@ -120,7 +120,7 @@ class ProcessRuntimeConfig:
     lower_port: str = "/dev/ttySTM9"
     radar_timeout_s: float = 0.5
     radar_batch_period_s: float = 0.01
-    radar_publish_hz: float = 50.0
+    radar_publish_hz: float = 25.0
     frame_slots: int = 8
     radar_slots: int = 2
     radar_max_points: int = 2160
@@ -274,7 +274,11 @@ class ProcessRuntime:
         # eventually fill and stall the sensor worker when the control process
         # is busy, which is precisely the coupling this runtime must avoid.
         self._vision_queue = self._ctx.Queue(maxsize=1)
-        self._radar_queue = self._ctx.Queue(maxsize=1)
+        # The radar producer runs faster than the minimum 10 Hz control loop.
+        # A few feeder slots let the consumer drain to the newest snapshot
+        # without relying on a producer-side get_nowait() racing Queue's
+        # background feeder thread. The channel remains bounded/latest-only.
+        self._radar_queue = self._ctx.Queue(maxsize=4)
         self._frame_ring = _SharedArrayRing(
             slots=self.config.frame_slots,
             shape=(self.config.camera_height, self.config.camera_width, 3),

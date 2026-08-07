@@ -33,16 +33,18 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.upper_port == "/dev/ttySTM4"
     assert args.lower_port == "/dev/ttySTM9"
     assert args.loop_hz == 10.0
-    assert args.bypass_planner == "legacy"
+    assert args.bypass_planner == "static-route"
     assert args.bypass_forward_transition_s == 2.0
     assert not args.right_half_radar_then_visual
     assert not args.circular_tube_bypass
     assert args.tube_radius_cm == 15.0
     assert args.tube_safety_radius_cm == 75.0
+    assert args.tuning_log_every_n == 2
+    assert args.radar_snapshot_every_n == 5
     assert not hasattr(args, "synthetic_radar")
 
 
-def test_smooth_sidestep_is_explicit_and_does_not_replace_legacy_default(tmp_path):
+def test_smooth_sidestep_remains_explicit(tmp_path):
     args = main.parse_args(
         [
             "--model-npu",
@@ -136,8 +138,18 @@ def test_circular_tube_bypass_is_an_independent_explicit_mode(tmp_path):
 
     main.validate_args(args)
     assert args.circular_tube_bypass
+    assert args.bypass_planner == "legacy"
     assert args.tube_radius_cm == 7.5
     assert args.tube_safety_radius_cm == 65.0
+
+
+def test_right_half_standalone_flag_preserves_legacy_selection(tmp_path):
+    args = main.parse_args(
+        ["--model-npu", _model(tmp_path), "--right-half-radar-then-visual"]
+    )
+
+    main.validate_args(args)
+    assert args.bypass_planner == "legacy"
 
 
 @pytest.mark.parametrize(

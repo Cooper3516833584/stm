@@ -43,10 +43,13 @@ from .circular_tube_bypass import (
 from .radar_bypass import ObstacleBypassConfig, ObstacleBypassPlanner
 from .right_half_handoff import RightHalfRadarHandoff
 from .smooth_sidestep import SmoothSidestepPlanner
+from .static_route_bypass import StaticRouteBypassConfig, StaticRouteBypassPlanner
+from .parameter_registry import build_parameter_registry
 from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
         description="Isolated real-vision/physical-radar tubular-obstacle test"
     )
@@ -60,9 +63,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--radar-timeout-s", type=float, default=0.5)
     parser.add_argument(
         "--bypass-planner",
-        choices=("legacy", "smooth-sidestep"),
-        default="legacy",
-        help="Select the unchanged legacy planner or the isolated smooth sidestep",
+        choices=("legacy", "smooth-sidestep", "static-route"),
+        default="static-route",
+        help="Select static-route (default) or an unchanged earlier planner",
     )
     parser.add_argument(
         "--bypass-forward-transition-s",
@@ -86,6 +89,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tube-radius-cm", type=float, default=15.0)
     parser.add_argument("--tube-safety-radius-cm", type=float, default=75.0)
     parser.add_argument("--record-dir", default="/media/sdcard/stm_records")
+    parser.add_argument("--tuning-log-every-n", type=int, default=2)
+    parser.add_argument("--radar-snapshot-every-n", type=int, default=5)
     parser.add_argument("--no-record", action="store_true")
     parser.add_argument("--enable-flight", action="store_true")
     parser.add_argument("--auto-takeoff", action="store_true")
@@ -95,7 +100,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Acknowledge real unlock/takeoff using live camera and physical radars",
     )
     parser.add_argument("--takeoff-height-cm", type=int, default=100)
-    return parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
+    if (
+        args.right_half_radar_then_visual or args.circular_tube_bypass
+    ) and "--bypass-planner" not in raw_argv:
+        # Preserve the historical standalone flags after static-route becomes
+        # the default planner.
+        args.bypass_planner = "legacy"
+    return args
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -107,6 +119,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--duration-s must be greater than zero")
     if args.bypass_forward_transition_s < 0.0:
         raise ValueError("--bypass-forward-transition-s cannot be negative")
+    if args.tuning_log_every_n <= 0:
+        raise ValueError("--tuning-log-every-n must be a positive integer")
+    if args.radar_snapshot_every_n <= 0:
+        raise ValueError("--radar-snapshot-every-n must be a positive integer")
     if args.right_half_radar_then_visual:
         if args.bypass_planner != "legacy":
             raise ValueError("--right-half-radar-then-visual requires legacy planner")
@@ -156,10 +172,22 @@ def main(argv: list[str] | None = None) -> None:
     flight_config = FlightRuntimeConfig(
         takeoff_height_cm=args.takeoff_height_cm,
     )
+    static_route_config = StaticRouteBypassConfig(
+        tube_radius_cm=args.tube_radius_cm,
+        visual_max_vx_cm_s=visual_config.max_vx_cm_s,
+    )
+    parameter_registry = build_parameter_registry(
+        static_route_config,
+        radar_timeout_s=args.radar_timeout_s,
+        tuning_log_every_n=args.tuning_log_every_n,
+        radar_snapshot_every_n=args.radar_snapshot_every_n,
+    )
     if args.circular_tube_bypass:
         session_mode = "isolated_visual_radar_circular_tube"
     elif args.bypass_planner == "smooth-sidestep":
         session_mode = "isolated_visual_radar_smooth_sidestep"
+    elif args.bypass_planner == "static-route":
+        session_mode = "isolated_visual_radar_static_route"
     else:
         session_mode = "isolated_visual_radar_tube_obstacle"
     recorder = SessionRecorder(
@@ -168,7 +196,7 @@ def main(argv: list[str] | None = None) -> None:
             enabled=not args.no_record,
             mode=session_mode,
             frame_every_n=10,
-            radar_every_n=1,
+            radar_every_n=args.radar_snapshot_every_n,
             video_enabled=True,
             video_every_n=2,
             video_fps=5.0,
@@ -176,7 +204,7 @@ def main(argv: list[str] | None = None) -> None:
                 "argv": list(sys.argv),
                 "visual_config": vars(visual_config),
                 "physical_obstacle": (
-                    "real movable tube; position is inferred from physical radar points"
+                    "one isolated static tube on the requested route"
                 ),
                 "radar_points": "physical only; no synthetic injection",
                 "bypass_planner": args.bypass_planner,
@@ -184,12 +212,14 @@ def main(argv: list[str] | None = None) -> None:
                 "circular_tube_bypass": args.circular_tube_bypass,
                 "tube_radius_cm": args.tube_radius_cm,
                 "tube_safety_radius_cm": args.tube_safety_radius_cm,
+                "parameter_registry": parameter_registry,
             },
         )
     )
     if actual_flight and not recorder.enabled:
         raise RuntimeError("flight test refused because session recording is unavailable")
     sink_id = _setup_logging(recorder.runtime_log_path)
+    logger.info("[VIS-RADAR][PARAMETERS] {}", parameter_registry)
 
     guidance = FrozenVisualGuidance(visual_config)
     radars = MultiRadar(_radar_configs(args.upper_port, args.lower_port))
@@ -210,6 +240,8 @@ def main(argv: list[str] | None = None) -> None:
         )
     elif args.bypass_planner == "smooth-sidestep":
         planner = SmoothSidestepPlanner()
+    elif args.bypass_planner == "static-route":
+        planner = StaticRouteBypassPlanner(static_route_config)
     else:
         planner = ObstacleBypassPlanner(
             ObstacleBypassConfig(
@@ -232,6 +264,7 @@ def main(argv: list[str] | None = None) -> None:
             obstacle_stop_distance_cm=80.0,
             obstacle_slow_distance_cm=150.0,
             slow_speed_limit_cm_s=10.0,
+            side_stop_distance_cm=45.0,
         )
     )
     visual_only_arbiter = SafetyArbiter(
@@ -271,11 +304,17 @@ def main(argv: list[str] | None = None) -> None:
             )
 
         start_s = time.perf_counter()
+        previous_loop_s = start_s
+        previous_final_command = Command.zero("initial")
         last_log_s = 0.0
         loop_count = 0
         while time.perf_counter() - start_s < args.duration_s:
             loop_start = time.perf_counter()
+            dt_s = max(0.0, min(0.5, loop_start - previous_loop_s))
+            previous_loop_s = loop_start
             sample = guidance.sample(loop_start)
+            planner_elapsed_us = 0.0
+            previous_planner_state = planner.state
             radar_retired = bool(
                 right_half_handoff is not None
                 and right_half_handoff.radar_disabled
@@ -294,13 +333,16 @@ def main(argv: list[str] | None = None) -> None:
                     radars.connected
                     and radars.is_fresh(max_age_s=args.radar_timeout_s)
                 )
-                previous_planner_state = planner.state
+                planner_started_ns = time.perf_counter_ns()
                 planned = planner.update(
                     desired=sample.desired,
                     perception=sample.perception,
                     radar_field=radar_field,
                     now_s=loop_start,
                 )
+                planner_elapsed_us = (
+                    time.perf_counter_ns() - planner_started_ns
+                ) / 1000.0
                 if (
                     right_half_handoff is not None
                     and right_half_handoff.observe(
@@ -345,6 +387,31 @@ def main(argv: list[str] | None = None) -> None:
                 health,
                 dry_run=not actual_flight,
             )
+            command_applied = bool(actual_flight and decision.allowed)
+            report_applied = getattr(planner, "report_applied_command", None)
+            if callable(report_applied):
+                report_applied(decision.command, dt_s, command_applied)
+            planner_diagnostics = planner.diagnostics()
+            planner_diagnostics["visual_vy_cm_s"] = sample.desired.vy_cm_s
+            planner_diagnostics["planner_elapsed_us"] = planner_elapsed_us
+            if planner.state != previous_planner_state:
+                logger.info(
+                    "[VIS-RADAR][EVENT] state_transition={} -> {} reason={} encounter={} side={}",
+                    previous_planner_state.value,
+                    planner.state.value,
+                    planner_diagnostics.get("transition_reason"),
+                    planner_diagnostics.get("encounter_id"),
+                    planner_diagnostics.get("active_bypass_side"),
+                )
+            final_delta = {
+                "vx_cm_s": decision.command.vx_cm_s - previous_final_command.vx_cm_s,
+                "vy_cm_s": decision.command.vy_cm_s - previous_final_command.vy_cm_s,
+                "yaw_rate_deg_s": (
+                    decision.command.yaw_rate_deg_s
+                    - previous_final_command.yaw_rate_deg_s
+                ),
+            }
+            previous_final_command = decision.command
             extra = {
                 "visual": {
                     "road_found": bool(
@@ -364,13 +431,25 @@ def main(argv: list[str] | None = None) -> None:
                     "camera_ok": sample.camera_ok,
                     "controller": sample.diagnostics,
                 },
-                "tube_obstacle_bypass": planner.diagnostics(),
+                "tube_obstacle_bypass": planner_diagnostics,
+                "commands": {
+                    "desired": sample.desired.as_fc_tuple(),
+                    "planned": planned.as_fc_tuple(),
+                    "safe": safe.command.as_fc_tuple(),
+                    "final": decision.command.as_fc_tuple(),
+                    "safety_state": safe.state,
+                    "safety_reasons": safe.reasons,
+                    "safety_override": bool(
+                        safe.command != planned or decision.command != safe.command
+                    ),
+                    "final_delta": final_delta,
+                },
                 "right_half_handoff": (
                     right_half_handoff.diagnostics()
                     if right_half_handoff is not None
                     else None
                 ),
-                "sent": bool(actual_flight and decision.allowed),
+                "sent": command_applied,
             }
             if recorder.frame_due(loop_count):
                 recorder.record_frame(
@@ -390,18 +469,19 @@ def main(argv: list[str] | None = None) -> None:
                     radar_age_s=radar_age_s,
                     radar_connected=radar_fresh,
                     desired=sample.desired,
-                    safe_command=safe.command,
+                    safe_command=decision.command,
                     decision_reason=decision.reason,
                     extra=extra,
                 )
-            recorder.record_command(
-                loop_count=loop_count,
-                now_s=loop_start,
-                desired=sample.desired,
-                safe_command=safe.command,
-                decision_reason=decision.reason,
-                extra=extra,
-            )
+            if loop_count % args.tuning_log_every_n == 0:
+                recorder.record_command(
+                    loop_count=loop_count,
+                    now_s=loop_start,
+                    desired=sample.desired,
+                    safe_command=decision.command,
+                    decision_reason=decision.reason,
+                    extra=extra,
+                )
             if loop_start - last_log_s >= 1.0:
                 last_log_s = loop_start
                 logger.info(

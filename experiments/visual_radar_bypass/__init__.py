@@ -6,6 +6,11 @@ from .radar_bypass import (
     ObstacleBypassState,
 )
 from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance, VisualSample
+from .static_route_bypass import (
+    StaticRouteBypassConfig,
+    StaticRouteBypassPlanner,
+    StaticRouteBypassState,
+)
 
 __all__ = [
     "FrozenVisualConfig",
@@ -14,4 +19,7 @@ __all__ = [
     "ObstacleBypassConfig",
     "ObstacleBypassPlanner",
     "ObstacleBypassState",
+    "StaticRouteBypassConfig",
+    "StaticRouteBypassPlanner",
+    "StaticRouteBypassState",
 ]

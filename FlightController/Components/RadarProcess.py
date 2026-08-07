@@ -152,6 +152,10 @@ class BatchPolarMap:
         self.rotation_rpm = 0.0
         self.update_count = 0
         self._last_cleanup_s = 0.0
+        self._offsets = np.arange(-self.REMAP, self.REMAP + 1, dtype=np.int32)
+        self._point_numbers = np.arange(12, dtype=np.float64)
+        self._sentinel = np.iinfo(np.int32).max
+        self._scratch = np.full(self.TOTAL_BINS, self._sentinel, dtype=np.int32)
 
     def update_batch(self, batch: ParsedRadarBatch, now_s: float | None = None) -> None:
         if batch.frame_count == 0:
@@ -160,36 +164,35 @@ class BatchPolarMap:
         steps = ((batch.stop_degree - batch.start_degree) % 360.0) / 11.0
         degrees = (
             batch.start_degree[:, None]
-            + steps[:, None] * np.arange(12, dtype=np.float64)[None, :]
+            + steps[:, None] * self._point_numbers[None, :]
         ) % 360.0
         valid = (
             (batch.distances_mm >= self.distance_threshold_mm)
             & (batch.confidences >= self.confidence_threshold)
         )
         if np.any(valid):
-            offsets = np.arange(-self.REMAP, self.REMAP + 1, dtype=np.int32)
             bases_all = np.rint(degrees * self.ACC).astype(np.int32)
-            frame_indices, point_indices = np.nonzero(valid)
-            bases = bases_all[frame_indices, point_indices]
-            values = batch.distances_mm[frame_indices, point_indices]
-            indices = ((bases[:, None] + offsets[None, :]) % self.TOTAL_BINS).reshape(-1)
-            mapped_values = np.repeat(values, len(offsets)).astype(np.int32, copy=False)
-            mapped_frames = np.repeat(frame_indices, len(offsets))
-
-            # Preserve the legacy sequential-frame contract: take the minimum
-            # for duplicate writes within each frame, then let the last frame
-            # touching a bin overwrite earlier frames. The whole reduction is
-            # still one native NumPy operation rather than Python point loops.
-            sentinel = np.iinfo(np.int32).max
-            per_frame = np.full((batch.frame_count, self.TOTAL_BINS), sentinel, dtype=np.int32)
-            composite = mapped_frames * self.TOTAL_BINS + indices
-            np.minimum.at(per_frame.reshape(-1), composite, mapped_values)
-            present = per_frame != sentinel
-            touched = np.any(present, axis=0)
-            bins = np.nonzero(touched)[0]
-            last_rows = batch.frame_count - 1 - np.argmax(present[::-1, bins], axis=0)
-            self.data[bins] = per_frame[last_rows, bins]
-            self.time_stamp[touched] = now_s
+            # Preserve sequential-frame overwrite semantics without allocating
+            # and scanning a frame_count x 1080 matrix for every serial read.
+            # The only Python loop is per complete 47-byte frame; point/bin
+            # expansion and MODE_MIN reduction remain in NumPy C.
+            for frame_index in range(batch.frame_count):
+                frame_valid = valid[frame_index]
+                if not np.any(frame_valid):
+                    continue
+                bases = bases_all[frame_index, frame_valid]
+                values = batch.distances_mm[frame_index, frame_valid]
+                indices = (
+                    (bases[:, None] + self._offsets[None, :]) % self.TOTAL_BINS
+                ).reshape(-1)
+                mapped_values = np.repeat(values, len(self._offsets)).astype(
+                    np.int32, copy=False
+                )
+                touched = np.unique(indices)
+                np.minimum.at(self._scratch, indices, mapped_values)
+                self.data[touched] = self._scratch[touched]
+                self.time_stamp[touched] = now_s
+                self._scratch[touched] = self._sentinel
         self.rotation_rpm = float(batch.rotation_speed_deg_s[-1] / 360.0 * 60.0)
         self.update_count += batch.frame_count
         self.expire(now_s)
@@ -311,10 +314,8 @@ def radar_worker_main(config, radar_ring_descriptor, output, ready_event, stop_e
                 max_points = int(radar_ring_descriptor["shape"][0])
                 if len(merged) > max_points:
                     merged = merged[:max_points]
-                padded = np.zeros(tuple(radar_ring_descriptor["shape"]), dtype=np.float32)
-                padded[: len(merged)] = merged
                 sequence += 1
-                slot, generation = ring.write(sequence, padded)
+                slot, generation = ring.write_prefix(sequence, merged)
                 latest_frame_s = min((float(state["last_frame_time_s"]) for state in states), default=0.0)
                 health = tuple(
                     {

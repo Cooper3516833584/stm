@@ -216,6 +216,17 @@ class _SharedArrayRing:
         self.generations[slot] = np.uint64(generation * 2)
         return slot, generation * 2
 
+    def write_prefix(self, sequence: int, value: np.ndarray) -> tuple[int, int]:
+        """Publish only the valid leading rows of a variable-length slot."""
+        slot = int(sequence % self.slots)
+        generation = int(sequence + 1)
+        count = min(len(value), self.shape[0])
+        self.generations[slot] = np.uint64(generation * 2 - 1)
+        if count:
+            self.data[slot][:count] = value[:count]
+        self.generations[slot] = np.uint64(generation * 2)
+        return slot, generation * 2
+
     def read(self, slot: int, generation: int) -> np.ndarray | None:
         before = int(self.generations[slot])
         if before != int(generation) or before & 1:

@@ -130,6 +130,10 @@ def test_shared_ring_rejects_overwritten_generation():
         slot, generation = ring.write(0, np.asarray([1, 2, 3, 4], dtype=np.int32))
         assert ring.read(slot, generation).tolist() == [1, 2, 3, 4]
         assert ring.read_prefix(slot, generation, 2).tolist() == [1, 2]
+        slot2, generation2 = ring.write_prefix(
+            1, np.asarray([9, 8], dtype=np.int32)
+        )
+        assert ring.read_prefix(slot2, generation2, 2).tolist() == [9, 8]
         ring.write(2, np.asarray([5, 6, 7, 8], dtype=np.int32))
         assert ring.read(slot, generation) is None
     finally:

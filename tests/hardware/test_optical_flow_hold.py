@@ -8,7 +8,7 @@
 
 为防止误触发，默认只打印任务计划。真实飞行必须显式传入 ``--execute``::
 
-    PYTHONPATH=. python -u FlightController/tools/test_optical_flow_hold.py --execute
+    PYTHONPATH=. python -u tests/hardware/test_optical_flow_hold.py --execute
 """
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+"""Tests for circular tube bypass planning."""
+
 from types import SimpleNamespace
 
 import numpy as np

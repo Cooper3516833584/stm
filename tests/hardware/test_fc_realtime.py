@@ -4,8 +4,8 @@ Phase C: 飞控实时控制通信测试。
 验证 send_realtime_control_data() 协议层 — 电机未接，仅测通信不测物理响应。
 
 用法:
-    PYTHONPATH=. python debug/test_fc_realtime.py
-    PYTHONPATH=. python debug/test_fc_realtime.py --count 20 --speed 15
+    PYTHONPATH=. python tests/hardware/test_fc_realtime.py
+    PYTHONPATH=. python tests/hardware/test_fc_realtime.py --count 20 --speed 15
 """
 
 import argparse

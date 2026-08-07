@@ -2,9 +2,9 @@
 
 Usage:
 
-    PYTHONPATH=. python3 FlightController/tools/test_nb_model.py
-    PYTHONPATH=. python3 FlightController/tools/test_nb_model.py --model FlightController/Solutions/model/road_yolo11n_seg_1.nb
-    PYTHONPATH=. python3 FlightController/tools/test_nb_model.py --model ... --image adjustment/roads/road_0000.jpg
+    PYTHONPATH=. python3 tests/hardware/test_nb_model.py
+    PYTHONPATH=. python3 tests/hardware/test_nb_model.py --model FlightController/Solutions/model/road_yolo11n_seg_1.nb
+    PYTHONPATH=. python3 tests/hardware/test_nb_model.py --model ... --image adjustment/roads/road_0000.jpg
 
 Stages:
   1. stai_mpu import check
@@ -22,6 +22,10 @@ import time
 from pathlib import Path
 
 import numpy as np
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 
 _DEFAULT_NB = "FlightController/Solutions/model/road_yolo11n_seg_1.nb"
 

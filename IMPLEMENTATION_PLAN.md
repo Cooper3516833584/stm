@@ -47,8 +47,8 @@ MYD-LD25X (STM32MP257, OpenSTLinux v6.0 aarch64)
 │  road_follow_main.py          goal_nav_main.py                │
 │  (视觉道路循线)                (雷达相对目标导航)              │
 │                                                               │
-│  debug/test_fc_connect.py     test_fc_command.py  test_fc_realtime.py  │
-│  FlightController/tools/test_radar_avoidance.py  test_dual_radar.py    │
+│  tests/hardware/test_fc_connect.py  test_fc_command.py test_fc_realtime.py │
+│  tests/hardware/test_radar_avoidance.py  test_dual_radar.py            │
 └────────────┬─────────────────────────────────────────────────┘
              │
 ┌────────────┴─────────────────────────────────────────────────┐
@@ -437,13 +437,13 @@ MultiRadar.get_obstacle_points_body_cm():
 python -m py_compile road_perception.py road_follow_main.py goal_nav_main.py
 
 # 飞控三件套
-PYTHONPATH=. python debug/test_fc_connect.py
-PYTHONPATH=. python debug/test_fc_command.py --target-mode 2
-PYTHONPATH=. python debug/test_fc_realtime.py --count 10 --speed 10
+PYTHONPATH=. python tests/hardware/test_fc_connect.py
+PYTHONPATH=. python tests/hardware/test_fc_command.py --target-mode 2
+PYTHONPATH=. python tests/hardware/test_fc_realtime.py --count 10 --speed 10
 
 # 雷达 ground dry-run
-PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py --no-fc --dry-run
-PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py --no-fc --dry-run
+PYTHONPATH=. python -u tests/hardware/test_radar_avoidance.py --no-fc --dry-run
+PYTHONPATH=. python -u tests/hardware/test_dual_radar.py --no-fc --dry-run
 
 # 任务入口 dry-run (无硬件)
 PYTHONPATH=. python road_follow_main.py --no-fc --no-radar --dry-run --loop-hz 2

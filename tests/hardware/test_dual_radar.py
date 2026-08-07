@@ -1,4 +1,4 @@
-"""Dual D500 radar avoidance ground test.
+"""Centralized dual D500 radar avoidance ground test.
 
 Default behavior is dry-run. Non-zero FC commands are sent only when
 --enable-flight is explicitly provided. The low-level FC protocol is not

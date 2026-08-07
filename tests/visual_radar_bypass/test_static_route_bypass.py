@@ -1,3 +1,5 @@
+"""Tests for the frozen static-route bypass planner."""
+
 from dataclasses import replace
 import math
 from types import SimpleNamespace

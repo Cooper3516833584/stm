@@ -574,16 +574,16 @@ cd ~/Desktop/ObstacleAvoidanceDrone
 source /media/sdcard/venv_npu/bin/activate
 
 # 4a. FC 连通性
-PYTHONPATH=. python debug/test_fc_connect.py
+PYTHONPATH=. python tests/hardware/test_fc_connect.py
 
 # 4b. FC 模式切换
-PYTHONPATH=. python debug/test_fc_command.py --target-mode 2
+PYTHONPATH=. python tests/hardware/test_fc_command.py --target-mode 2
 ```
 
 ### 阶段 5：双雷达 + FC 并行运行
 
 ```bash
-PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py --no-fc --loop-hz 30
+PYTHONPATH=. python -u tests/hardware/test_dual_radar.py --no-fc --loop-hz 30
 ```
 
 **预期**: 设备钟速 100%，CRC 错误 0，CPU ~15%。

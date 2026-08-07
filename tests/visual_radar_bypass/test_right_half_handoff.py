@@ -1,3 +1,5 @@
+"""Tests for the right-half radar handoff."""
+
 import numpy as np
 
 from experiments.visual_radar_bypass.radar_bypass import ObstacleBypassState

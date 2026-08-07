@@ -27,8 +27,8 @@ python -m py_compile FlightController/Solutions/LocalPlanner.py
 python -m py_compile FlightController/Solutions/Safety.py
 python -m py_compile FlightController/Solutions/RoadFollower.py
 python -m py_compile FlightController/Solutions/RelativeGoalNavigator.py
-python -m py_compile FlightController/tools/test_radar_avoidance.py
-python -m py_compile FlightController/tools/test_dual_radar.py
+python -m py_compile tests/hardware/test_radar_avoidance.py
+python -m py_compile tests/hardware/test_dual_radar.py
 python -m py_compile road_follow_main.py goal_nav_main.py
 
 PYTHONPATH=. python FlightController/tools/validate_imports.py
@@ -52,10 +52,10 @@ grep -R "explicit""_port" -n .
 - 不解锁。
 
 ```bash
-PYTHONPATH=. python debug/test_fc_connect.py
+PYTHONPATH=. python tests/hardware/test_fc_connect.py
 
 # 如果自动识别失败
-PYTHONPATH=. python debug/test_fc_connect.py --port /dev/ttyACM0
+PYTHONPATH=. python tests/hardware/test_fc_connect.py --port /dev/ttyACM0
 ```
 
 通过标准：
@@ -69,7 +69,7 @@ PYTHONPATH=. python debug/test_fc_connect.py --port /dev/ttyACM0
 ## Phase B：飞控模式切换
 
 ```bash
-PYTHONPATH=. python debug/test_fc_command.py --target-mode 2
+PYTHONPATH=. python tests/hardware/test_fc_command.py --target-mode 2
 ```
 
 通过标准：
@@ -83,7 +83,7 @@ PYTHONPATH=. python debug/test_fc_command.py --target-mode 2
 ## Phase C：飞控实时控制帧通信
 
 ```bash
-PYTHONPATH=. python debug/test_fc_realtime.py --count 10 --speed 10
+PYTHONPATH=. python tests/hardware/test_fc_realtime.py --count 10 --speed 10
 ```
 
 通过标准：
@@ -100,7 +100,7 @@ PYTHONPATH=. python debug/test_fc_realtime.py --count 10 --speed 10
 ## Phase D：单雷达地面 dry-run
 
 ```bash
-PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py \
+PYTHONPATH=. python -u tests/hardware/test_radar_avoidance.py \
   --no-fc --dry-run \
   --profile --raw-latency --raw-latency-stdout \
   --log-file /media/sdcard/single_radar_verify.log
@@ -119,7 +119,7 @@ PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py \
 ## Phase E：双雷达地面 dry-run
 
 ```bash
-PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py \
+PYTHONPATH=. python -u tests/hardware/test_dual_radar.py \
   --no-fc --dry-run --profile \
   --log-file /media/sdcard/dual_radar_verify.log
 ```
@@ -137,7 +137,7 @@ PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py \
 ## Phase F：双雷达 + 飞控只读
 
 ```bash
-PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py \
+PYTHONPATH=. python -u tests/hardware/test_dual_radar.py \
   --dry-run --fc-port /dev/ttyACM0 \
   --log-file /media/sdcard/dual_radar_fc_dry.log
 ```

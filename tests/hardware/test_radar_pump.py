@@ -1,4 +1,13 @@
+"""Centralized radar pump hardware test."""
+
 import time
+from pathlib import Path
+import sys
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
 from loguru import logger
 from FlightController.Components.LDRadar_Driver import LD_Radar
 

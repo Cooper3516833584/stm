@@ -4,8 +4,8 @@ Phase B: 飞控指令下发测试。
 验证: set_flight_mode() → ACK 机制 → mode 状态变化 → 全状态字段可读。
 
 用法:
-    PYTHONPATH=. python debug/test_fc_command.py
-    PYTHONPATH=. python debug/test_fc_command.py --port /dev/ttyACM0
+    PYTHONPATH=. python tests/hardware/test_fc_command.py
+    PYTHONPATH=. python tests/hardware/test_fc_command.py --port /dev/ttyACM0
 """
 
 import argparse

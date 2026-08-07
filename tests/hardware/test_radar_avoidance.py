@@ -5,13 +5,13 @@
 
 用法:
     # 仅测试雷达端（不连飞控，不发指令）
-    python FlightController/tools/test_radar_avoidance.py --no-fc --dry-run
+    python tests/hardware/test_radar_avoidance.py --no-fc --dry-run
 
     # 雷达 + 飞控，但不发送实际指令
-    python FlightController/tools/test_radar_avoidance.py --dry-run
+    python tests/hardware/test_radar_avoidance.py --dry-run
 
     # 完整链路（雷达 + 飞控 + 发送指令）
-    python FlightController/tools/test_radar_avoidance.py
+    python tests/hardware/test_radar_avoidance.py
 """
 
 import argparse

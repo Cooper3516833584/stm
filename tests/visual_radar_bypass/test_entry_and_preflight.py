@@ -1,3 +1,5 @@
+"""Entry-point and preflight tests for visual/radar bypass."""
+
 from pathlib import Path
 from types import SimpleNamespace
 

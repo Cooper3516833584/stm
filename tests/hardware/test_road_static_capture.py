@@ -1,4 +1,4 @@
-"""Capture one road-camera image and render its single-road geometry.
+"""Centralized test for road-camera capture and geometry rendering.
 
 This is a vision-only board-side test.  It never imports or connects to the
 flight controller, radar, or navigation controller, so it cannot arm motors

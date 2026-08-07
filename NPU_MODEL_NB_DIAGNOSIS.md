@@ -156,7 +156,7 @@ Quantize (INT8, per-tensor, 道路校准)
 | 文件 | 用途 |
 |---|---|
 | [nb_graph.py](nb_graph.py) | `NBGraphSession` — 封装 `stai_mpu.stai_mpu_network`，接口兼容 `onnxruntime.InferenceSession` |
-| [FlightController/tools/test_nb_model.py](FlightController/tools/test_nb_model.py) | .nb 模型烟雾测试脚本 |
+| [tests/hardware/test_nb_model.py](tests/hardware/test_nb_model.py) | .nb 模型烟雾测试脚本 |
 
 ### 4.2 修改文件
 
@@ -246,10 +246,10 @@ ls -la /dev/galcore
 python3 -c "from stai_mpu import stai_mpu_network; print('OK')"
 
 # .nb 模型烟雾测试
-PYTHONPATH=. python3 FlightController/tools/test_nb_model.py
+PYTHONPATH=. python3 tests/hardware/test_nb_model.py
 
 # .nb 模型 + 真实图片测试
-PYTHONPATH=. python3 FlightController/tools/test_nb_model.py \
+PYTHONPATH=. python3 tests/hardware/test_nb_model.py \
   --image adjustment/roads/IPC_2026-06-14.10.32.58.1790.jpg
 
 # 抓取 NPU 是否被调用的证据

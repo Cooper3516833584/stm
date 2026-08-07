@@ -410,14 +410,14 @@ CPU 占比:   130%  → 12.3%     (headroom 88%)
 
 ### 6.7 诊断工具
 
-**在线避障链路测试** `FlightController/tools/test_radar_avoidance.py`:
+**在线避障链路测试** `tests/hardware/test_radar_avoidance.py`:
 
 ```bash
 # 基础用法
-PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py --no-fc --dry-run
+PYTHONPATH=. python -u tests/hardware/test_radar_avoidance.py --no-fc --dry-run
 
 # 性能分析 + 异步日志文件 (⚠️ 日志务必写入闪存卡，/tmp 为 tmpfs 会吃 RAM)
-PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py \
+PYTHONPATH=. python -u tests/hardware/test_radar_avoidance.py \
     --no-fc --dry-run --profile \
     --raw-latency --raw-latency-stdout \
     --log-file /media/sdcard/radar_verify.log
@@ -451,7 +451,7 @@ PYTHONPATH=. python -u FlightController/tools/bench_map_update.py
 
 ```bash
 # 终端 1: 启动测试
-PYTHONPATH=. python -u FlightController/tools/test_radar_avoidance.py \
+PYTHONPATH=. python -u tests/hardware/test_radar_avoidance.py \
     --no-fc --dry-run --profile \
     --raw-latency --raw-latency-stdout --debug-dump \
     --log-file /media/sdcard/latency_verify.log
@@ -533,9 +533,9 @@ tail -f /media/sdcard/latency_verify.log | grep LATENCY
 当前状态: 单雷达在线避障链路已 100% 验证（设备钟速 ≥100%、零积压、零 CRC 错误、端到端延迟 < 5ms、CPU 占用 12%）。以下为雷达相关后续工作，按优先级排序:
 
 ### 8.1 飞控联调 (阶段 B/C) — 优先级 ⭐⭐⭐ ✅ 已完成 (2026-05-17)
-- [x] Phase A: `debug/test_fc_connect.py` — FC 基础连通性，mode/bat/姿态/速度/位置 16 字段回传正常
-- [x] Phase B: `debug/test_fc_command.py` — `set_flight_mode(2)` ACK 确认，mode 切换到 HOLD_POS 成功
-- [x] Phase C: `debug/test_fc_realtime.py` — `send_realtime_control_data()` 10/10 成功，零异常零断连
+- [x] Phase A: `tests/hardware/test_fc_connect.py` — FC 基础连通性，mode/bat/姿态/速度/位置 16 字段回传正常
+- [x] Phase B: `tests/hardware/test_fc_command.py` — `set_flight_mode(2)` ACK 确认，mode 切换到 HOLD_POS 成功
+- [x] Phase C: `tests/hardware/test_fc_realtime.py` — `send_realtime_control_data()` 10/10 成功，零异常零断连
 - [x] Phase D: `test_radar_avoidance.py --dry-run` — FC+雷达并行运行，设备钟速 100%，FC 心跳对雷达链路零干扰
 - [x] Phase E: `test_radar_avoidance.py` (去除 --dry-run) — 真实飞控指令下发，stop/slow/cruise 三段避障完整验证，Ctrl+C 安全退出零速发送
 - [x] 地面推车测试：手持障碍物靠近雷达，通过 FC 状态回传验证速度指令变化（stop→slow→cruise 三段切换）
@@ -667,11 +667,11 @@ FC 心跳线程 (每 250ms 发送 AA 22 帧) 对雷达串口读取线程无 GIL 
 
 | 脚本 | 用途 | 关键参数 |
 |---|---|---|
-| `debug/test_fc_connect.py` | Phase A: FC 连通性 + 全状态打印 | `--port` 指定串口 |
-| `debug/test_fc_command.py` | Phase B: 模式切换 + ACK 验证 | `--target-mode` 1/2/3 |
-| `debug/test_fc_realtime.py` | Phase C: 实时控制协议层测试 | `--count` `--speed` `--interval` |
-| `FlightController/tools/test_radar_avoidance.py` | Phase D/E: 避障链路完整测试 | `--dry-run` `--profile` `--raw-latency` |
-| `FlightController/tools/test_dual_radar.py` | 双雷达融合避障链路测试 | `--loop-hz` `--debug-dump` `--dry-run` |
+| `tests/hardware/test_fc_connect.py` | Phase A: FC 连通性 + 全状态打印 | `--port` 指定串口 |
+| `tests/hardware/test_fc_command.py` | Phase B: 模式切换 + ACK 验证 | `--target-mode` 1/2/3 |
+| `tests/hardware/test_fc_realtime.py` | Phase C: 实时控制协议层测试 | `--count` `--speed` `--interval` |
+| `tests/hardware/test_radar_avoidance.py` | Phase D/E: 避障链路完整测试 | `--dry-run` `--profile` `--raw-latency` |
+| `tests/hardware/test_dual_radar.py` | 双雷达融合避障链路测试 | `--loop-hz` `--debug-dump` `--dry-run` |
 | `FlightController/tools/smoke_dual_radar.py` | 双雷达连通性烟雾测试 | `--upper-port` `--lower-port` |
 
 运行方式: `cd ~/Desktop/ObstacleAvoidanceDrone && PYTHONPATH=. python debug/<script>.py`
@@ -768,16 +768,16 @@ multi_radar.stop()
 
 ```bash
 # 仅雷达测试
-PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py --no-fc
+PYTHONPATH=. python -u tests/hardware/test_dual_radar.py --no-fc
 
 # 带 debug dump
-PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py --no-fc --debug-dump
+PYTHONPATH=. python -u tests/hardware/test_dual_radar.py --no-fc --debug-dump
 
 # 完整链路 (雷达 + 飞控)
-PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py
+PYTHONPATH=. python -u tests/hardware/test_dual_radar.py
 
 # 调频
-PYTHONPATH=. python -u FlightController/tools/test_dual_radar.py --no-fc --loop-hz 50
+PYTHONPATH=. python -u tests/hardware/test_dual_radar.py --no-fc --loop-hz 50
 ```
 
 **主循环频率选择逻辑** (ARM CONFIG_HZ=100):

@@ -1,3 +1,5 @@
+"""Tests for the smooth sidestep planner."""
+
 from dataclasses import replace
 from types import SimpleNamespace
 

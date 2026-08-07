@@ -341,7 +341,7 @@ cv2: 4.13.0
 ### 6.1 烟雾测试
 
 ```bash
-PYTHONPATH=. python3 FlightController/tools/test_nb_model.py \
+PYTHONPATH=. python3 tests/hardware/test_nb_model.py \
   --model FlightController/Solutions/model/road_yolo11n_seg_vsinpu_fp32_opt.nb \
   --runs 10
 ```
@@ -365,7 +365,7 @@ FPS: 1.6
 推荐命令：
 
 ```bash
-PYTHONPATH=. strace -f -e openat,ioctl python3 FlightController/tools/test_nb_model.py \
+PYTHONPATH=. strace -f -e openat,ioctl python3 tests/hardware/test_nb_model.py \
   --model FlightController/Solutions/model/road_yolo11n_seg_vsinpu_fp32_opt.nb \
   --runs 1 2>&1 | tee /tmp/nb_strace.log
 
@@ -375,7 +375,7 @@ grep -E 'galcore|/dev' /tmp/nb_strace.log
 只看 galcore：
 
 ```bash
-PYTHONPATH=. strace -f -e ioctl python3 FlightController/tools/test_nb_model.py \
+PYTHONPATH=. strace -f -e ioctl python3 tests/hardware/test_nb_model.py \
   --model FlightController/Solutions/model/road_yolo11n_seg_vsinpu_fp32_opt.nb \
   --runs 2 2>&1 | grep galcore
 ```

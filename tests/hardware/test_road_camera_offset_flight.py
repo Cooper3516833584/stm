@@ -1,4 +1,4 @@
-"""Capture one downward road-camera frame at a 1 m fixed-point hover.
+"""Centralized test that captures a downward road-camera frame during hover.
 
 This is a flight test utility.  It uses the existing Navigation.pointing_takeoff
 routine with only the upper radar. Horizontal navigation is disabled by default

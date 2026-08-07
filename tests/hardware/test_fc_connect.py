@@ -4,8 +4,8 @@ Phase A: 飞控基础连通性测试。
 验证: 设备发现 → 串口打开 → 协议握手 → 状态回传。
 
 用法:
-    PYTHONPATH=. python debug/test_fc_connect.py
-    PYTHONPATH=. python debug/test_fc_connect.py --port /dev/ttyUSB0
+    PYTHONPATH=. python tests/hardware/test_fc_connect.py
+    PYTHONPATH=. python tests/hardware/test_fc_connect.py --port /dev/ttyUSB0
 """
 
 import argparse

@@ -1,3 +1,5 @@
+"""Tests for the legacy radar bypass planner."""
+
 from types import SimpleNamespace
 
 import numpy as np

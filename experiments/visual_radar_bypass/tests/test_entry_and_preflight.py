@@ -6,6 +6,8 @@ import pytest
 import road_follow_main
 import road_trajectory_main
 from experiments.visual_radar_bypass import main
+from experiments.visual_radar_bypass.parameter_registry import build_parameter_registry
+from experiments.visual_radar_bypass.static_route_bypass import StaticRouteBypassConfig
 from experiments.visual_radar_bypass.flight_runtime import (
     wait_for_radars,
     wait_for_visual_road,
@@ -43,6 +45,31 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.tuning_log_every_n == 2
     assert args.radar_snapshot_every_n == 5
     assert not hasattr(args, "synthetic_radar")
+
+
+def test_default_static_route_profile_is_marked_flight_validated():
+    registry = build_parameter_registry(
+        StaticRouteBypassConfig(),
+        radar_timeout_s=0.5,
+        tuning_log_every_n=2,
+        radar_snapshot_every_n=5,
+    )
+    by_name = {row["parameter"]: row for row in registry}
+
+    assert main.DEFAULT_BYPASS_PLANNER == "static-route"
+    for name in (
+        "target_surface_clearance_cm",
+        "reshift_surface_clearance_cm",
+        "max_outward_vy_cm_s",
+        "association_radius_cm",
+        "edge_arm_deg",
+        "rear_margin_cm",
+        "translation_credit_ratio",
+        "track_lost_hold_s",
+        "max_encounter_s",
+    ):
+        assert by_name[name]["source"] == "FLIGHT_VALIDATED"
+        assert not by_name[name]["requires_flight_tuning"]
 
 
 def test_smooth_sidestep_remains_explicit(tmp_path):

@@ -16,6 +16,10 @@ import numpy as np
 from FlightController.Solutions.Safety import Command, RadarObstacleField
 
 
+STATIC_ROUTE_PROFILE_NAME = "static-route-flight-v1"
+STATIC_ROUTE_PROFILE_STATUS = "FROZEN_FLIGHT_VALIDATED"
+
+
 class StaticRouteBypassState(str, Enum):
     NORMAL = "normal"
     DIVERGE_LEFT = "diverge_left"
@@ -54,7 +58,8 @@ class StaticRouteBypassConfig:
     side_deadband_cm: float = 5.0
     center_obstacle_default_bypass_side: str = "right"
 
-    # UNVERIFIED_TUNING.
+    # Frozen flight-validated v1 defaults.  The dataclass intentionally remains
+    # configurable so a faster v2 profile can be added without mutating v1.
     target_surface_clearance_cm: float = 85.0
     reshift_surface_clearance_cm: float = 75.0
     max_outward_vy_cm_s: float = 8.0
@@ -672,6 +677,8 @@ def _append_reason(reason: str, suffix: str) -> str:
 
 
 __all__ = [
+    "STATIC_ROUTE_PROFILE_NAME",
+    "STATIC_ROUTE_PROFILE_STATUS",
     "StaticRouteBypassConfig",
     "StaticRouteBypassPlanner",
     "StaticRouteBypassState",

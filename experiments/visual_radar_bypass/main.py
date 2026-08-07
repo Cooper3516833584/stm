@@ -43,9 +43,17 @@ from .circular_tube_bypass import (
 from .radar_bypass import ObstacleBypassConfig, ObstacleBypassPlanner
 from .right_half_handoff import RightHalfRadarHandoff
 from .smooth_sidestep import SmoothSidestepPlanner
-from .static_route_bypass import StaticRouteBypassConfig, StaticRouteBypassPlanner
+from .static_route_bypass import (
+    STATIC_ROUTE_PROFILE_NAME,
+    STATIC_ROUTE_PROFILE_STATUS,
+    StaticRouteBypassConfig,
+    StaticRouteBypassPlanner,
+)
 from .parameter_registry import build_parameter_registry
 from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance
+
+
+DEFAULT_BYPASS_PLANNER = "static-route"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -64,7 +72,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--bypass-planner",
         choices=("legacy", "smooth-sidestep", "static-route"),
-        default="static-route",
+        default=DEFAULT_BYPASS_PLANNER,
         help="Select static-route (default) or an unchanged earlier planner",
     )
     parser.add_argument(
@@ -208,6 +216,16 @@ def main(argv: list[str] | None = None) -> None:
                 ),
                 "radar_points": "physical only; no synthetic injection",
                 "bypass_planner": args.bypass_planner,
+                "avoidance_profile": (
+                    STATIC_ROUTE_PROFILE_NAME
+                    if args.bypass_planner == DEFAULT_BYPASS_PLANNER
+                    else None
+                ),
+                "avoidance_profile_status": (
+                    STATIC_ROUTE_PROFILE_STATUS
+                    if args.bypass_planner == DEFAULT_BYPASS_PLANNER
+                    else None
+                ),
                 "right_half_radar_then_visual": args.right_half_radar_then_visual,
                 "circular_tube_bypass": args.circular_tube_bypass,
                 "tube_radius_cm": args.tube_radius_cm,

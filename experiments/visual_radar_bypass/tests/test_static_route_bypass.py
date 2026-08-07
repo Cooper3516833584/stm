@@ -7,6 +7,8 @@ import pytest
 
 from FlightController.Solutions.Safety import Command, RadarFieldConfig, RadarObstacleField
 from experiments.visual_radar_bypass.static_route_bypass import (
+    STATIC_ROUTE_PROFILE_NAME,
+    STATIC_ROUTE_PROFILE_STATUS,
     StaticRouteBypassConfig,
     StaticRouteBypassPlanner,
     StaticRouteBypassState,
@@ -62,6 +64,49 @@ def test_default_policy_is_front_180_and_sixty_percent_forward_speed():
     assert config.half_fov_deg == 90.0
     assert config.avoidance_forward_ratio == 0.60
     assert config.avoidance_vx_cm_s == pytest.approx(8.4)
+
+
+def test_flight_validated_v1_profile_defaults_are_frozen():
+    config = StaticRouteBypassConfig()
+
+    assert STATIC_ROUTE_PROFILE_NAME == "static-route-flight-v1"
+    assert STATIC_ROUTE_PROFILE_STATUS == "FROZEN_FLIGHT_VALIDATED"
+    assert (
+        config.front_fov_deg,
+        config.avoidance_vx_cm_s,
+        config.target_surface_clearance_cm,
+        config.reshift_surface_clearance_cm,
+        config.max_outward_vy_cm_s,
+        config.association_radius_cm,
+        config.edge_arm_deg,
+        config.rear_margin_cm,
+        config.translation_credit_ratio,
+        config.track_lost_hold_s,
+        config.max_encounter_s,
+    ) == (
+        180.0,
+        8.4,
+        85.0,
+        75.0,
+        8.0,
+        50.0,
+        80.0,
+        20.0,
+        0.70,
+        1.0,
+        40.0,
+    )
+
+
+def test_faster_future_profile_can_override_speed_without_mutating_v1():
+    v1 = StaticRouteBypassConfig()
+    future = replace(v1, avoidance_forward_ratio=0.75, max_outward_vy_cm_s=9.0)
+
+    assert v1.avoidance_vx_cm_s == pytest.approx(8.4)
+    assert v1.max_outward_vy_cm_s == 8.0
+    assert future.avoidance_vx_cm_s == pytest.approx(10.5)
+    assert future.max_outward_vy_cm_s == 9.0
+    assert StaticRouteBypassConfig() == v1
 
 
 def test_right_front_obstacle_locks_left_and_ignores_visual_lateral_command():

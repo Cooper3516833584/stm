@@ -59,14 +59,15 @@ def test_reached_nearest_point_advances_to_adaptive_lookahead_and_moves_forward(
     assert command.yaw_rate_deg_s == pytest.approx(0.0)
 
 
-def test_offset_target_moves_directly_sideways_with_camera_mapping():
+def test_offset_target_keeps_forward_speed_and_adds_lateral_correction():
     points = [(400.0, 300.0), (400.0, 240.0), (400.0, 180.0)]
     follower = _follower(min_forward_lookahead_px=0.0)
 
     command = follower.update(_perception(points), now_s=1.0)
 
-    assert command.vx_cm_s == pytest.approx(0.0)
-    assert command.vy_cm_s == pytest.approx(-8.0)
+    assert command.vx_cm_s == pytest.approx(10.0)
+    assert command.vy_cm_s < 0.0
+    assert abs(command.vy_cm_s) <= 8.0
     assert follower.last_diagnostics.target_x_px == 400.0
 
 
@@ -199,6 +200,41 @@ def test_moderate_curvature_interpolates_to_about_fourteen_cm_s():
     assert follower._curve_speed_limit_cm_s(24.2) == pytest.approx(14.0)
 
 
+def test_high_speed_curve_speed_limits_remain_fast_until_sharp_turns():
+    follower = _follower(
+        max_vx_cm_s=45.0,
+        min_curve_speed_cm_s=28.0,
+        curvature_slowdown_start_deg=25.0,
+        curvature_full_slowdown_deg=70.0,
+    )
+
+    assert follower._curve_speed_limit_cm_s(0.0) == pytest.approx(45.0)
+    assert follower._curve_speed_limit_cm_s(45.0) == pytest.approx(37.4444444444)
+    assert follower._curve_speed_limit_cm_s(70.0) == pytest.approx(28.0)
+
+
+def test_high_yaw_response_tracks_tangent_and_clamps_at_limit():
+    diagonal = [(320.0, 460.0), (350.0, 408.0), (380.0, 356.0)]
+    follower = _follower(
+        tangent_kp_yaw=0.9,
+        max_yaw_rate_deg_s=40.0,
+        max_yaw_accel_deg_s2=1_000_000.0,
+        tangent_filter_tau_s=0.0,
+        tangent_filter_max_rate_deg_s=1_000_000.0,
+        tangent_deadband_deg=0.0,
+    )
+
+    command = follower.update(_perception(diagonal), now_s=1.0)
+
+    expected = 0.9 * follower.last_diagnostics.raw_tangent_error_deg
+    assert command.yaw_rate_deg_s == pytest.approx(expected)
+
+    sharp = [(320.0, 460.0), (500.0, 408.0), (620.0, 356.0)]
+    clamped = follower.update(_perception(sharp), now_s=1.1)
+
+    assert abs(clamped.yaw_rate_deg_s) == pytest.approx(40.0)
+
+
 def test_speed_and_measured_latency_expand_forward_lookahead():
     points = [(320.0, float(y)) for y in range(460, 19, -5)]
     latency_follower = TrajectoryPointFollower(
@@ -244,6 +280,36 @@ def test_small_lateral_error_is_ignored_but_larger_error_is_corrected():
     assert large_command.vy_cm_s < 0.0
 
 
+def test_forward_priority_does_not_trade_vx_for_lateral_error():
+    points = [(440.0, 300.0), (440.0, 240.0), (440.0, 180.0)]
+    follower = _follower(
+        max_vx_cm_s=45.0,
+        max_vy_cm_s=12.0,
+        min_forward_lookahead_px=30.0,
+        lateral_deadband_px=24.0,
+        lateral_kp_cm_s_per_px=0.10,
+    )
+
+    command = follower.update(_perception(points), now_s=1.0)
+
+    assert command.vx_cm_s == pytest.approx(45.0)
+    assert command.vy_cm_s < 0.0
+    assert abs(command.vy_cm_s) <= 12.0
+
+
+def test_lateral_deadband_keeps_forward_motion_without_lateral_correction():
+    points = [(344.0, 300.0), (344.0, 240.0), (344.0, 180.0)]
+    follower = _follower(
+        min_forward_lookahead_px=30.0,
+        lateral_deadband_px=24.0,
+    )
+
+    command = follower.update(_perception(points), now_s=1.0)
+
+    assert command.vx_cm_s > 0.0
+    assert command.vy_cm_s == pytest.approx(0.0)
+
+
 def test_planar_acceleration_limit_brakes_before_direction_reversal():
     right = [(400.0, 300.0), (400.0, 240.0), (400.0, 180.0)]
     left = [(240.0, 300.0), (240.0, 240.0), (240.0, 180.0)]
@@ -276,6 +342,37 @@ def test_lost_road_stops_immediately_and_reacquisition_ramps_from_zero():
     assert stopped.vx_cm_s == 0.0
     assert stopped.vy_cm_s == 0.0
     assert restarted.vx_cm_s == pytest.approx(1.6)
+
+
+def test_short_road_loss_uses_entry_command_grace_and_reacquires_tracking():
+    points = [(320.0, float(y)) for y in range(460, 19, -20)]
+    follower = _follower(
+        max_vx_cm_s=45.0,
+        lost_grace_s=0.18,
+        lost_grace_vx_scale=0.80,
+    )
+    follower.update(_perception(points), now_s=1.0)
+
+    grace = follower.update(None, now_s=1.1)
+    recovered = follower.update(_perception(points), now_s=1.2)
+
+    assert grace.vx_cm_s == pytest.approx(36.0)
+    assert follower.last_diagnostics.state == "tracking"
+    assert recovered.vx_cm_s > 0.0
+
+
+def test_road_loss_stops_after_grace_expires():
+    points = [(320.0, float(y)) for y in range(460, 19, -20)]
+    follower = _follower(max_vx_cm_s=45.0, lost_grace_s=0.18)
+    follower.update(_perception(points), now_s=1.0)
+    follower.update(None, now_s=1.1)
+
+    stopped = follower.update(None, now_s=1.29)
+
+    assert stopped.vx_cm_s == 0.0
+    assert stopped.vy_cm_s == 0.0
+    assert stopped.yaw_rate_deg_s == 0.0
+    assert follower.last_diagnostics.state == "road_lost_hold"
 
 
 @pytest.mark.parametrize(

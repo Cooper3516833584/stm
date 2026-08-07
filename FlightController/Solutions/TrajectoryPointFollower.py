@@ -31,6 +31,7 @@ class TrajectoryPointFollowerConfig:
     tangent_kp_yaw: float = 0.25
     tangent_deadband_deg: float = 3.0
     lateral_deadband_px: float = 8.0
+    lateral_kp_cm_s_per_px: float = 0.10
     yaw_sign: float = 1.0
     lateral_sign: float = -1.0
     target_filter_tau_s: float = 0.15
@@ -43,6 +44,10 @@ class TrajectoryPointFollowerConfig:
     curvature_slowdown_start_deg: float = 8.0
     curvature_full_slowdown_deg: float = 35.0
     min_curve_speed_cm_s: float = 10.0
+    lost_grace_s: float = 0.0
+    lost_grace_vx_scale: float = 0.80
+    lost_grace_vy_scale: float = 0.50
+    lost_grace_yaw_scale: float = 0.70
 
 
 @dataclass(frozen=True)
@@ -109,6 +114,7 @@ class TrajectoryPointFollower:
         self.config = config or TrajectoryPointFollowerConfig()
         self._last_update_s: float | None = None
         self._lost_since_s: float | None = None
+        self._lost_entry_command: tuple[float, float, float] | None = None
         self._filtered_forward_px: float | None = None
         self._filtered_lateral_px: float | None = None
         self._filtered_tangent_error_deg: float | None = None
@@ -123,6 +129,7 @@ class TrajectoryPointFollower:
             return self._lost_command(now_s)
 
         self._lost_since_s = None
+        self._lost_entry_command = None
         dt_s = self._observation_dt(now_s)
         center_x = float(self.config.image_width) / 2.0
         center_y = float(self.config.image_height) / 2.0
@@ -493,24 +500,25 @@ class TrajectoryPointFollower:
         *,
         speed_limit_cm_s: float | None = None,
     ) -> Point:
-        magnitude = math.hypot(forward_px, lateral_px)
-        if magnitude < 1e-6:
+        if abs(forward_px) < 1e-6 and abs(lateral_px) < 1e-6:
             return 0.0, 0.0
 
-        unit_x = forward_px / magnitude
-        unit_y = self.config.lateral_sign * lateral_px / magnitude
-        speed_limit = (
-            max(abs(self.config.max_vx_cm_s), abs(self.config.max_vy_cm_s))
+        maximum_vx = max(0.0, float(self.config.max_vx_cm_s))
+        vx_limit = (
+            maximum_vx
             if speed_limit_cm_s is None
-            else max(0.0, float(speed_limit_cm_s))
+            else _clamp(float(speed_limit_cm_s), 0.0, maximum_vx)
         )
-        scale_limits = [speed_limit]
-        if abs(unit_x) > 1e-9:
-            scale_limits.append(abs(self.config.max_vx_cm_s) / abs(unit_x))
-        if abs(unit_y) > 1e-9:
-            scale_limits.append(abs(self.config.max_vy_cm_s) / abs(unit_y))
-        scale = min(scale_limits)
-        return unit_x * scale, unit_y * scale
+
+        # Lateral correction does not consume the forward cruise budget.
+        vx = vx_limit if forward_px >= 0.0 else 0.0
+        vy = (
+            float(self.config.lateral_sign)
+            * float(self.config.lateral_kp_cm_s_per_px)
+            * float(lateral_px)
+        )
+        max_vy = max(0.0, float(self.config.max_vy_cm_s))
+        return vx, _clamp(vy, -max_vy, max_vy)
 
     @staticmethod
     def _limit_planar_acceleration(
@@ -601,14 +609,45 @@ class TrajectoryPointFollower:
     def _lost_command(self, now_s: float) -> Command:
         if self._lost_since_s is None:
             self._lost_since_s = float(now_s)
+            self._lost_entry_command = (
+                self._limited_vx_cm_s,
+                self._limited_vy_cm_s,
+                self._limited_yaw_rate_deg_s,
+            )
         lost_elapsed_s = max(0.0, float(now_s) - self._lost_since_s)
         self._last_update_s = float(now_s)
+
+        grace_s = max(0.0, float(self.config.lost_grace_s))
+        if (
+            grace_s > 0.0
+            and lost_elapsed_s <= grace_s
+            and self._lost_entry_command is not None
+        ):
+            entry_vx, entry_vy, entry_yaw = self._lost_entry_command
+            vx = entry_vx * _clamp(float(self.config.lost_grace_vx_scale), 0.0, 1.0)
+            vy = entry_vy * _clamp(float(self.config.lost_grace_vy_scale), 0.0, 1.0)
+            yaw_rate = entry_yaw * _clamp(
+                float(self.config.lost_grace_yaw_scale), 0.0, 1.0
+            )
+            self._limited_vx_cm_s = vx
+            self._limited_vy_cm_s = vy
+            self._limited_yaw_rate_deg_s = yaw_rate
+            self.last_diagnostics = TrajectoryPointFollowerDiagnostics(
+                state="road_lost_grace",
+                lost_elapsed_s=lost_elapsed_s,
+                vx_cm_s=vx,
+                vy_cm_s=vy,
+                yaw_rate_deg_s=yaw_rate,
+            )
+            return Command(vx, vy, 0.0, yaw_rate, "trajectory_road_lost_grace")
+
         self._filtered_forward_px = None
         self._filtered_lateral_px = None
         self._filtered_tangent_error_deg = None
         self._limited_vx_cm_s = 0.0
         self._limited_vy_cm_s = 0.0
         self._limited_yaw_rate_deg_s = 0.0
+        self._lost_entry_command = None
         self.last_diagnostics = TrajectoryPointFollowerDiagnostics(
             state="road_lost_hold",
             lost_elapsed_s=lost_elapsed_s,

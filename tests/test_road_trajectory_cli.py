@@ -22,19 +22,23 @@ def test_trajectory_entry_selects_adaptive_fast_point_controller_defaults():
     assert args.road_instance_selection == "highest-confidence"
     assert args.loop_hz == 12.0
     assert args.trajectory_reach_radius_px == 30.0
-    assert args.trajectory_min_forward_lookahead_px == 24.0
-    assert args.trajectory_max_forward_lookahead_px == 64.0
-    assert args.trajectory_lookahead_speed_gain_px_per_cm_s == 1.2
+    assert args.trajectory_min_forward_lookahead_px == 30.0
+    assert args.trajectory_max_forward_lookahead_px == 130.0
+    assert args.trajectory_lookahead_speed_gain_px_per_cm_s == 1.6
     assert args.trajectory_latency_compensation_s == 0.134
-    assert args.trajectory_lateral_deadband_px == 8.0
-    assert args.trajectory_max_planar_accel_cm_s2 == 24.0
-    assert args.trajectory_max_yaw_accel_deg_s2 == 20.0
-    assert args.trajectory_min_curve_speed_cm_s == 12.0
-    assert args.trajectory_curvature_slowdown_start_deg == 12.0
-    assert args.trajectory_curvature_full_slowdown_deg == 42.0
-    assert args.max_vx_cm_s == 20.0
+    assert args.trajectory_max_latency_prediction_px == 32.0
+    assert args.trajectory_lateral_deadband_px == 24.0
+    assert args.trajectory_lateral_kp_cm_s_per_px == 0.10
+    assert args.trajectory_tangent_kp_yaw == 0.9
+    assert args.trajectory_max_planar_accel_cm_s2 == 55.0
+    assert args.trajectory_max_yaw_accel_deg_s2 == 100.0
+    assert args.trajectory_min_curve_speed_cm_s == 28.0
+    assert args.trajectory_curvature_slowdown_start_deg == 25.0
+    assert args.trajectory_curvature_full_slowdown_deg == 70.0
+    assert args.trajectory_lost_grace_s == 0.18
+    assert args.max_vx_cm_s == 45.0
     assert args.max_vy_cm_s == 12.0
-    assert args.max_yaw_rate_deg_s == 10.0
+    assert args.max_yaw_rate_deg_s == 40.0
     assert args.no_radar is True
     assert args.enable_flight is True
     assert args.auto_takeoff is True
@@ -52,11 +56,8 @@ def test_explicit_trajectory_cli_values_override_program_defaults():
                 "24",
                 "--road-instance-selection",
                 "geometry",
-<<<<<<< HEAD
-=======
                 "--trajectory-min-curve-speed-cm-s",
                 "9",
->>>>>>> 0c54f6e0a831195f5db16289057177b90b1a7545
             ]
         )
     )
@@ -64,10 +65,7 @@ def test_explicit_trajectory_cli_values_override_program_defaults():
     assert args.max_vx_cm_s == 6.0
     assert args.trajectory_reach_radius_px == 24.0
     assert args.road_instance_selection == "geometry"
-<<<<<<< HEAD
-=======
     assert args.trajectory_min_curve_speed_cm_s == 9.0
->>>>>>> 0c54f6e0a831195f5db16289057177b90b1a7545
 
 
 def test_plain_trajectory_invocation_is_valid_production_auto_flight():

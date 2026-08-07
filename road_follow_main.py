@@ -268,6 +268,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--trajectory-tangent-window-points", type=int, default=5)
     parser.add_argument("--trajectory-tangent-kp-yaw", type=float, default=0.25)
     parser.add_argument("--trajectory-lateral-deadband-px", type=float, default=8.0)
+    parser.add_argument("--trajectory-lateral-kp-cm-s-per-px", type=float, default=0.10)
     parser.add_argument("--trajectory-target-filter-tau-s", type=float, default=0.15)
     parser.add_argument("--trajectory-tangent-filter-tau-s", type=float, default=0.20)
     parser.add_argument("--trajectory-max-planar-accel-cm-s2", type=float, default=24.0)
@@ -276,6 +277,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--trajectory-curvature-slowdown-start-deg", type=float, default=8.0)
     parser.add_argument("--trajectory-curvature-full-slowdown-deg", type=float, default=35.0)
     parser.add_argument("--trajectory-min-curve-speed-cm-s", type=float, default=10.0)
+    parser.add_argument("--trajectory-lost-grace-s", type=float, default=0.0)
+    parser.add_argument("--trajectory-lost-grace-vx-scale", type=float, default=0.80)
+    parser.add_argument("--trajectory-lost-grace-vy-scale", type=float, default=0.50)
+    parser.add_argument("--trajectory-lost-grace-yaw-scale", type=float, default=0.70)
     parser.add_argument("--road-bypass-enable", action="store_true",
                         help="Enable radar-assisted in-road bypass for branches/vines intruding into the road center")
     parser.add_argument(
@@ -476,6 +481,7 @@ def main(argv: list[str] | None = None) -> None:
                 tangent_kp_yaw=args.trajectory_tangent_kp_yaw,
                 tangent_deadband_deg=args.road_angle_deadband_deg,
                 lateral_deadband_px=args.trajectory_lateral_deadband_px,
+                lateral_kp_cm_s_per_px=args.trajectory_lateral_kp_cm_s_per_px,
                 yaw_sign=args.road_yaw_sign,
                 lateral_sign=args.road_lateral_sign,
                 target_filter_tau_s=args.trajectory_target_filter_tau_s,
@@ -492,6 +498,10 @@ def main(argv: list[str] | None = None) -> None:
                     args.trajectory_curvature_full_slowdown_deg
                 ),
                 min_curve_speed_cm_s=args.trajectory_min_curve_speed_cm_s,
+                lost_grace_s=args.trajectory_lost_grace_s,
+                lost_grace_vx_scale=args.trajectory_lost_grace_vx_scale,
+                lost_grace_vy_scale=args.trajectory_lost_grace_vy_scale,
+                lost_grace_yaw_scale=args.trajectory_lost_grace_yaw_scale,
             )
         )
     else:
@@ -987,6 +997,8 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
         "trajectory_latency_compensation_s",
         "trajectory_max_latency_prediction_px",
         "trajectory_lateral_deadband_px",
+        "trajectory_lateral_kp_cm_s_per_px",
+        "trajectory_lost_grace_s",
         "trajectory_curvature_slowdown_start_deg",
         "trajectory_min_curve_speed_cm_s",
     ):
@@ -1010,6 +1022,13 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
             raise ValueError(f"--{option.replace('_', '-')} must be greater than zero")
     if not 0.0 < args.trajectory_degraded_speed_scale <= 1.0:
         raise ValueError("--trajectory-degraded-speed-scale must be within (0, 1]")
+    for option in (
+        "trajectory_lost_grace_vx_scale",
+        "trajectory_lost_grace_vy_scale",
+        "trajectory_lost_grace_yaw_scale",
+    ):
+        if not 0.0 <= getattr(args, option) <= 1.0:
+            raise ValueError(f"--{option.replace('_', '-')} must be within [0, 1]")
     for option in (
         "road_pixel_filter_tau_s",
         "road_angle_filter_tau_s",

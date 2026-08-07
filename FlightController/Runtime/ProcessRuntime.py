@@ -13,7 +13,6 @@ import multiprocessing as mp
 from multiprocessing.shared_memory import SharedMemory
 import os
 import queue
-import statistics
 import time
 from typing import Any
 
@@ -154,7 +153,7 @@ class LoopRateMonitor:
         periods = list(self._period_ms)
         target_ms = self.period_s * 1000.0
         jitter = [abs(value - target_ms) for value in periods]
-        achieved = 1000.0 / statistics.fmean(periods) if periods else 0.0
+        achieved = 1000.0 / (sum(periods) / len(periods)) if periods else 0.0
         return RuntimeMetrics(
             target_hz=self.target_hz,
             achieved_hz=achieved,

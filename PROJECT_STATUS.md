@@ -2,7 +2,7 @@
 
 **项目名称**: Cooper_drone (基于 MYiR 开发板的无人机机载/伴随计算机开发)
 **当前阶段**: M8 阶段 — 新道路语义分割模型已通过板端 NPU 验收并接入默认寻路链路
-**最后更新**: 2026年7月19日 (`new_road_seg_v5_final_fp32.nb` 已作为默认 NPU 模型；V5 保持 V4 接口和结构，仅更新权重以适配新增特殊场地并抑制负样本误检；原 128×128 YOLO ONNX CPU 实现保留为显式回退)
+**最后更新**: 2026年8月7日（新 SD 卡的项目、虚拟环境、模型和网络恢复完成；蓝牙 PAN 已在无网线状态下完成 SSH、公网与 Git 远端读取验证；板端软重启导致蓝牙 HCI 异常的经验已归档）
 
 ## 0. 2026-07-17 新道路语义分割 NPU 模型接入
 
@@ -68,8 +68,14 @@
 * **飞控通信**: 匿名飞控（灵霄）二进制协议，UART 串口 500000 baud。协议栈位于 `FlightController/Base.py` → `Protocal.py` → `Application.py`。
 * **存储与内存**:
   * 板载 RAM **2GB**，严禁将日志或大文件写入 `/tmp`（tmpfs 占用 RAM），否则触发 OOM 系统卡死。
-  * 新 SD 卡 (29.1G) 为当前系统盘；rootfs 为 4G，userfs 为 1.3G，剩余大部分容量尚未规划。
-  * 当前 `/usr/local/ObstacleAvoidanceDrone` 和 `/usr/local/UFC_venv` 均不存在，等待完成 SD 卡空间规划后恢复。
+  * 新 SD 卡 (29.1G) 为当前系统盘；rootfs 约 4G，新增 `/data` 为 `/dev/mmcblk0p12`，约 23G。
+  * 项目位于 `/data/ObstacleAvoidanceDrone`，并由 `/usr/local/ObstacleAvoidanceDrone` 符号链接指向；
+    虚拟环境位于 `/data/UFC_venv`，并由 `/usr/local/UFC_venv` 符号链接指向。代码、模型和后续
+    大体积数据应继续放在 `/data`，不要填满较小的根分区。
+  * 最终检查时 `/` 约 3.8G，总用量约 1.2G、可用约 2.4G；`/data` 约 23G，已用约 306M、
+    可用约 23G。恢复过程中的抓包文件已经清理。
+  * 板端仅保留当前代码实际使用的 NPU V5 `.nb` 和 CPU 回退 `.onnx`；未使用的模型及 `.npz`
+    不下载到板端。
   * eMMC (7.3G) 暂不启用、不同步、不重烧，后续主要操作新 SD 卡。
   * WiFi 历史配置为开机启动 (`wpa_supplicant@wlan0.service`) 和固定地址 `192.168.31.199`；
     系统重新烧录后的实测状态为：`wlan0` 处于 `DOWN`、未连接 WiFi，
@@ -93,21 +99,26 @@
 | 蓝牙数据接口 | `bnep0`，连接后自动加入 `pan0` |
 | 板端默认路由 | `default via 192.168.137.1 dev pan0 metric 50` |
 | 板端 NAP 服务 | `myir-bt-nap.service`，已设为开机启动 |
+| 板端配对 Agent | `myir-bt-pairing-agent.service`，已设为开机启动 |
 | NAP 注册脚本 | `/usr/local/sbin/myir-bt-nap-register.py` |
+| 正常板端蓝牙地址 | `54:78:C9:E6:FB:6D` |
 | SSH 服务 | Dropbear，由 `dropbear.socket` 监听 TCP 22 |
 | 蓝牙 SSH 地址 | `root@192.168.137.2` |
 
-已验证板端可以通过该链路访问 `1.1.1.1`，也能解析并访问 `github.com`。当前烧录镜像
-没有安装 `git`，所以“网络可用”不等于已经能执行 `git fetch/pull`；安装软件包属于系统修改，
-应另行确认后再执行。
+最终验证在 **J11 网线已物理拔除** 的状态下完成：Windows“蓝牙网络连接”为 Up，板端
+`bnep0` 为 `UP,LOWER_UP`，`ip route get 1.1.1.1` 选择 `pan0`；PC 可通过
+`ssh root@192.168.137.2` 登录，板端公网 ping 正常。`git` 已安装，并通过蓝牙读取远端
+`origin` 的 HEAD：`7e246e63ae49ba6977ec2cd197c8b3a865717986`。
 
-Windows/开发板重启后的恢复顺序：
+正常控制器状态下的恢复顺序：
 
 1. 确认电脑本身已连接互联网，并打开蓝牙。
-2. 在经典“设备和打印机”中找到 `myd-ld25x`，选择“连接方式 → 接入点”。Windows 11
-   的新“蓝牙和其他设备”页面只显示配对/音频状态，不一定提供 PAN 接入点操作。
-3. 确认 Windows 的“蓝牙网络连接”处于已连接状态，地址仍为 `192.168.137.1/24`。
-4. 通过 `ssh root@192.168.137.2` 登录开发板。
+2. 若设备尚未配对，只使用 Windows 11 现代“添加设备 → 蓝牙”完成配对；旧版
+   `DevicePairingWizard` 在本机曾错误显示“输入码无效”。
+3. 配对完成后，在经典“设备和打印机”中找到 `myd-ld25x`，选择“连接方式 → 接入点”。
+   经典界面用于建立 PAN，不用于首次配对。
+4. 确认 Windows 的“蓝牙网络连接”处于已连接状态，地址仍为 `192.168.137.1/24`。
+5. 通过 `ssh root@192.168.137.2` 登录开发板。
 
 常用只读检查：
 
@@ -122,7 +133,7 @@ ssh root@192.168.137.2
 
 ```bash
 # 开发板串口
-systemctl status myir-bt-nap.service --no-pager
+systemctl status bt.service myir-bt-nap.service myir-bt-pairing-agent.service --no-pager
 systemctl status dropbear.socket --no-pager
 ip -brief address show pan0
 ip -brief link show bnep0
@@ -132,9 +143,14 @@ ping -c 3 1.1.1.1
 
 注意事项：
 
-- 重启验证尚未执行。仅开发板重启时，板端 NAP 服务会自动启动且不需要重新配置，但原有
-  BNEP 会话会随重启断开；Windows 不保证自动重连，若“蓝牙网络连接”没有恢复，仍需手动执行
-  “连接方式 → 接入点”。PC 重启时同样按需要重新执行该操作，配对本身通常无需重做。
+- PC 完整重启已验证：配对、静态 `192.168.137.1/24` 和 `MYIR-Bluetooth-NAT` 均保留；PAN
+  可能仍需手动重新选择“连接方式 → 接入点”。
+- 板端软件重启不能保证复位 Broadcom 蓝牙模块。本次软重启后曾出现 HCI 命令超时和异常地址
+  `43:45:C5:00:1F:AC`，Windows 的“无响应”/“输入码无效”只是表象。如果地址不是正常值
+  `54:78:C9:E6:FB:6D`，或内核出现 HCI 超时，应执行 `sync; systemctl poweroff`，关机后断电
+  至少 10 秒再上电；完整冷启动已验证可恢复。
+- 标准 `bluetooth.service` 保持禁用；厂商 `bt.service` 已经启动 bluetoothd，同时启动标准服务
+  会造成 `D-Bus setup failed: Name already in use`。
 - `bnep0` 只有建立 PAN 连接后才会出现；仅“已配对”不代表网络已连接。
 - 蓝牙 NAP 注册器常驻运行是必要条件，不能用一次性的 D-Bus 命令代替；调用进程退出后
   BlueZ 会撤销 NAP 注册。
@@ -144,6 +160,18 @@ ping -c 3 1.1.1.1
   的旧记录：`ssh-keygen -R 192.168.137.2`，不要清空整个 `known_hosts`。
 - 本项目源码不得在板端通过 SSH 直接修改；源码修改先在本地/云端 Git 仓库完成，板端只拉取
   已批准并已提交的版本，且板端不得向远端 push。
+
+#### J11 有线维护通道（非日常运行链路）
+
+受物理空间限制，仅中间 RJ45（J11）可接入。当前启动项使用
+`myb-stm32mp257x-2GB-ethswitch`，J11 对应 `sw0p2`、CPU 端为 `sw0ep`。PC 地址固定为
+`192.168.0.2/24`，开发板地址为 `192.168.0.10`，插线后可直接执行
+`ssh root@192.168.0.10`。板端 `/etc/systemd/network/12-sw0ep.network` 持久保存到 PC 的
+`192.168.0.2/32` 链路路由，已经过板端重启验证。
+
+桌面的 `Enable-J11-Internet.ps1` 用于临时创建 `MYIR-J11-NAT` 并把板端默认公网切换到 J11；
+`Disable-J11-Internet.ps1` 删除该默认路由和 NAT，但保留直连 SSH 地址且不影响蓝牙 NAT。
+最终无线验收后 J11 已拔除，`MYIR-J11-NAT` 已删除；日常运行仍以蓝牙 PAN 为准。
 
 #### 当前不执行：通过 WiFi/手机热点使用 SSH
 
@@ -172,9 +200,9 @@ ping -c 3 1.1.1.1
    即使 PC 更换上游网络，该地址也保持不变；前提是蓝牙 PAN 仍处于连接状态。
 
 ## 2. 混合架构 Python 隔离舱 (UFC_venv) 状态
-> 本节及后续涉及项目环境的“已就绪”结论主要记录重烧录前的历史状态。当前系统尚未恢复
-> 项目仓库、`UFC_venv` 和 Python/NPU 用户态依赖；以
-> [SYSTEM_REFLASH_RECOVERY_CHECKLIST.md](SYSTEM_REFLASH_RECOVERY_CHECKLIST.md) 的实测清单为准。
+> 新 SD 卡恢复后，项目和虚拟环境实际保存在 `/data`，`/usr/local/ObstacleAvoidanceDrone` 与
+> `/usr/local/UFC_venv` 是兼容旧路径的符号链接。当前恢复验收和剩余硬件测试以
+> [SYSTEM_REFLASH_RECOVERY_CHECKLIST.md](SYSTEM_REFLASH_RECOVERY_CHECKLIST.md) 为准。
 
 为了在羸弱的 ARM64 算力下规避现场编译导致的 OOM (内存爆满) 宕机，本项目采用**"APT底层预编译 + PIP上层轻量包"的半透膜沙盒架构**。
 
@@ -434,7 +462,12 @@ tail -f /media/sdcard/latency_verify.log | grep LATENCY
 
 手持纸板在雷达正前方做急停/减速/侧移测试，观察 `[LATENCY]` 行记录的障碍物距离变化。实测响应在可接受范围内，帧号差 × 100ms ≤ 端到端延迟上限，`[RAW_LATENCY]` 行的 `雷达帧年龄: 当前=1ms` 确认雷达数据从采集到处理完成仅需 ~1ms。
 
-## 7. 代码仓库迁移与存储架构重构
+## 7. 历史：旧卡损坏前的代码仓库迁移与存储架构
+
+> 本节记录旧系统/旧闪存卡时期的迁移过程，仅供追溯，**不是当前部署配置**。其中
+> `/media/sdcard`、用户 `stm`、eMMC 空间、vfat 和旧虚拟环境路径均已失效；当前以第 1 节和
+> [SYSTEM_REFLASH_RECOVERY_CHECKLIST.md](SYSTEM_REFLASH_RECOVERY_CHECKLIST.md) 为准：系统从新 SD
+> 卡启动，项目和虚拟环境均位于 ext4 `/data`，eMMC 不使用，日志不得写入 `/tmp`。
 
 ### 7.1 仓库迁移
 
@@ -453,9 +486,9 @@ tail -f /media/sdcard/latency_verify.log | grep LATENCY
 3. 闪存卡重新挂载为 vfat，指定 `uid=stm,gid=stm` 解决权限问题
 4. SSH clone 新仓库至闪存卡，软链接保持原路径兼容
 
-### 7.2 ⚠️ eMMC 存储空间危机 (CRITICAL)
+### 7.2 历史：eMMC 存储空间危机（已由新 SD 卡 `/data` 布局解除）
 
-**这是当前系统最严峻的硬件约束，必须在后续所有操作中持续关注。**
+**以下容量数字仅描述旧系统。当前系统不从 eMMC 启动，也不在 eMMC 存放项目或虚拟环境。**
 
 | 存储介质 | 总容量 | 已用 | 可用 | 占用率 | 用途 |
 |---|---|---|---|---|---|
@@ -485,7 +518,8 @@ tail -f /media/sdcard/latency_verify.log | grep LATENCY
 - eMMC 仅剩 **930M**，禁止执行 `apt upgrade`（会拉取大量 deb 包导致爆盘）
 - 禁止安装任何新的大型 APT 包
 - 新 Python 包通过 `pip install` 安装到 `UFC_venv`（eMMC），需控制总大小
-- 日志文件、调试输出务必写入 `/tmp`（tmpfs，内存）或闪存卡路径
+- 历史系统曾把 `/tmp` 作为临时输出路径；当前 2GB RAM 系统禁止把持续日志或大文件写入
+  `/tmp`，统一写入 `/data` 并监控空间
 - VS Code Server 更新时需手动删除旧版本再安装新版本，防止同时存在两个版本（×2 = 3.2G 直接爆盘）
 - `/usr/share/fonts`（126M）和 `/usr/share/icons`（43M）可作为紧急情况下的最后清理目标
 

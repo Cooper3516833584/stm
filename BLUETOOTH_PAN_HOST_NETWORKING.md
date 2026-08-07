@@ -40,6 +40,9 @@ PC 的当前上游网络（WiFi、有线网络或手机热点）
 | 板端蓝牙数据接口 | `bnep0`，连接后自动加入 `pan0` |
 | 板端默认路由 | `default via 192.168.137.1 dev pan0 metric 50` |
 | 板端 NAP 服务 | `myir-bt-nap.service` |
+| 板端配对 Agent | `myir-bt-pairing-agent.service` |
+| 板端蓝牙地址（正常冷启动） | `54:78:C9:E6:FB:6D` |
+| Windows 蓝牙地址 | `E8:C8:29:25:40:E9`（设备名 `LUAI`） |
 | 板端 SSH 服务 | Dropbear，`dropbear.socket` 监听 TCP 22 |
 | SSH 命令 | `ssh root@192.168.137.2` |
 
@@ -254,16 +257,69 @@ bluetoothctl show | grep -E 'Powered:|Discoverable:|Pairable:|UUID: NAP'
 UUID: NAP (00001116-0000-1000-8000-00805f9b34fb)
 ```
 
+### 4.4 持久化配对 Agent
+
+为避免无人值守板端在重新配对时没有进程响应 BlueZ 的认证请求，已安装：
+
+```text
+/usr/local/sbin/myir-bt-pairing-agent.py
+/etc/systemd/system/myir-bt-pairing-agent.service
+```
+
+服务使用 `NoInputNoOutput` 能力，注册 `org.bluez.Agent1`，自动接受 SSP/Just Works 确认和服务
+授权；兼容路径中的 PIN/Passkey 分别返回 `0000` 和 `0`。服务与厂商 `bt.service` 绑定，配置为
+`enabled/active`、异常退出后 3 秒重启。成功配对时日志中实际出现了 A2DP/AVRCP UUID 的
+`AuthorizeService` 调用，证明 Windows 的请求已经到达板端 Agent。
+
+板端使用厂商 `bt.service` 启动 `/usr/libexec/bluetooth/bluetoothd`。标准
+`bluetooth.service` 保持 `disabled/inactive`，否则两个 bluetoothd 会争用 D-Bus 名称并报：
+
+```text
+D-Bus setup failed: Name already in use
+```
+
+当前应同时保持以下三个服务：
+
+```bash
+systemctl is-active bt.service myir-bt-nap.service myir-bt-pairing-agent.service
+```
+
 ## 5. Windows 配对和连接接入点
 
-1. 临时让开发板蓝牙处于可发现、可配对状态。
-2. 在 Windows 中添加蓝牙设备并完成配对。板端设备名为 `myd-ld25x`。
-3. NAP 注册服务运行后，如果 Windows 之前是在 NAP 注册前配对的，应删除设备并重新配对，
-   让 Windows 重新枚举 NAP 服务。
-4. 打开经典“设备和打印机”界面，而不是只使用 Windows 11 新设置页面。
-5. 右键 `myd-ld25x`，选择“连接方式 → 接入点”。
-6. 连接成功后，Windows 中的“蓝牙网络连接”状态变为 `Up`；板端出现 `bnep0`，并自动加入
+配对和建立 PAN 是两个不同步骤，必须使用不同入口：
+
+1. 先确认板端控制器地址是正常值 `54:78:C9:E6:FB:6D`，且三个蓝牙服务均为 active。如果地址
+   变成 `43:45:C5:00:1F:AC` 或 HCI 报超时，不要继续删除/添加设备，按第 10 节完整断电恢复。
+2. 临时打开板端可发现、可配对：
+
+   ```bash
+   bluetoothctl power on
+   bluetoothctl pairable on
+   bluetoothctl discoverable-timeout 0
+   bluetoothctl discoverable on
+   ```
+
+3. 在 Windows 11 **现代“设置 → 蓝牙和设备 → 添加设备 → 蓝牙”** 中选择 `myd-ld25x` 完成
+   SSP/Just Works 配对。不要使用旧版 `DevicePairingWizard` 完成这一步；本机实测旧向导会在
+   请求尚未到达板端时显示“输入码无效”。
+4. 在板端信任已经配对的 PC：
+
+   ```bash
+   bluetoothctl trust E8:C8:29:25:40:E9
+   ```
+
+5. 如果 Windows 是在 NAP 注册前配对的，应删除旧设备记录，再按以上步骤配对，使 Windows
+   重新枚举 NAP 服务。
+6. **配对完成后**打开经典“设备和打印机”，右键 `myd-ld25x`，选择“连接方式 → 接入点”。
+   经典界面用于建立 PAN，而不是用于首次配对。
+7. 连接成功后，Windows 中的“蓝牙网络连接”状态变为 `Up`；板端出现 `bnep0`，并自动加入
    `pan0`。
+8. 配对完成后关闭暴露状态；已配对、已信任的 PC 仍可连接：
+
+   ```bash
+   bluetoothctl discoverable off
+   bluetoothctl pairable off
+   ```
 
 Windows 设备属性中应能看到：
 
@@ -367,8 +423,14 @@ ssh root@192.168.137.2
 
 不要清空整个 `known_hosts`。
 
-当前镜像没有安装 `git`。SSH 和公网连通成功并不代表可以立即执行 `git fetch/pull`；安装 `git`
-属于板端系统修改，应另行批准。
+`git` 已恢复，已通过纯蓝牙链路读取远端仓库 `origin`，得到远端 HEAD：
+
+```text
+7e246e63ae49ba6977ec2cd197c8b3a865717986 HEAD
+```
+
+这只证明当前网络和 Git 远端读取正常；仍须遵守“源码先在本地/云端提交，板端只拉取已批准
+提交”的部署约束。
 
 ## 8. 日常使用和重启
 
@@ -384,13 +446,16 @@ ssh root@192.168.137.2
 - `192.168.137.0/24` 未与 PC 新接入的网络冲突；
 - Windows 静态地址和 `MYIR-Bluetooth-NAT` 仍存在。
 
-重启行为：
+重启行为已经实测：
 
-- 仅开发板重启：`myir-bt-nap.service` 会自动启动，不需要重新配置或重新配对；原 BNEP 会话
-  会断开，Windows 不保证自动恢复。如果蓝牙网络未恢复，重新选择“连接方式 → 接入点”。
-- 仅 PC 重启：配对、静态地址和 NAT 应保留，但通常仍需检查并按需重新连接“接入点”。
-- 两者同时重启：等待开发板 NAP 服务启动后，再从 PC 连接接入点。
-- 当前尚未执行完整重启验证，因此按“可能需要手动重新连接接入点”处理。
+- PC 完整重启后，配对记录、`192.168.137.1/24` 和 `MYIR-Bluetooth-NAT` 均保留。PAN 断开时
+  可能暂时出现 APIPA/Tentative 地址；重新连接“接入点”后只保留静态地址为 Preferred。
+- 仅对板端执行软件重启并不一定会复位 Broadcom 蓝牙模块。本次曾在软重启后出现 HCI 命令
+  超时和异常地址 `43:45:C5:00:1F:AC`，此时反复配对无效。
+- 遇到异常地址或 HCI 超时时，应执行 `sync; systemctl poweroff`，待系统关机后切断开发板电源
+  至少 10 秒，再重新上电。完整冷启动已验证能恢复真实地址 `54:78:C9:E6:FB:6D` 和正常配对。
+- 无论哪一端重启，原 BNEP 会话都会断开；Windows 不保证自动重新建立 PAN。等待板端三个服务
+  启动后，按需在经典“设备和打印机”中重新选择“连接方式 → 接入点”。通常不需重新配对。
 
 ## 9. 与板端 WiFi 并存时
 
@@ -412,11 +477,63 @@ wpa_supplicant@wlan0.service: disabled/inactive
 特别注意：如果板端 WiFi 或 PC 新接入的网络也使用 `192.168.137.0/24`，会与当前蓝牙 PAN
 发生路由冲突。应先断开其中一条链路，或经批准后修改一个网段。
 
-## 10. 快速排障表
+## 10. 本次配对失败的根因与判定方法
+
+### 10.1 失败链路
+
+软重启后，板端曾从正常地址 `54:78:C9:E6:FB:6D` 变为异常地址
+`43:45:C5:00:1F:AC`。Windows 仍能通过 Classic Inquiry 扫描到该设备，但连接时分别出现：
+
+- 现代设置：“我们没有从设备收到任何响应”；
+- 旧版 `DevicePairingWizard`：“输入码无效”；
+- Windows API `BluetoothAuthenticateDeviceEx` 返回 `258 (WAIT_TIMEOUT)`。
+
+同时板端证据为：
+
+- `btmon` 没有 HCI Connection Request/Complete；
+- 配对 Agent 没有收到任何调用；
+- ACL 收发计数保持为零；
+- 内核可能出现 `Bluetooth: hci0: command tx timeout` 或读取本地名称超时。
+
+这说明错误发生在 Windows UI 或 PIN 校验之前：低层扫描尚可用，但 ACL 连接没有到达 BlueZ，
+因此反复修改 PIN、重启 NAP、切换 NAT 或重新添加 Windows 设备都不能解决。
+
+### 10.2 已排除的原因
+
+- J11 Ethernet Switch DTB 与普通 DTB 的蓝牙 UART、蓝牙电源 regulator 语义相同；冷启动后在
+  Ethernet Switch DTB 下也已成功配对，故 J11 DTB 不是根因。
+- Windows 能完成低层 Inquiry，故不是“天线完全无信号”。
+- NAP/BNEP/NAT 都发生在配对之后，不会导致配对阶段的“输入码无效”。
+- 异常地址阶段请求根本没有到达 BlueZ，因此当时即使补充配对 Agent，也不能修复底层 HCI
+  失响应；Agent 是为控制器健康时的后续认证提供持久响应。
+- Windows 设备元数据中的 `0x80070490` 同时出现在多个无关设备上，不能作为本故障根因。
+
+### 10.3 软件恢复为何失败
+
+尝试停止 NAP/Agent/蓝牙进程并重新启动厂商 `bt.service` 时，`brcm_patchram_plus` 每 4 秒发送
+一次 HCI Reset（`01 03 0c 00`），模块均不响应，最终 `/sys/class/bluetooth` 为空且系统没有
+默认控制器。厂商脚本还暴露出：
+
+```text
+/etc/myir_test/myir_bt: line 14: kill_process_fun: command not found
+```
+
+因此该脚本不能保证在同一次上电周期内安全地解绑并重新初始化 UART。正确恢复方式是安全关机后
+完整断电冷启动，而不是继续循环执行服务重启。
+
+PC 侧也曾出现 Intel Bluetooth 设备等待重启，`pnputil /restart-device` 返回“不支持”及退出码
+50；只有 PC 完整重启后设备才恢复 `Started`、`bthserv` 恢复 `RUNNING`。如果 Windows 明确显示
+设备正在等待系统重新启动，应先重启 PC，不要持续删除配对记录。
+
+## 11. 快速排障表
 
 | 现象 | 优先检查 |
 | --- | --- |
+| 设备地址不是 `54:78:C9:E6:FB:6D` | 停止配对，安全关机并完整断电至少 10 秒 |
+| “无响应”或“输入码无效”，板端 Agent 无日志 | 用 `btmon` 判断请求是否到达；若同时有 HCI 超时，执行冷启动 |
+| Windows 蓝牙设备“等待系统重新启动” | 完整重启 PC；`pnputil /restart-device` 在本机不能替代重启 |
 | Windows 找不到“接入点” | NAP 注册服务是否常驻、Windows 是否在 NAP 注册后重新配对 |
+| 首次配对出现“输入码无效” | 是否误用了旧版 `DevicePairingWizard`；改用现代“添加设备 → 蓝牙” |
 | 只有“已配对”，没有网络 | 是否在经典“设备和打印机”中执行“连接方式 → 接入点” |
 | 板端没有 `bnep0` | Windows PAN 是否已连接、`bnep` 是否已加载 |
 | Windows 蓝牙接口出现 `169.254.x.x` | 静态 `192.168.137.1/24` 是否丢失 |
@@ -426,10 +543,49 @@ wpa_supplicant@wlan0.service: disabled/inactive
 | 换 PC 网络后异常 | 新网络是否与 `192.168.137.0/24` 冲突，PAN 是否仍连接 |
 | WiFi 与蓝牙同时在线但出口不符预期 | `ip route` 中两条默认路由及 metric |
 
-## 11. 项目部署约束
+## 12. J11 有线维护通道
+
+最终运行目标仍是无网线的蓝牙 PAN；中间 RJ45（J11）仅作为维护、恢复和蓝牙失效时的后备
+通道。硬件限制下采用 Ethernet Switch DTB：
+
+```text
+/boot/mmc0_extlinux/myb-stm32mp257x-2GB_extlinux.conf
+DEFAULT myb-stm32mp257x-2GB-ethswitch
+```
+
+原配置备份在 `/data/recovery-backup-20260807-j11/`。该 DTB 下 J11 对应 `sw0p2`，CPU 端口为
+`sw0ep`。为确保到 PC 的直连路由不误走 `end1`，板端持久配置为：
+
+```ini
+# /etc/systemd/network/12-sw0ep.network
+[Match]
+Name=sw0ep
+
+[Network]
+KeepConfiguration=yes
+LinkLocalAddressing=ipv6
+
+[Route]
+Destination=192.168.0.2/32
+Scope=link
+Metric=10
+```
+
+地址及操作：
+
+- PC Realtek 以太网：`192.168.0.2/24`；
+- 开发板 J11：`192.168.0.10`；
+- 直连 SSH：`ssh root@192.168.0.10`；
+- 桌面脚本：`Enable-J11-Internet.ps1` 和 `Disable-J11-Internet.ps1`。
+
+Enable 脚本为 J11 创建 `MYIR-J11-NAT` 并临时让板端默认路由经 `192.168.0.2`；Disable 脚本删除
+J11 默认路由和 NAT，但保留 `192.168.0.2/24`，因此以后重新插入 J11 仍可直接 SSH，且不会
+破坏 `MYIR-Bluetooth-NAT`。最终无线验证时 J11 网线已拔除、`MYIR-J11-NAT` 已删除，当前唯一
+公网 NAT 为 `MYIR-Bluetooth-NAT`。
+
+## 13. 项目部署约束
 
 - 不要通过 SSH 直接修改开发板上的项目源码。
 - 源码修改必须先在本地/云端 Git 仓库完成并提交。
 - 板端只能拉取已经批准并已提交的版本，不得向远端 push。
 - 未明确要求时，不在板端执行 `git pull`。
-

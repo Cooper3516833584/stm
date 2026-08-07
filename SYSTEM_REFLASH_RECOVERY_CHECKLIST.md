@@ -30,223 +30,187 @@ RAW 文件信息：
 大小：6028263424 bytes（约 5.614 GiB）
 ```
 
-## 2. 当前系统基线
-
-当前从新 SD 卡启动，实测系统信息：
+## 2. 当前系统与存储基线
 
 ```text
 系统：ST OpenSTLinux - Weston 5.0.3-snapshot-20250320
 Yocto 分支：scarthgap
 架构：aarch64
 内核：6.6.48-gbebcf479fd77
-根分区：/dev/mmcblk0p10（SD 卡 rootfs）
-/usr/local：/dev/mmcblk0p11（SD 卡 userfs）
+物理 SD 卡：/dev/mmcblk0，约 29.1G
+根分区：/dev/mmcblk0p10，约 4G，挂载到 /
+原 userfs：/dev/mmcblk0p11，约 1.3G，挂载到 /usr/local
+项目数据分区：/dev/mmcblk0p12，约 23G，挂载到 /data
 ```
 
-启动参数中的 root PARTUUID 与 `/dev/mmcblk0p10` 匹配，确认当前不是从 eMMC rootfs 启动。
-
-### 2.1 SD 卡分区与容量
+启动参数中的 root PARTUUID 与 `/dev/mmcblk0p10` 匹配，当前不是从 eMMC 启动。最终空间检查：
 
 ```text
-物理设备：/dev/mmcblk0，约 29.1G
-bootfs：/dev/mmcblk0p8，64M，挂载到 /boot
-vendorfs：/dev/mmcblk0p9，250M，挂载到 /vendor
-rootfs：/dev/mmcblk0p10，4G，挂载到 /
-userfs：/dev/mmcblk0p11，1.3G，挂载到 /usr/local
+/:      约 3.8G，总用量约 1.2G，可用约 2.4G（约 35% 已用）
+/data:  约 23G，总用量约 306M，可用约 23G（约 2% 已用）
 ```
 
-当前空间：
+代码、虚拟环境、模型、日志和较大数据必须优先写入 `/data`；不要把项目移回较小的 rootfs 或
+1.3G userfs，也不要把持续日志、抓包或模型写入 `/tmp`（RAM tmpfs）。恢复过程产生的抓包文件
+已经清理。
+
+### 2.1 当前项目路径
 
 ```text
-/:          3.8G 总量，约 977M 已用，约 2.6G 可用
-/usr/local: 1.3G 总量，约 17M 已用，约 1.2G 可用
+/data/ObstacleAvoidanceDrone
+/usr/local/ObstacleAvoidanceDrone -> /data/ObstacleAvoidanceDrone
+/data/UFC_venv
+/usr/local/UFC_venv -> /data/UFC_venv
 ```
 
-29.1G 卡上现有 RAW 分区合计只覆盖约 5.6G，剩余大部分容量尚未纳入当前 rootfs/userfs 或项目
-数据路径。恢复仓库、虚拟环境和模型前，应先决定扩展 `userfs` 还是新建独立数据分区，避免再次
-出现空间不足或把日志写入 RAM 文件系统。
+符号链接保留旧脚本对 `/usr/local` 路径的兼容性，实际空间消耗落在 `/data`。`git` 已安装，
+远端 `origin` 已通过纯蓝牙网络完成只读验证。
 
-### 2.2 eMMC 边界
+### 2.2 软件源顺序
 
-eMMC 为 `/dev/mmcblk1`，约 7.3G。当前系统能发现其原有分区，但检查结果为：
+下载板端软件包时使用以下优先级：
 
-```text
-旧项目目录：不存在
-旧 UFC_venv：不存在
-本次 myir-bt-nap.service：不存在
-本次 bnep.ko：不存在
+1. 中科大源：`https://mirrors.ustc.edu.cn`；
+2. 清华源：`https://mirrors.tuna.tsinghua.edu.cn`；
+3. 阿里源：`https://mirrors.aliyun.com`；
+4. 发行版原默认源作为最后回退。
+
+不执行全系统 `upgrade`；安装后清理包缓存，并在下载前后检查 `/` 与 `/data` 剩余容量。
+
+### 2.3 eMMC 边界
+
+eMMC 为 `/dev/mmcblk1`，约 7.3G。本次恢复没有把 SD 卡内容同步到 eMMC。继续保持：不写入、
+不重烧、不验证 eMMC 启动、不把 eMMC 用作项目或日志目录。除非未来重新明确授权，否则不改变。
+
+## 3. 已完成并验证
+
+### 3.1 基础系统、项目和模型
+
+- [x] 新 SD 卡完成 RAW 镜像烧录，并从 `/dev/mmcblk0p10` 正常启动。
+- [x] 新建并持久挂载约 23G 的 `/data`（`/dev/mmcblk0p12`）。
+- [x] 项目恢复到 `/data/ObstacleAvoidanceDrone`，兼容链接位于 `/usr/local`。
+- [x] `UFC_venv` 及项目 Python 依赖恢复到 `/data/UFC_venv`，兼容链接位于 `/usr/local`。
+- [x] `git` 已安装并能读取远端仓库；板端不 push，且未明确要求时不执行 `git pull`。
+- [x] 仅保留代码实际使用的
+  `FlightController/Solutions/model/new_road_seg_v5_final_fp32.nb` 和 CPU 回退
+  `road_yolo11n_seg_128.onnx`；未使用模型和 `.npz` 不下载到板端。
+- [x] `/dev/galcore` 存在、`galcore` 模块已加载，NPU V5 与 CPU 回退的板端执行路径已恢复。
+- [x] `/dev/ttySTM4`、`/dev/ttySTM9` 设备节点存在；当前没有连接任何外设，真实数据链路仍待测。
+
+### 3.2 蓝牙 NAP、SSH 与公网
+
+- [x] 针对当前内核构建并安装匹配 `Module.symvers` 的 `bnep.ko`。
+- [x] `bt.service`、`myir-bt-nap.service`、`myir-bt-pairing-agent.service` 均已持久化启用。
+- [x] 标准 `bluetooth.service` 禁用，避免与厂商 bluetoothd 争用 D-Bus 名称。
+- [x] 板端正常冷启动地址为 `54:78:C9:E6:FB:6D`；PC 地址为 `E8:C8:29:25:40:E9`。
+- [x] Windows PAN 为 `192.168.137.1/24`，`MYIR-Bluetooth-NAT` 为
+  `192.168.137.0/24`；板端 `pan0` 为 `192.168.137.2/24`。
+- [x] 在 J11 网线物理拔除状态下验证 `bnep0 UP,LOWER_UP`、默认路由经 `pan0`、公网 ping、
+  `ssh root@192.168.137.2` 和 Git 远端读取。
+- [x] PC 重启后配对、静态 PAN 地址和 NAT 均保留；PAN 会话必要时仍需手动重新选择“接入点”。
+- [x] 完整断电冷启动后板端真实蓝牙地址、服务、配对、NAP、公网和 SSH 均已恢复验证。
+
+完整过程和失败证据见 [BLUETOOTH_PAN_HOST_NETWORKING.md](BLUETOOTH_PAN_HOST_NETWORKING.md)。
+
+### 3.3 J11 有线维护通道
+
+- [x] 查阅硬件文档并确认物理可用的中间 RJ45 为 J11；启动项使用
+  `myb-stm32mp257x-2GB-ethswitch`。
+- [x] 确认 J11 对应 `sw0p2`，CPU 端口为 `sw0ep`。
+- [x] 板端 `/etc/systemd/network/12-sw0ep.network` 持久保存到 PC
+  `192.168.0.2/32` 的链路路由，板端重启后仍有效。
+- [x] PC 为 `192.168.0.2/24`，开发板为 `192.168.0.10`，插线后可直接 SSH。
+- [x] 原启动和网络配置备份在 `/data/recovery-backup-20260807-j11/`。
+- [x] 桌面 `Enable-J11-Internet.ps1`/`Disable-J11-Internet.ps1` 分别启用和关闭 J11 公网 NAT；
+  Disable 不删除直连地址，也不影响蓝牙 NAT。
+- [x] 最终无线验收时 J11 已拔除、`MYIR-J11-NAT` 已删除；J11 仅作为维护后备通道。
+
+### 3.4 WiFi 决策
+
+- [x] 板端 WiFi 模块不再继续检查或恢复。
+- [x] 不恢复历史固定 WiFi 地址 `192.168.31.199`，不配置 WiFi 开机自连。
+- [x] 日常无网线联网和 SSH 使用蓝牙 NAP；J11 只作维护后备。
+
+## 4. 失败经验与不可重复操作
+
+### 4.1 蓝牙软重启不等于硬件复位
+
+板端软重启后曾出现异常地址 `43:45:C5:00:1F:AC`、HCI command tx timeout，以及 Windows
+“没有响应”/“输入码无效”。`btmon` 没有连接请求、Agent 没有调用、ACL 计数为零，说明请求没有
+到达 BlueZ。重启服务、修改 PIN、重复删除设备、重启 NAP/NAT 均不能修复这一层故障。
+
+厂商脚本还报 `/etc/myir_test/myir_bt: line 14: kill_process_fun: command not found`；
+`brcm_patchram_plus` 重发 HCI Reset 也收不到响应。正确处理为：
+
+```bash
+sync
+systemctl poweroff
 ```
 
-当前未发现指向 `mmcblk1` 的自动烧录 systemd/init 服务，本次恢复没有自动把新 SD 卡内容同步
-到 eMMC。
+确认关机后物理断电至少 10 秒，再重新上电。只有控制器恢复正常地址
+`54:78:C9:E6:FB:6D` 后才重新配对。
 
-当前决策是后续主要使用 SD 卡，eMMC 不列入恢复流程：
+### 4.2 Windows 配对入口不能混用
 
-- 不向 eMMC 同步 BNEP、蓝牙 NAP、项目仓库或虚拟环境。
-- 不验证 eMMC 启动。
-- 不把 eMMC 分区作为项目数据目录。
-- 除非未来重新明确提出，否则保持 eMMC 现状且不执行写入。
+- 首次/重新配对：使用现代“设置 → 蓝牙和设备 → 添加设备 → 蓝牙”。
+- 配对后建立 PAN：使用经典“设备和打印机 → myd-ld25x → 连接方式 → 接入点”。
+- 旧 `DevicePairingWizard` 在本机出现过本地“输入码无效”，当时请求没有到达板端 Agent。
+- Windows Intel 蓝牙设备若显示“等待系统重新启动”，完整重启 PC；本机
+  `pnputil /restart-device` 返回不支持和退出码 50，不能替代重启。
 
-## 3. 已经完成并验证
+### 4.3 已排除项
 
-### 3.1 基础系统
+- Ethernet Switch DTB 与普通 DTB 的蓝牙 UART/regulator 语义相同；J11 DTB 不是蓝牙故障根因。
+- Windows Classic Inquiry 能找到设备，故不是天线完全无信号。
+- NAP、BNEP 和 NAT 位于配对之后，不是“输入码无效”的直接原因。
+- 旧失败目录无需保存；只保留最终有效配置、必要备份和文档证据。
 
-- [x] 将指定 RAW 镜像烧录到新 SD 卡。
-- [x] 开发板可以从新 SD 卡正常启动并进入 root 串口终端。
-- [x] 确认启动设备为 SD 卡 `/dev/mmcblk0p10`。
-- [x] 确认 `/usr/local` 使用 SD 卡 `/dev/mmcblk0p11`。
-- [x] 确认 Python 3 基础解释器存在：`/usr/bin/python3`。
-- [x] 确认系统提供 `apt`；未发现 `opkg`。
+## 5. 尚待完成
 
-### 3.2 基础硬件和 NPU 内核层
+### P2：无外设及真实硬件验证
 
-- [x] `/dev/galcore` 存在，权限为 `root:video`。
-- [x] `galcore` 内核模块已加载。
-- [x] 串口节点 `/dev/ttySTM4`、`/dev/ttySTM9` 存在，权限为 `root:dialout`。
-- [ ] 尚未进行重烧录后的 NPU 用户态推理和真实硬件数据链路测试；设备节点存在不等于项目功能
-  已恢复。
-
-### 3.3 蓝牙联网
-
-- [x] 确认原内核未启用 `CONFIG_BT_BNEP`，板端没有现成 `bnep.ko`。
-- [x] 使用匹配的厂商 SDK、内核配置和 `Module.symvers` 单独构建 BNEP 模块。
-- [x] 将 `bnep.ko` 安装到当前 SD 卡 rootfs，执行 `depmod` 并成功加载。
-- [x] 创建并启用 `myir-bt-nap.service`，由开发板提供 NAP。
-- [x] Windows 作为 PANU，通过“连接方式 → 接入点”建立 BNEP 链路。
-- [x] Windows 蓝牙接口配置为 `192.168.137.1/24`。
-- [x] Windows 创建 `MYIR-Bluetooth-NAT`，内部网段为 `192.168.137.0/24`。
-- [x] 开发板 `pan0` 配置为 `192.168.137.2/24`，默认路由经 PC。
-- [x] 验证开发板可访问公网 IP 并解析域名。
-
-完整过程见 [BLUETOOTH_PAN_HOST_NETWORKING.md](BLUETOOTH_PAN_HOST_NETWORKING.md)。
-
-### 3.4 SSH
-
-- [x] Dropbear 已安装。
-- [x] `dropbear.socket` 为 `enabled/active`，监听 TCP 22。
-- [x] 蓝牙网络内开发板 IP 固定为 `192.168.137.2`。
-- [x] SSH 目标命令为 `ssh root@192.168.137.2`。
-- [ ] 尚未执行开发板和 PC 的完整重启验证；重启后 Windows 可能需要重新选择一次“连接方式 →
-  接入点”。
-
-### 3.5 WiFi 现状与决策
-
-重烧录后的实测状态：
-
-```text
-wlan0：DOWN
-当前 WiFi：未连接
-wpa_supplicant@wlan0.service：disabled/inactive
-/etc/wpa_supplicant：没有接口配置文件
-历史固定地址 192.168.31.199：当前未使用
-```
-
-- [x] 已确认当前无 WiFi 配置和开机自连。
-- [x] 当前不再恢复 WiFi，以已经可用的蓝牙 NAP/NAT 作为主要网络通道。
-- [ ] WiFi 不属于当前恢复待办；只有未来明确提出时再重新评估和配置。
-
-## 4. 当前缺失的项目环境
-
-当前 SD 卡 `/usr/local` 检查结果：
-
-```text
-/usr/local/ObstacleAvoidanceDrone：不存在
-/usr/local/UFC_venv：不存在
-git：未安装
-```
-
-系统 Python 当前未发现以下项目依赖：
-
-```text
-numpy
-cv2 / OpenCV
-scipy
-pyserial
-loguru
-simple_pid
-onnxruntime
-matplotlib
-```
-
-因此当前只达到“基础系统可启动、可通过蓝牙联网和 SSH 管理”，尚不能运行项目程序。
-
-## 5. 待完成事项
-
-### P0：SD 卡空间方案
-
-- [ ] 备份当前 SD 卡分区表和关键系统配置。
-- [ ] 确认未分配空间的准确范围。
-- [ ] 在扩展 `/usr/local` 所在 `userfs` 和新建独立项目数据分区之间选择。
-- [ ] 明确项目仓库、虚拟环境、模型和日志分别放在哪个持久分区。
-- [ ] 分区修改完成后检查文件系统和挂载持久化。
-
-任何分区或文件系统修改均需单独批准。该步骤应先于安装依赖和复制模型。
-
-### P1：恢复项目运行环境
-
-- [ ] 经批准后安装 `git`。
-- [ ] 从本地/云端 Git 仓库把已批准版本恢复到 `/usr/local/ObstacleAvoidanceDrone` 或最终选定的
-  SD 卡持久目录。
-- [ ] 不在板端直接编辑项目源码；板端不得向远端 push。
-- [ ] 在 `/usr/local/UFC_venv` 或最终选定的 SD 卡路径重建虚拟环境。
-- [ ] 恢复 NumPy、OpenCV、SciPy、PySerial、Loguru、simple-pid、Matplotlib 和 ONNX Runtime。
-- [ ] 优先使用匹配系统 ABI 的预编译包，避免在 2GB RAM 板端大规模现场编译。
-- [ ] 恢复项目所需模型、配置和非 Git 大文件，并逐项核对来源与版本。
-- [ ] 确认项目日志和数据目录位于 SD 卡持久存储，禁止把大量数据写入 `/tmp`。
-
-### P2：恢复后验证
-
-- [ ] 运行无硬件导入/环境检查，确认 Python ABI 和原生库加载正常。
-- [ ] 验证 ONNX Runtime 可用 provider，并重新执行已知 NPU 基线模型测试；当前只确认 galcore
-  内核层存在。
-- [ ] 验证 `/dev/ttySTM4`、`/dev/ttySTM9` 的真实雷达数据和飞控串口通信。
+- [x] 项目、虚拟环境及主要 Python 原生库可加载。
+- [x] NPU V5 `.nb` 与 CPU 回退 `.onnx` 执行路径恢复。
+- [ ] 连接外设后验证 `/dev/ttySTM4`、`/dev/ttySTM9` 的雷达和飞控真实数据。
 - [ ] 验证摄像头稳定设备路径、采集格式和双摄映射。
-- [ ] 依次运行项目的 no-hardware、serial、radar、camera/NPU smoke tests。
-- [ ] 在不启动实际飞行输出的条件下完成主程序 dry-run。
+- [ ] 依次执行 serial、radar、camera/NPU 硬件 smoke tests。
+- [ ] 在具备安全条件且不输出真实飞行控制时完成主程序 dry-run。
 
-### P3：蓝牙持久化验证
+### P3：网络边界验证
 
-- [ ] 仅重启开发板，验证 BNEP 模块、NAP 服务、`pan0` 地址、默认路由和 Dropbear。
-- [ ] 重启 PC，验证静态蓝牙地址和 `MYIR-Bluetooth-NAT` 是否保留。
-- [ ] 记录开发板重启和 PC 重启后是否必须手动重新选择“连接方式 → 接入点”。
-- [ ] 验证 PC 更换上游 WiFi、有线网络或手机热点后，开发板仍能通过蓝牙访问网络。
-- [ ] 确认 PC 新接入的网络不与蓝牙网段 `192.168.137.0/24` 冲突。
+- [x] PC 重启后的 PAN 静态地址、NAT 和配对保留行为已验证。
+- [x] 板端软重启失败行为与完整断电冷启动恢复流程已验证并记录。
+- [x] 记录 BNEP 会话可能需要在 Windows 手动重连“接入点”。
+- [ ] 切换 PC 上游 WiFi、有线网络或手机热点后，重新验证板端公网访问。
+- [ ] 每次切换上游网络时确认其不占用 `192.168.137.0/24`。
 
 ## 6. 当前不做的事项
 
-- [x] 不恢复板端 WiFi，不配置 WiFi 开机自连。
-- [x] 不恢复历史固定 WiFi 地址 `192.168.31.199`。
-- [x] 不同步或重烧 eMMC。
-- [x] 不从 eMMC 启动验证。
+- [x] 不恢复或继续检查板端 WiFi。
+- [x] 不同步、重烧或验证 eMMC 启动。
 - [x] 不把 eMMC 用作项目或日志存储。
+- [x] 不把未使用模型、`.npz`、临时抓包或旧失败目录放到板端。
+- [x] 不通过 SSH 直接编辑板端项目源码；所有源码变更先在本地/云端 Git 提交。
 
-这些事项只有在未来需求发生变化并重新获得批准后才重新进入计划。
-
-## 7. 建议执行顺序
+## 7. 后续建议顺序
 
 ```text
-1. 备份 SD 卡分区表和关键配置
-2. 决定并完成 SD 卡剩余空间布局
-3. 安装 Git
-4. 恢复项目仓库
-5. 重建 UFC_venv 和依赖
-6. 恢复模型、配置和数据目录
-7. 执行无硬件检查
-8. 执行 NPU、串口、雷达和相机硬件检查
-9. 完成开发板/PC 蓝牙重启与上游网络切换验证
+1. 正常使用蓝牙 PAN；若控制器地址异常，先完整断电冷启动
+2. 需要大量下载时先检查 df -h / /data，并按 USTC → TUNA → Aliyun → 默认源回退
+3. 需要有线维护时插入 J11；需要公网再运行桌面 Enable-J11-Internet.ps1
+4. 外设接入后依次验证串口、雷达、摄像头和安全 dry-run
+5. 更新代码时先在本地/云端提交，仅让板端拉取已批准提交
 ```
-
-先处理存储布局，再恢复虚拟环境和模型，可以避免在当前 1.3G `userfs` 中途耗尽空间。
 
 ## 8. 恢复完成判定
 
-满足以下条件后，才可将本次系统恢复标记为完成：
+- [x] SD 卡启动、根分区和 `/data` 项目数据分区稳定。
+- [x] Git 仓库、虚拟环境、依赖、当前使用模型及配置恢复。
+- [x] NPU V5 和 CPU 回退的用户态执行路径恢复。
+- [x] 蓝牙 NAP/NAT、SSH、PC 重启和板端冷启动行为已验证并归档。
+- [x] 项目和大文件位于 `/data`，未使用模型及 `.npz` 不下发。
+- [ ] 无外设检查之外的串口、雷达和摄像头硬件 smoke tests 尚未执行。
+- [ ] PC 切换不同上游网络后的公网行为尚待逐种验证。
 
-- [ ] SD 卡启动、根分区和项目数据分区稳定。
-- [ ] Git 仓库、虚拟环境、依赖、模型及配置全部恢复并可复现。
-- [ ] 无硬件测试和必要硬件 smoke tests 通过。
-- [ ] NPU 用户态推理链路通过已知基线模型验证。
-- [ ] 蓝牙 NAP/NAT 和 SSH 重启行为已验证。
-- [ ] PC 切换上游网络后，板端仍能通过蓝牙联网。
-- [ ] 项目日志不会写入 `/tmp` 或填满 rootfs/userfs。
-- [ ] 文档明确 WiFi 和 eMMC 当前不在使用范围内。
+因此，**系统、存储、项目环境和无网线蓝牙主链路的恢复已经完成**；整机项目恢复仍需在外设
+接入后完成真实硬件 smoke tests，且不能把“设备节点存在”视为外设功能已验证。

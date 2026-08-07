@@ -1,7 +1,13 @@
-ssh root@10.45.108.226
-cd /media/sdcard/projects/ObstacleAvoidanceDrone
+ssh root@192.168.137.2
+cd /usr/local/ObstacleAvoidanceDrone
 python3 road_trajectory_main.py#单巡线
 
 
-cd /media/sdcard/projects/ObstacleAvoidanceDrone
-python3 circular_tube_bypass_main.py
+cd /usr/local/ObstacleAvoidanceDrone
+PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \
+  -m experiments.visual_radar_bypass.main \
+  --enable-flight \
+  --auto-takeoff \
+  --confirm-visual-radar-flight-test \
+  --takeoff-height-cm 100 \
+  --duration-s 60

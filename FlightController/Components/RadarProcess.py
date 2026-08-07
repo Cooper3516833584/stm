@@ -154,8 +154,7 @@ class BatchPolarMap:
         self._last_cleanup_s = 0.0
         self._offsets = np.arange(-self.REMAP, self.REMAP + 1, dtype=np.int32)
         self._point_numbers = np.arange(12, dtype=np.float64)
-        self._sentinel = np.iinfo(np.int32).max
-        self._scratch = np.full(self.TOTAL_BINS, self._sentinel, dtype=np.int32)
+        self._last_frame_by_bin = np.full(self.TOTAL_BINS, -1, dtype=np.int32)
 
     def update_batch(self, batch: ParsedRadarBatch, now_s: float | None = None) -> None:
         if batch.frame_count == 0:
@@ -172,27 +171,40 @@ class BatchPolarMap:
         )
         if np.any(valid):
             bases_all = np.rint(degrees * self.ACC).astype(np.int32)
-            # Preserve sequential-frame overwrite semantics without allocating
-            # and scanning a frame_count x 1080 matrix for every serial read.
-            # The only Python loop is per complete 47-byte frame; point/bin
-            # expansion and MODE_MIN reduction remain in NumPy C.
-            for frame_index in range(batch.frame_count):
-                frame_valid = valid[frame_index]
-                if not np.any(frame_valid):
-                    continue
-                bases = bases_all[frame_index, frame_valid]
-                values = batch.distances_mm[frame_index, frame_valid]
-                indices = (
-                    (bases[:, None] + self._offsets[None, :]) % self.TOTAL_BINS
-                ).reshape(-1)
-                mapped_values = np.repeat(values, len(self._offsets)).astype(
-                    np.int32, copy=False
+            frame_indices, point_indices = np.nonzero(valid)
+            bases = bases_all[frame_indices, point_indices]
+            values = batch.distances_mm[frame_indices, point_indices]
+            indices = (
+                (bases[:, None] + self._offsets[None, :]) % self.TOTAL_BINS
+            ).reshape(-1)
+            mapped_values = np.repeat(values, len(self._offsets)).astype(
+                np.int32, copy=False
+            )
+            mapped_frames = np.repeat(frame_indices, len(self._offsets))
+
+            # Composite keys group duplicate writes to one bin within a frame.
+            # Sorting once lets NumPy reduce the whole serial read in native
+            # code. Then select the last frame touching each bin to preserve
+            # the legacy sequential-frame overwrite contract.
+            composite = mapped_frames * self.TOTAL_BINS + indices
+            order = np.argsort(composite, kind="stable")
+            sorted_composite = composite[order]
+            starts = np.concatenate(
+                (
+                    np.asarray([0], dtype=np.intp),
+                    np.flatnonzero(sorted_composite[1:] != sorted_composite[:-1]) + 1,
                 )
-                touched = np.unique(indices)
-                np.minimum.at(self._scratch, indices, mapped_values)
-                self.data[touched] = self._scratch[touched]
-                self.time_stamp[touched] = now_s
-                self._scratch[touched] = self._sentinel
+            )
+            unique_composite = sorted_composite[starts]
+            reduced_values = np.minimum.reduceat(mapped_values[order], starts)
+            reduced_frames = unique_composite // self.TOTAL_BINS
+            reduced_bins = unique_composite % self.TOTAL_BINS
+            np.maximum.at(self._last_frame_by_bin, reduced_bins, reduced_frames)
+            selected = reduced_frames == self._last_frame_by_bin[reduced_bins]
+            touched = reduced_bins[selected]
+            self.data[touched] = reduced_values[selected]
+            self.time_stamp[touched] = now_s
+            self._last_frame_by_bin[touched] = -1
         self.rotation_rpm = float(batch.rotation_speed_deg_s[-1] / 360.0 * 60.0)
         self.update_count += batch.frame_count
         self.expire(now_s)

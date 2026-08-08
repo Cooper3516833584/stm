@@ -229,6 +229,116 @@ def test_process_radar_age_reaches_safety_without_false_stale_stop():
     assert result.command.as_fc_tuple() == (8, 0, 0, 2)
 
 
+def test_process_radar_crc_fault_recovers_after_clean_fresh_snapshots():
+    class _AliveProcess:
+        @staticmethod
+        def is_alive():
+            return True
+
+    class _Runtime:
+        _radar_process = _AliveProcess()
+
+        def __init__(self, snapshot, points):
+            self.snapshot = snapshot
+            self.points = points
+
+        def latest_radar(self):
+            return self.snapshot, self.points.copy()
+
+    now_s = time.perf_counter()
+    points = np.asarray([[160.0, 0.0]], dtype=np.float32)
+
+    def snapshot(sequence, crc_errors, *, age_s=0.01, fresh=True):
+        return RadarSnapshot(
+            sequence=sequence,
+            published_time_s=now_s,
+            last_frame_time_s=now_s - age_s,
+            points_slot=0,
+            points_generation=sequence,
+            point_count=len(points),
+            connected=True,
+            fresh=fresh,
+            crc_errors=crc_errors,
+        )
+
+    runtime = _Runtime(snapshot(1, 0), points)
+    client = ProcessRadarClient(
+        runtime,
+        max_age_s=0.5,
+        crc_recovery_clean_snapshots=5,
+    )
+    assert client.is_fresh(now_s=now_s)
+
+    runtime.snapshot = snapshot(2, 1)
+    assert not client.is_fresh(now_s=now_s)
+    health = client.get_health_snapshot(now_s=now_s)
+    assert health["crc_fault_active"]
+    assert health["crc_clean_snapshots"] == 0
+
+    for sequence in range(3, 7):
+        runtime.snapshot = snapshot(sequence, 1)
+        assert not client.is_fresh(now_s=now_s)
+
+    runtime.snapshot = snapshot(7, 1)
+    assert client.is_fresh(now_s=now_s)
+    health = client.get_health_snapshot(now_s=now_s)
+    assert not health["crc_fault_active"]
+    assert health["crc_errors"] == 1
+    assert health["crc_clean_snapshots"] == 5
+
+
+def test_process_radar_crc_recovery_requires_fresh_snapshots():
+    class _AliveProcess:
+        @staticmethod
+        def is_alive():
+            return True
+
+    class _Runtime:
+        _radar_process = _AliveProcess()
+
+        def __init__(self, snapshot, points):
+            self.snapshot = snapshot
+            self.points = points
+
+        def latest_radar(self):
+            return self.snapshot, self.points.copy()
+
+    now_s = time.perf_counter()
+    points = np.asarray([[160.0, 0.0]], dtype=np.float32)
+
+    def snapshot(sequence, crc_errors, *, age_s=0.01, fresh=True):
+        return RadarSnapshot(
+            sequence=sequence,
+            published_time_s=now_s,
+            last_frame_time_s=now_s - age_s,
+            points_slot=0,
+            points_generation=sequence,
+            point_count=len(points),
+            connected=True,
+            fresh=fresh,
+            crc_errors=crc_errors,
+        )
+
+    runtime = _Runtime(snapshot(1, 0), points)
+    client = ProcessRadarClient(
+        runtime,
+        max_age_s=0.5,
+        crc_recovery_clean_snapshots=2,
+    )
+    assert client.is_fresh(now_s=now_s)
+
+    runtime.snapshot = snapshot(2, 1)
+    assert not client.is_fresh(now_s=now_s)
+    runtime.snapshot = snapshot(3, 1, age_s=0.8, fresh=False)
+    assert not client.is_fresh(now_s=now_s)
+    assert client.get_health_snapshot(now_s=now_s)["crc_clean_snapshots"] == 0
+
+    runtime.snapshot = snapshot(4, 1)
+    assert not client.is_fresh(now_s=now_s)
+    runtime.snapshot = snapshot(5, 1)
+    assert client.is_fresh(now_s=now_s)
+
+
 def test_runtime_without_workers_starts_and_stops_idempotently():
     runtime = ProcessRuntime(
         ProcessRuntimeConfig(enable_vision=False, enable_radar=False)

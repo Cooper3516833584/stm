@@ -487,12 +487,24 @@ class ProcessVisionPipeline:
 class ProcessRadarClient:
     """Compatibility view matching the MultiRadar APIs used by control code."""
 
-    def __init__(self, runtime: ProcessRuntime, max_age_s: float = 0.5):
+    def __init__(
+        self,
+        runtime: ProcessRuntime,
+        max_age_s: float = 0.5,
+        crc_recovery_clean_snapshots: int = 5,
+    ):
         self.runtime = runtime
         self.max_age_s = float(max_age_s)
+        self.crc_recovery_clean_snapshots = max(
+            1, int(crc_recovery_clean_snapshots)
+        )
         self._last_snapshot: RadarSnapshot | None = None
         self._last_points = np.empty((0, 2), dtype=np.float32)
         self._points_valid = False
+        self._last_crc_sequence: int | None = None
+        self._last_crc_errors: int | None = None
+        self._crc_fault_active = False
+        self._crc_clean_snapshots = 0
 
     def start(self) -> None:
         pass
@@ -509,6 +521,44 @@ class ProcessRadarClient:
                 self._points_valid = True
             else:
                 self._points_valid = False
+            self._observe_crc_health(snapshot)
+
+    def _observe_crc_health(self, snapshot: RadarSnapshot) -> None:
+        """Latch only new CRC errors, then recover after clean fresh snapshots."""
+        sequence = int(snapshot.sequence)
+        if sequence == self._last_crc_sequence:
+            return
+
+        crc_errors = max(0, int(snapshot.crc_errors))
+        previous = self._last_crc_errors
+        crc_increased = previous is not None and crc_errors > previous
+        counter_reset = previous is not None and crc_errors < previous
+        first_snapshot_has_errors = previous is None and crc_errors > 0
+
+        if crc_increased or counter_reset or first_snapshot_has_errors:
+            self._crc_fault_active = True
+            self._crc_clean_snapshots = 0
+        elif self._crc_fault_active:
+            structurally_fresh = bool(
+                snapshot.connected
+                and snapshot.fresh
+                and self._points_valid
+                and snapshot.age_s() <= self.max_age_s
+            )
+            if structurally_fresh:
+                self._crc_clean_snapshots += 1
+                if (
+                    self._crc_clean_snapshots
+                    >= self.crc_recovery_clean_snapshots
+                ):
+                    self._crc_fault_active = False
+            else:
+                self._crc_clean_snapshots = 0
+        else:
+            self._crc_clean_snapshots = self.crc_recovery_clean_snapshots
+
+        self._last_crc_sequence = sequence
+        self._last_crc_errors = crc_errors
 
     @property
     def running(self) -> bool:
@@ -530,7 +580,7 @@ class ProcessRadarClient:
             and self._last_snapshot is not None
             and self._last_snapshot.connected
             and self._points_valid
-            and self._last_snapshot.crc_errors == 0
+            and not self._crc_fault_active
             and self._last_snapshot.age_s(now_s) <= float(max_age_s)
         )
 
@@ -566,13 +616,16 @@ class ProcessRadarClient:
                 self.running
                 and self._last_snapshot.connected
                 and self._points_valid
-                and self._last_snapshot.crc_errors == 0
+                and not self._crc_fault_active
                 and self._last_snapshot.age_s(now_s) <= max_age_s
             ),
             "max_age_s": max_age_s,
             "radars": list(self._last_snapshot.radar_health),
             "sequence": self._last_snapshot.sequence,
             "crc_errors": self._last_snapshot.crc_errors,
+            "crc_fault_active": self._crc_fault_active,
+            "crc_clean_snapshots": self._crc_clean_snapshots,
+            "crc_recovery_clean_snapshots": self.crc_recovery_clean_snapshots,
             "parse_buffer_bytes": self._last_snapshot.parse_buffer_bytes,
         }
 

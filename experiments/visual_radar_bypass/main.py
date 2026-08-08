@@ -7,6 +7,7 @@ from dataclasses import replace
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 
 import numpy as np
@@ -66,12 +67,20 @@ from .purple_target_mission import (
     PurpleTargetMissionConfig,
     PurpleTargetMissionController,
 )
+from .road_patrol_fleet import (
+    RoadPatrolFleetStateProvider,
+    RoadPatrolOperationState,
+    cruise_operation_state,
+    wait_for_ground_takeoff_authorization,
+)
 from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance
+from fleet_bus import attach_air_fleet_node
 
 
 DEFAULT_BYPASS_PLANNER = "static-route"
 EXPERIMENTAL_PROFILE_NAME = "static-route-22cm-experiment"
 EXPERIMENTAL_PROFILE_STATUS = "EXPERIMENTAL_UNVALIDATED"
+FLEET_LANDING_REPORT_GRACE_S = 1.2
 
 
 def build_experimental_visual_config(
@@ -493,6 +502,9 @@ def main(argv: list[str] | None = None) -> None:
     guidance_started = False
     radars_started = False
     indicator = None
+    fleet_node = None
+    fleet_stop_event = threading.Event()
+    fleet_state = RoadPatrolFleetStateProvider()
     period_s = 1.0 / args.loop_hz
     loop_monitor = LoopRateMonitor(args.loop_hz)
     try:
@@ -508,15 +520,40 @@ def main(argv: list[str] | None = None) -> None:
         if actual_flight:
             fc = connect_fc(FCConnectConfig(port=args.fc_port, mode=2, timeout_s=10.0))
             flight_owned = True
+            fleet_state.bind_fc(fc)
+            fleet_node = attach_air_fleet_node(
+                fc,
+                None,
+                fleet_stop_event,
+                readonly=True,
+                allow_start_mission=True,
+                state_provider=fleet_state,
+            )
             indicator = FusionFlightIndicator(fc)
             logger.warning(
-                "[VIS-RADAR] initialization complete; green indicator and "
-                "digital output 0 enabled for 15 seconds, followed by a "
-                "5-second red takeoff warning"
+                "[VIS-RADAR] initialization complete; waiting for ground "
+                "prepare/countdown/start sequence"
             )
-            indicator.pre_takeoff_countdown()
-            auto_takeoff(fc, flight_config)
-            indicator.set_green()
+            fleet_state.set_operation_state(RoadPatrolOperationState.TAKEOFF)
+            authorized = wait_for_ground_takeoff_authorization(
+                fleet_node=fleet_node,
+                indicator=indicator,
+                stop_event=fleet_stop_event,
+            )
+            if authorized:
+                auto_takeoff(fc, flight_config)
+                fleet_state.set_operation_state(
+                    RoadPatrolOperationState.LINE_FOLLOWING
+                )
+            else:
+                interrupted = True
+                fleet_state.set_operation_state(
+                    RoadPatrolOperationState.LANDING
+                )
+                indicator.set_red()
+                logger.warning(
+                    "[VIS-RADAR] takeoff cancelled before ground authorization"
+                )
         else:
             logger.warning(
                 "[VIS-RADAR] dry run: real camera/radars active, no FC connection"
@@ -527,7 +564,10 @@ def main(argv: list[str] | None = None) -> None:
         previous_final_command = Command.zero("initial")
         last_log_s = 0.0
         loop_count = 0
-        while time.perf_counter() - start_s < args.duration_s:
+        while (
+            time.perf_counter() - start_s < args.duration_s
+            and not fleet_stop_event.is_set()
+        ):
             loop_start = time.perf_counter()
             dt_s = max(0.0, min(0.5, loop_start - previous_loop_s))
             previous_loop_s = loop_start
@@ -668,6 +708,10 @@ def main(argv: list[str] | None = None) -> None:
                 logger.info("[PURPLE-TARGET] target detector stopped; road NPU remains active")
             if indicator is not None:
                 state_name = planner_state_name(planner)
+                avoiding = is_avoiding(
+                    planner_state=state_name,
+                    safety_state=safe.state,
+                )
                 target_observation_ok = bool(
                     sample.target is not None
                     and getattr(sample.target, "found", False)
@@ -685,10 +729,7 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 indicator.update(
                     now_s=loop_start,
-                    avoiding=is_avoiding(
-                        planner_state=state_name,
-                        safety_state=safe.state,
-                    ),
+                    avoiding=avoiding,
                     unexpected=is_unexpected(
                         planner_state=state_name,
                         safety_state=safe.state,
@@ -719,6 +760,12 @@ def main(argv: list[str] | None = None) -> None:
                         target_mission is not None
                         and target_mission.mission_active
                     ),
+                )
+                fleet_state.set_operation_state(
+                    cruise_operation_state(
+                        target_mission=target_mission,
+                        avoiding=avoiding,
+                    )
                 )
             command_applied = bool(actual_flight and decision.allowed)
             report_applied = getattr(planner, "report_applied_command", None)
@@ -913,10 +960,16 @@ def main(argv: list[str] | None = None) -> None:
             _sleep_to_rate(loop_start, period_s)
     except KeyboardInterrupt:
         interrupted = True
+        if flight_owned:
+            fleet_state.set_operation_state(RoadPatrolOperationState.LANDING)
         if indicator is not None:
             indicator.set_red()
         logger.warning("[VIS-RADAR] interrupted")
     except BaseException:
+        if flight_owned:
+            fleet_state.set_operation_state(RoadPatrolOperationState.LANDING)
+        else:
+            fleet_state.set_operation_state(RoadPatrolOperationState.FAULT)
         if indicator is not None:
             indicator.set_red()
         raise
@@ -924,11 +977,18 @@ def main(argv: list[str] | None = None) -> None:
         if fc is not None:
             try:
                 if flight_owned:
+                    fleet_state.set_operation_state(
+                        RoadPatrolOperationState.LANDING
+                    )
                     land_and_wait_for_lock(fc, flight_config)
                 elif fc.connected:
                     fc.stablize()
             finally:
                 fc.close()
+        if fleet_node is not None:
+            if flight_owned:
+                time.sleep(FLEET_LANDING_REPORT_GRACE_S)
+            fleet_node.close()
         if guidance_started:
             guidance.stop()
         if radars_started:

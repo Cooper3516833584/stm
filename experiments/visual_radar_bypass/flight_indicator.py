@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import time
-from typing import Callable
-
-
 GREEN = (0, 255, 0)
 YELLOW = (255, 255, 0)
 RED = (255, 0, 0)
@@ -38,18 +34,11 @@ class FusionFlightIndicator:
     def set_yellow(self) -> None:
         self._set_color(YELLOW)
 
-    def pre_takeoff_countdown(
-        self,
-        *,
-        ready_wait_s: float = 15.0,
-        warning_wait_s: float = 5.0,
-        sleep_fn: Callable[[float], None] = time.sleep,
-    ) -> None:
-        self.set_green()
+    def prepare_for_ground_countdown(self) -> None:
+        """Arm the payload output and show that takeoff is awaiting approval."""
+
         self.fc.set_digital_output(0, True)
-        sleep_fn(float(ready_wait_s))
         self.set_red()
-        sleep_fn(float(warning_wait_s))
 
     def update(
         self,

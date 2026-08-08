@@ -94,14 +94,48 @@ def build_experimental_visual_config(
         max_forward_lookahead_px=88.0,
         lookahead_speed_gain_px_per_cm_s=1.4,
         max_latency_prediction_px=24.0,
+        # The 22 cm/s horizon is roughly 60--82 px rather than 75--130 px;
+        # use a three-point tangent window so signed-turn samples do not all
+        # collapse to the same bounded tangent.
+        tangent_window_points=3,
         tangent_kp_yaw=0.45,
         angle_deadband_deg=4.0,
         lateral_deadband_px=16.0,
+        lateral_kp_cm_s_per_px=0.10,
+        normal_max_vy_cm_s=12.0,
+        # The production 45 cm/s profile uses 0.30 / 18 deg/s.  Scale the
+        # feed-forward by the available yaw authority (18 / 55) instead of
+        # importing the aggressive values unchanged.
+        curvature_yaw_ff_kp=0.10,
+        curvature_yaw_ff_max_deg_s=6.0,
+        curvature_yaw_ff_deadband_deg=6.0,
+        signed_turn_filter_tau_s=0.08,
+        corner_lookahead_start_deg=30.0,
+        corner_lookahead_full_deg=75.0,
+        # Pixel geometry and path sampling are shared with the production
+        # camera.  Keep 75 px so the signed-turn horizon still spans enough of
+        # a sharp corner after adapting the tangent window for 22 cm/s.
+        corner_min_lookahead_px=75.0,
+        corner_severity_release_tau_s=0.25,
+        # path_width_px is fixed, so the production dimensionless edge gates
+        # transfer directly.  Velocity/yaw magnitudes are capped for 22 cm/s.
+        edge_recovery_start_ratio=0.55,
+        edge_recovery_full_ratio=0.90,
+        edge_recovery_lateral_kp=0.16,
+        edge_recovery_max_vy_cm_s=12.0,
+        edge_yaw_start_ratio=0.75,
+        edge_yaw_full_ratio=0.95,
+        edge_yaw_max_deg_s=3.0,
+        edge_speed_slow_start_ratio=0.90,
+        edge_emergency_ratio=0.95,
+        edge_emergency_vx_cap_cm_s=18.5,
         target_filter_tau_s=0.12,
         tangent_filter_tau_s=0.13,
         target_filter_max_rate_px_s=500.0,
         tangent_filter_max_rate_deg_s=100.0,
         max_planar_accel_cm_s2=36.0,
+        # 120 cm/s^2 * (22 / 45) ~= 58.7; round to a conservative 60.
+        max_planar_decel_cm_s2=60.0,
         max_yaw_accel_deg_s2=50.0,
         degraded_speed_scale=0.90,
         curvature_slowdown_start_deg=18.0,

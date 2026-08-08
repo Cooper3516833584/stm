@@ -125,6 +125,13 @@ def test_target_registry_records_detection_control_height_and_safety_parameters(
     assert by_name["target_max_rate_hz"] == 10.0
     assert by_name["target_stale_timeout_s"] == 0.5
     assert by_name["road_max_vx_cm_s"] == 22.0
+    assert by_name["road_tangent_window_points"] == 3
+    assert by_name["road_max_planar_decel_cm_s2"] == 60.0
+    assert by_name["road_curvature_yaw_ff_max_deg_s"] == 6.0
+    assert by_name["road_corner_min_lookahead_px"] == 75.0
+    assert by_name["road_edge_recovery_max_vy_cm_s"] == 12.0
+    assert by_name["road_edge_yaw_max_deg_s"] == 3.0
+    assert by_name["road_edge_emergency_vx_cap_cm_s"] == 18.5
     assert by_name["target_mission.target_vx_cm_s"] == 13.2
     assert by_name["target_mission.target_altitude_cm"] == 60.0
     assert by_name["target_mission.return_altitude_cm"] == 100.0
@@ -355,54 +362,107 @@ def test_real_flight_rejects_unsafe_overrides(tmp_path, unsafe):
         main.validate_args(main.parse_args([*base, *unsafe]))
 
 
-def test_visual_snapshot_matches_final_trajectory_defaults():
+def test_visual_snapshot_keeps_flight_validated_v1_defaults():
     config = FrozenVisualConfig()
     production = road_follow_main.parse_args(road_trajectory_main.build_argv([]))
 
     assert config.postprocess_mode == "fast-main"
     assert config.instance_selection == production.road_instance_selection
     assert config.npu_model_path == production.model_npu
-    # The radar flight experiment deliberately stays below production speed.
-    assert config.max_vx_cm_s == 14.0
-    assert config.max_vy_cm_s == 10.0
-    assert config.max_yaw_rate_deg_s == production.max_yaw_rate_deg_s
-    assert config.reach_radius_px == production.trajectory_reach_radius_px
     assert (
-        config.min_forward_lookahead_px
-        == production.trajectory_min_forward_lookahead_px
+        config.max_vx_cm_s,
+        config.max_vy_cm_s,
+        config.max_yaw_rate_deg_s,
+        config.min_forward_lookahead_px,
+        config.max_forward_lookahead_px,
+        config.tangent_kp_yaw,
+        config.max_planar_accel_cm_s2,
+        config.max_planar_decel_cm_s2,
+    ) == (14.0, 10.0, 10.0, 24.0, 64.0, 0.25, 24.0, 24.0)
+    assert config.curvature_yaw_ff_kp == 0.0
+    assert config.curvature_yaw_ff_max_deg_s == 0.0
+    assert config.edge_recovery_max_vy_cm_s == 0.0
+    assert config.edge_yaw_max_deg_s == 0.0
+    assert config.edge_emergency_vx_cap_cm_s == 0.0
+
+
+def test_22cm_profile_uses_speed_scaled_production_turn_features():
+    config = main.build_experimental_visual_config()
+
+    assert (config.max_vx_cm_s, config.max_vy_cm_s, config.max_yaw_rate_deg_s) == (
+        22.0,
+        12.0,
+        18.0,
     )
+    assert config.tangent_window_points == 3
+    assert config.max_planar_decel_cm_s2 == 60.0
+    assert (config.curvature_yaw_ff_kp, config.curvature_yaw_ff_max_deg_s) == (
+        0.10,
+        6.0,
+    )
+    assert config.corner_min_lookahead_px == 75.0
     assert (
-        config.max_forward_lookahead_px
-        == production.trajectory_max_forward_lookahead_px
-    )
+        config.edge_recovery_start_ratio,
+        config.edge_recovery_full_ratio,
+        config.edge_recovery_lateral_kp,
+        config.edge_recovery_max_vy_cm_s,
+    ) == (0.55, 0.90, 0.16, 12.0)
     assert (
-        config.lookahead_speed_gain_px_per_cm_s
-        == production.trajectory_lookahead_speed_gain_px_per_cm_s
-    )
+        config.edge_yaw_start_ratio,
+        config.edge_yaw_full_ratio,
+        config.edge_yaw_max_deg_s,
+    ) == (0.75, 0.95, 3.0)
     assert (
-        config.latency_compensation_s
-        == production.trajectory_latency_compensation_s
+        config.edge_speed_slow_start_ratio,
+        config.edge_emergency_ratio,
+        config.edge_emergency_vx_cap_cm_s,
+    ) == (0.90, 0.95, 18.5)
+
+
+def test_22cm_profile_turn_feedforward_and_fixed_width_edge_recovery_are_active():
+    curved = FrozenVisualGuidance(main.build_experimental_visual_config())
+    curve_points = [
+        (320.0 + 0.004 * max(0.0, 240.0 - y) ** 2, float(y))
+        for y in range(460, 39, -10)
+    ]
+    perception = SimpleNamespace(
+        is_road_found=True,
+        confidence=0.9,
+        trajectory_points=curve_points,
+        path_width_px=200.0,
+        road_state="normal",
     )
-    assert config.physical_road_width_cm == 50.0
-    assert config.max_latency_prediction_px == 16.0
-    assert config.tangent_window_points == production.trajectory_tangent_window_points
-    assert config.lateral_deadband_px == production.trajectory_lateral_deadband_px
-    assert config.target_filter_tau_s == production.trajectory_target_filter_tau_s
-    assert config.tangent_filter_tau_s == production.trajectory_tangent_filter_tau_s
-    assert (
-        config.max_planar_accel_cm_s2
-        == production.trajectory_max_planar_accel_cm_s2
+
+    # Let the acceleration-limited command build its 22 cm/s lookahead.  At
+    # the first zero-speed frame the minimum horizon intentionally has no
+    # useful signed-turn separation yet.
+    for index in range(6):
+        curved.follower.update(perception, now_s=1.0 + index * 0.1)
+    curve_diagnostics = curved.follower.last_diagnostics
+
+    assert 0.0 < abs(curve_diagnostics.yaw_feedforward_deg_s) <= 6.0
+    assert curve_diagnostics.corner_lookahead_cap_px >= 75.0
+    assert curve_diagnostics.corner_lookahead_cap_px < 88.0
+
+    edge = FrozenVisualGuidance(main.build_experimental_visual_config())
+    edge_points = [(420.0, 300.0), (420.0, 240.0), (420.0, 180.0)]
+    edge.follower.update(
+        SimpleNamespace(
+            is_road_found=True,
+            confidence=0.9,
+            trajectory_points=edge_points,
+            path_width_px=200.0,
+            road_state="normal",
+        ),
+        now_s=1.0,
     )
-    assert config.degraded_speed_scale == production.trajectory_degraded_speed_scale
-    assert (
-        config.curvature_slowdown_start_deg
-        == production.trajectory_curvature_slowdown_start_deg
-    )
-    assert (
-        config.curvature_full_slowdown_deg
-        == production.trajectory_curvature_full_slowdown_deg
-    )
-    assert config.min_curve_speed_cm_s == production.trajectory_min_curve_speed_cm_s
+    edge_diagnostics = edge.follower.last_diagnostics
+
+    assert edge_diagnostics.edge_ratio == pytest.approx(1.0)
+    assert edge_diagnostics.edge_recovery_blend == pytest.approx(1.0)
+    assert abs(edge_diagnostics.recovery_vy_cm_s) == pytest.approx(12.0)
+    assert abs(edge_diagnostics.edge_yaw_bias_deg_s) == pytest.approx(3.0)
+    assert edge_diagnostics.edge_speed_cap_cm_s == pytest.approx(18.5)
 
 
 def test_visual_guidance_passes_final_adaptive_parameters_to_follower():
@@ -422,9 +482,30 @@ def test_visual_guidance_passes_final_adaptive_parameters_to_follower():
         "max_latency_prediction_px",
         "tangent_window_points",
         "lateral_deadband_px",
+        "lateral_kp_cm_s_per_px",
+        "normal_max_vy_cm_s",
+        "curvature_yaw_ff_kp",
+        "curvature_yaw_ff_max_deg_s",
+        "curvature_yaw_ff_deadband_deg",
+        "signed_turn_filter_tau_s",
+        "corner_lookahead_start_deg",
+        "corner_lookahead_full_deg",
+        "corner_min_lookahead_px",
+        "corner_severity_release_tau_s",
+        "edge_recovery_start_ratio",
+        "edge_recovery_full_ratio",
+        "edge_recovery_lateral_kp",
+        "edge_recovery_max_vy_cm_s",
+        "edge_yaw_start_ratio",
+        "edge_yaw_full_ratio",
+        "edge_yaw_max_deg_s",
+        "edge_speed_slow_start_ratio",
+        "edge_emergency_ratio",
+        "edge_emergency_vx_cap_cm_s",
         "target_filter_tau_s",
         "tangent_filter_tau_s",
         "max_planar_accel_cm_s2",
+        "max_planar_decel_cm_s2",
         "degraded_speed_scale",
         "curvature_slowdown_start_deg",
         "curvature_full_slowdown_deg",

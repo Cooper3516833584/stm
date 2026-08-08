@@ -1,11 +1,10 @@
 """Isolated copy of the final trajectory-vision orchestration.
 
 This module deliberately does not add radar behavior to the production visual
-files.  It calls their stable public APIs, while keeping the NPU model,
-postprocess and compatible trajectory-controller configuration used by the
-current ``road_trajectory_main.py``.  The obstacle experiment intentionally
-retains lower 14/10 cm/s planar limits; geometry, filtering, latency
-compensation and curve handling match the final visual entry.
+files.  It calls their stable public APIs while freezing the flight-validated
+v1 controller defaults.  The 22 cm/s experiment selectively enables
+speed-scaled corner feed-forward and edge recovery from
+``road_trajectory_main.py`` without inheriting its 45 cm/s limits.
 """
 
 from __future__ import annotations
@@ -58,6 +57,26 @@ class FrozenVisualConfig:
     tangent_kp_yaw: float = 0.25
     angle_deadband_deg: float = 3.0
     lateral_deadband_px: float = 8.0
+    lateral_kp_cm_s_per_px: float = 0.10
+    normal_max_vy_cm_s: float = 12.0
+    curvature_yaw_ff_kp: float = 0.0
+    curvature_yaw_ff_max_deg_s: float = 0.0
+    curvature_yaw_ff_deadband_deg: float = 6.0
+    signed_turn_filter_tau_s: float = 0.08
+    corner_lookahead_start_deg: float = 30.0
+    corner_lookahead_full_deg: float = 75.0
+    corner_min_lookahead_px: float = 75.0
+    corner_severity_release_tau_s: float = 0.25
+    edge_recovery_start_ratio: float = 1.0
+    edge_recovery_full_ratio: float = 1.0
+    edge_recovery_lateral_kp: float = 0.22
+    edge_recovery_max_vy_cm_s: float = 0.0
+    edge_yaw_start_ratio: float = 1.0
+    edge_yaw_full_ratio: float = 1.0
+    edge_yaw_max_deg_s: float = 0.0
+    edge_speed_slow_start_ratio: float = 1.0
+    edge_emergency_ratio: float = 1.0
+    edge_emergency_vx_cap_cm_s: float = 0.0
     yaw_sign: float = 1.0
     lateral_sign: float = -1.0
     target_filter_tau_s: float = 0.15
@@ -65,6 +84,7 @@ class FrozenVisualConfig:
     target_filter_max_rate_px_s: float = 300.0
     tangent_filter_max_rate_deg_s: float = 45.0
     max_planar_accel_cm_s2: float = 24.0
+    max_planar_decel_cm_s2: float = 24.0
     max_yaw_accel_deg_s2: float = 20.0
     degraded_speed_scale: float = 0.85
     curvature_slowdown_start_deg: float = 12.0
@@ -144,6 +164,26 @@ class FrozenVisualGuidance:
                 tangent_kp_yaw=cfg.tangent_kp_yaw,
                 tangent_deadband_deg=cfg.angle_deadband_deg,
                 lateral_deadband_px=cfg.lateral_deadband_px,
+                lateral_kp_cm_s_per_px=cfg.lateral_kp_cm_s_per_px,
+                normal_max_vy_cm_s=cfg.normal_max_vy_cm_s,
+                curvature_yaw_ff_kp=cfg.curvature_yaw_ff_kp,
+                curvature_yaw_ff_max_deg_s=cfg.curvature_yaw_ff_max_deg_s,
+                curvature_yaw_ff_deadband_deg=cfg.curvature_yaw_ff_deadband_deg,
+                signed_turn_filter_tau_s=cfg.signed_turn_filter_tau_s,
+                corner_lookahead_start_deg=cfg.corner_lookahead_start_deg,
+                corner_lookahead_full_deg=cfg.corner_lookahead_full_deg,
+                corner_min_lookahead_px=cfg.corner_min_lookahead_px,
+                corner_severity_release_tau_s=cfg.corner_severity_release_tau_s,
+                edge_recovery_start_ratio=cfg.edge_recovery_start_ratio,
+                edge_recovery_full_ratio=cfg.edge_recovery_full_ratio,
+                edge_recovery_lateral_kp=cfg.edge_recovery_lateral_kp,
+                edge_recovery_max_vy_cm_s=cfg.edge_recovery_max_vy_cm_s,
+                edge_yaw_start_ratio=cfg.edge_yaw_start_ratio,
+                edge_yaw_full_ratio=cfg.edge_yaw_full_ratio,
+                edge_yaw_max_deg_s=cfg.edge_yaw_max_deg_s,
+                edge_speed_slow_start_ratio=cfg.edge_speed_slow_start_ratio,
+                edge_emergency_ratio=cfg.edge_emergency_ratio,
+                edge_emergency_vx_cap_cm_s=cfg.edge_emergency_vx_cap_cm_s,
                 yaw_sign=cfg.yaw_sign,
                 lateral_sign=cfg.lateral_sign,
                 target_filter_tau_s=cfg.target_filter_tau_s,
@@ -151,6 +191,7 @@ class FrozenVisualGuidance:
                 target_filter_max_rate_px_s=cfg.target_filter_max_rate_px_s,
                 tangent_filter_max_rate_deg_s=cfg.tangent_filter_max_rate_deg_s,
                 max_planar_accel_cm_s2=cfg.max_planar_accel_cm_s2,
+                max_planar_decel_cm_s2=cfg.max_planar_decel_cm_s2,
                 max_yaw_accel_deg_s2=cfg.max_yaw_accel_deg_s2,
                 degraded_speed_scale=cfg.degraded_speed_scale,
                 curvature_slowdown_start_deg=cfg.curvature_slowdown_start_deg,

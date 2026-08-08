@@ -442,13 +442,33 @@ def flight_status_from_fc(fc: Any | None) -> FlightStatus:
     )
 
 
-def multi_radar_age_s(multi_radar: Any) -> float | None:
-    ages: list[float] = []
-    for radar in getattr(multi_radar, "radars", []):
-        age = radar.get_last_frame_age_s()
+def multi_radar_age_s(
+    multi_radar: Any,
+    now_s: float | None = None,
+) -> float | None:
+    aggregate_age = getattr(multi_radar, "get_last_frame_age_s", None)
+    if callable(aggregate_age):
+        try:
+            age = aggregate_age(now_s=now_s)
+        except TypeError:
+            age = aggregate_age()
         if age is None:
             return None
-        ages.append(float(age))
+        age = float(age)
+        return age if np.isfinite(age) and age >= 0.0 else None
+
+    ages: list[float] = []
+    for radar in getattr(multi_radar, "radars", []):
+        try:
+            age = radar.get_last_frame_age_s(now_s=now_s)
+        except TypeError:
+            age = radar.get_last_frame_age_s()
+        if age is None:
+            return None
+        age = float(age)
+        if not np.isfinite(age) or age < 0.0:
+            return None
+        ages.append(age)
     if not ages:
         return None
     return max(ages)

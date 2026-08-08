@@ -1,5 +1,6 @@
 import struct
 import queue
+import time
 
 import numpy as np
 
@@ -12,11 +13,21 @@ from FlightController.Components.RadarProcess import (
 from FlightController.Components.Utils import calculate_crc8
 from FlightController.Runtime.ProcessRuntime import (
     LoopRateMonitor,
+    ProcessRadarClient,
     ProcessRuntime,
     ProcessRuntimeConfig,
+    RadarSnapshot,
     _SharedArrayRing,
     _drain_latest,
     _send_latest,
+)
+from FlightController.Solutions.Safety import (
+    Command,
+    FlightStatus,
+    RadarObstacleField,
+    SafetyArbiter,
+    SafetyConfig,
+    multi_radar_age_s,
 )
 
 
@@ -158,6 +169,64 @@ def test_loop_rate_monitor_reports_work_and_deadlines():
     assert result.samples == 10
     assert result.deadline_misses == 1
     assert result.work_max_ms == 60.0
+
+
+def test_process_radar_age_reaches_safety_without_false_stale_stop():
+    class _AliveProcess:
+        @staticmethod
+        def is_alive():
+            return True
+
+    class _Runtime:
+        _radar_process = _AliveProcess()
+
+        def __init__(self, snapshot, points):
+            self.snapshot = snapshot
+            self.points = points
+
+        def latest_radar(self):
+            return self.snapshot, self.points.copy()
+
+    now_s = time.perf_counter()
+    points = np.asarray([[160.0, 0.0]], dtype=np.float32)
+    snapshot = RadarSnapshot(
+        sequence=1,
+        published_time_s=now_s,
+        last_frame_time_s=now_s - 0.02,
+        points_slot=0,
+        points_generation=2,
+        point_count=len(points),
+        connected=True,
+        fresh=True,
+        crc_errors=0,
+    )
+    client = ProcessRadarClient(_Runtime(snapshot, points), max_age_s=0.5)
+
+    age_s = multi_radar_age_s(client, now_s=now_s)
+    assert age_s is not None
+    assert 0.019 <= age_s <= 0.021
+    assert client.is_fresh(max_age_s=0.5, now_s=now_s)
+
+    field = RadarObstacleField().update(points, now_s)
+    result = SafetyArbiter(
+        SafetyConfig(
+            require_fc=False,
+            require_hold_pos_mode=False,
+            require_unlocked=False,
+            require_radar=True,
+        )
+    ).filter(
+        Command(8.0, 0.0, 0.0, 2.0, "process_replay"),
+        flight=FlightStatus(),
+        radar_connected=client.connected,
+        radar_age_s=age_s,
+        radar_field=field,
+        enable_flight=False,
+    )
+
+    assert result.state != "HARD_STOP"
+    assert "radar_not_fresh" not in result.reasons
+    assert result.command.as_fc_tuple() == (8, 0, 0, 2)
 
 
 def test_runtime_without_workers_starts_and_stops_idempotently():

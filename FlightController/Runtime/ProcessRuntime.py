@@ -13,6 +13,7 @@ import multiprocessing as mp
 from multiprocessing.shared_memory import SharedMemory
 import os
 import queue
+import threading
 import time
 from typing import Any
 
@@ -99,6 +100,7 @@ class RuntimeHealth:
     radar_publish_drops: int
     vision_queue_depth: int | None
     radar_queue_depth: int | None
+    vision_restarts: int = 0
 
 
 @dataclass(frozen=True)
@@ -132,6 +134,10 @@ class ProcessRuntimeConfig:
     enable_vision: bool = True
     enable_radar: bool = True
     apply_cpu_affinity: bool = True
+    # STAI MPU 6.0.1 retains one native input allocation on every set_input().
+    # Recycling only the isolated worker bounds that vendor-side growth while
+    # leaving the radar and control processes uninterrupted.
+    vision_worker_max_inferences: int = 600
 
 
 class LoopRateMonitor:
@@ -275,6 +281,8 @@ class ProcessRuntime:
         self._radar_stop_event = self._ctx.Event()
         self._vision_ready = self._ctx.Event()
         self._radar_ready = self._ctx.Event()
+        self._vision_sequence_counter = self._ctx.Value("Q", 0)
+        self._frame_sequence_counter = self._ctx.Value("Q", 0)
         # One-slot queues make publication genuinely latest-only. A pipe can
         # eventually fill and stall the sensor worker when the control process
         # is busy, which is precisely the coupling this runtime must avoid.
@@ -296,6 +304,10 @@ class ProcessRuntime:
         )
         self._vision_process: mp.Process | None = None
         self._radar_process: mp.Process | None = None
+        self._vision_supervisor_stop = threading.Event()
+        self._vision_supervisor_thread: threading.Thread | None = None
+        self._vision_generation = 0
+        self._vision_restarts = 0
         self._latest_vision: VisionSnapshot | None = None
         self._latest_radar: RadarSnapshot | None = None
         self._started = False
@@ -307,15 +319,7 @@ class ProcessRuntime:
         if self._started:
             return
         if self.config.enable_vision:
-            from .VisionProcess import vision_worker_main
-            self._vision_process = self._ctx.Process(
-                target=vision_worker_main,
-                args=(self.config, self._frame_ring.descriptor(), self._vision_queue,
-                      self._vision_ready, self._vision_stop_event),
-                name="vision-worker",
-                daemon=True,
-            )
-            self._vision_process.start()
+            self._start_vision_process()
         if self.config.enable_radar:
             from FlightController.Components.RadarProcess import radar_worker_main
             self._radar_process = self._ctx.Process(
@@ -340,6 +344,50 @@ class ProcessRuntime:
                     self.stop()
                     raise TimeoutError(f"{label} worker did not become ready")
                 time.sleep(0.02)
+        if self.config.enable_vision:
+            self._vision_supervisor_thread = threading.Thread(
+                target=self._vision_supervisor_main,
+                name="vision-worker-supervisor",
+                daemon=True,
+            )
+            self._vision_supervisor_thread.start()
+
+    def _start_vision_process(self) -> None:
+        from .VisionProcess import vision_worker_main
+
+        self._vision_ready.clear()
+        self._vision_process = self._ctx.Process(
+            target=vision_worker_main,
+            args=(
+                self.config,
+                self._frame_ring.descriptor(),
+                self._vision_queue,
+                self._vision_ready,
+                self._vision_stop_event,
+                self._vision_generation,
+                self._vision_sequence_counter,
+                self._frame_sequence_counter,
+            ),
+            name="vision-worker",
+            daemon=True,
+        )
+        self._vision_process.start()
+
+    def _vision_supervisor_main(self) -> None:
+        while not self._vision_supervisor_stop.wait(0.1):
+            process = self._vision_process
+            if process is None or process.is_alive():
+                continue
+            process.join(timeout=0.1)
+            if self._vision_stop_event.is_set() or self._vision_supervisor_stop.is_set():
+                return
+            self._vision_generation += 1
+            self._vision_restarts += 1
+            try:
+                self._start_vision_process()
+            except Exception:
+                self._vision_ready.clear()
+                return
 
     @property
     def frame_ring_descriptor(self) -> dict[str, Any]:
@@ -386,6 +434,7 @@ class ProcessRuntime:
             radar_publish_drops=radar.publish_drops if radar is not None else 0,
             vision_queue_depth=_queue_depth(self._vision_queue),
             radar_queue_depth=_queue_depth(self._radar_queue),
+            vision_restarts=self._vision_restarts,
         )
 
     def stop(self) -> None:
@@ -415,8 +464,12 @@ class ProcessRuntime:
         self.stop_radar_worker()
 
     def stop_vision_worker(self) -> None:
+        self._vision_supervisor_stop.set()
         self._vision_stop_event.set()
         _join_process(self._vision_process)
+        supervisor = self._vision_supervisor_thread
+        if supervisor is not None and supervisor is not threading.current_thread():
+            supervisor.join(timeout=2.0)
 
     def stop_radar_worker(self) -> None:
         self._radar_stop_event.set()
@@ -533,6 +586,20 @@ class ProcessRadarClient:
             and self._last_snapshot.crc_errors == 0
             and self._last_snapshot.age_s(now_s) <= float(max_age_s)
         )
+
+    def get_last_frame_age_s(self, now_s: float | None = None) -> float | None:
+        """Return the aggregate dual-radar age expected by Safety helpers.
+
+        ``MultiRadar`` exposes ages through its two child drivers, while the
+        process client owns one merged snapshot.  Providing the same aggregate
+        value here keeps the compatibility boundary explicit and prevents a
+        healthy process snapshot from being converted to ``None`` by legacy
+        callers.
+        """
+        self._refresh()
+        if self._last_snapshot is None or not self._last_snapshot.connected:
+            return None
+        return self._last_snapshot.age_s(now_s)
 
     def get_obstacle_points_body_cm(self, max_distance_cm: float | None = None) -> np.ndarray:
         self._refresh()

@@ -31,14 +31,24 @@ def test_trajectory_entry_selects_adaptive_fast_point_controller_defaults():
     assert args.trajectory_lateral_kp_cm_s_per_px == 0.10
     assert args.trajectory_tangent_kp_yaw == 0.9
     assert args.trajectory_max_planar_accel_cm_s2 == 55.0
+    assert args.trajectory_max_planar_decel_cm_s2 == 120.0
     assert args.trajectory_max_yaw_accel_deg_s2 == 100.0
-    assert args.trajectory_min_curve_speed_cm_s == 28.0
-    assert args.trajectory_curvature_slowdown_start_deg == 25.0
-    assert args.trajectory_curvature_full_slowdown_deg == 70.0
+    assert args.trajectory_min_curve_speed_cm_s == 34.0
+    assert args.trajectory_curvature_slowdown_start_deg == 35.0
+    assert args.trajectory_curvature_full_slowdown_deg == 80.0
+    assert args.trajectory_normal_max_vy_cm_s == 12.0
+    assert args.trajectory_curvature_yaw_ff_kp == 0.30
+    assert args.trajectory_curvature_yaw_ff_max_deg_s == 18.0
+    assert args.trajectory_corner_min_lookahead_px == 75.0
+    assert args.trajectory_edge_recovery_start_ratio == 0.55
+    assert args.trajectory_edge_recovery_full_ratio == 0.90
+    assert args.trajectory_edge_recovery_max_vy_cm_s == 16.0
+    assert args.trajectory_edge_yaw_max_deg_s == 8.0
+    assert args.trajectory_edge_emergency_vx_cap_cm_s == 38.0
     assert args.trajectory_lost_grace_s == 0.18
     assert args.max_vx_cm_s == 45.0
-    assert args.max_vy_cm_s == 12.0
-    assert args.max_yaw_rate_deg_s == 40.0
+    assert args.max_vy_cm_s == 16.0
+    assert args.max_yaw_rate_deg_s == 55.0
     assert args.no_radar is True
     assert args.enable_flight is True
     assert args.auto_takeoff is True
@@ -58,6 +68,10 @@ def test_explicit_trajectory_cli_values_override_program_defaults():
                 "geometry",
                 "--trajectory-min-curve-speed-cm-s",
                 "9",
+                "--max-yaw-rate-deg-s",
+                "45",
+                "--trajectory-curvature-yaw-ff-kp",
+                "0.20",
             ]
         )
     )
@@ -66,6 +80,8 @@ def test_explicit_trajectory_cli_values_override_program_defaults():
     assert args.trajectory_reach_radius_px == 24.0
     assert args.road_instance_selection == "geometry"
     assert args.trajectory_min_curve_speed_cm_s == 9.0
+    assert args.max_yaw_rate_deg_s == 45.0
+    assert args.trajectory_curvature_yaw_ff_kp == 0.20
 
 
 def test_plain_trajectory_invocation_is_valid_production_auto_flight():

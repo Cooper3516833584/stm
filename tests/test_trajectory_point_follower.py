@@ -213,6 +213,149 @@ def test_high_speed_curve_speed_limits_remain_fast_until_sharp_turns():
     assert follower._curve_speed_limit_cm_s(70.0) == pytest.approx(28.0)
 
 
+def test_corner_lookahead_cap_shortens_only_for_large_curvature():
+    follower = _follower(
+        min_forward_lookahead_px=30.0,
+        max_forward_lookahead_px=130.0,
+        corner_lookahead_start_deg=30.0,
+        corner_lookahead_full_deg=75.0,
+        corner_min_lookahead_px=75.0,
+    )
+
+    assert follower._corner_lookahead_cap_px(30.0) == pytest.approx(130.0)
+    assert follower._corner_lookahead_cap_px(60.0) == pytest.approx(93.333333)
+    assert follower._corner_lookahead_cap_px(75.0) == pytest.approx(75.0)
+
+
+def test_corner_severity_attacks_immediately_and_releases_slowly():
+    follower = _follower(corner_severity_release_tau_s=0.25)
+
+    assert follower._filter_corner_severity(60.0, dt_s=0.1) == pytest.approx(60.0)
+    released = follower._filter_corner_severity(0.0, dt_s=0.1)
+
+    assert 0.0 < released < 60.0
+
+
+def test_signed_preview_turn_reports_direction_and_consistency():
+    right_curve = [
+        (320.0, 300.0),
+        (320.0, 280.0),
+        (322.0, 260.0),
+        (328.0, 240.0),
+        (340.0, 222.0),
+        (358.0, 208.0),
+        (380.0, 200.0),
+    ]
+    follower = _follower(tangent_window_points=1)
+
+    turn, consistency = follower._signed_preview_turn_deg(
+        right_curve, 0, len(right_curve) - 1
+    )
+    reverse_turn, _ = follower._signed_preview_turn_deg(
+        [(640.0 - x, y) for x, y in right_curve],
+        0,
+        len(right_curve) - 1,
+    )
+
+    assert turn > 0.0
+    assert reverse_turn < 0.0
+    assert consistency >= 0.60
+
+
+def test_yaw_feedforward_acts_before_feedback_and_is_clamped():
+    points = [
+        (320.0, 300.0),
+        (320.0, 280.0),
+        (322.0, 260.0),
+        (330.0, 240.0),
+        (345.0, 220.0),
+        (370.0, 205.0),
+        (400.0, 198.0),
+    ]
+    follower = _follower(
+        max_yaw_rate_deg_s=55.0,
+        tangent_window_points=1,
+        tangent_kp_yaw=0.0,
+        curvature_yaw_ff_kp=10.0,
+        curvature_yaw_ff_max_deg_s=18.0,
+        curvature_yaw_ff_deadband_deg=0.0,
+        signed_turn_filter_tau_s=0.0,
+    )
+
+    command = follower.update(_perception(points), now_s=1.0)
+    diagnostics = follower.last_diagnostics
+
+    assert diagnostics.yaw_feedback_deg_s == pytest.approx(0.0)
+    assert abs(diagnostics.yaw_feedforward_deg_s) == pytest.approx(18.0)
+    assert abs(command.yaw_rate_deg_s) > abs(diagnostics.yaw_feedback_deg_s)
+    assert abs(command.yaw_rate_deg_s) <= 55.0
+
+
+def test_signed_turn_filter_reverses_quickly_while_corner_severity_releases_slowly():
+    follower = _follower(
+        signed_turn_filter_tau_s=0.08,
+        corner_severity_release_tau_s=0.25,
+    )
+    follower._filtered_signed_preview_turn_deg = 60.0
+    follower._corner_severity_deg = 60.0
+
+    filtered_turn = follower._filter_angle(
+        -60.0,
+        follower._filtered_signed_preview_turn_deg,
+        tau_s=follower.config.signed_turn_filter_tau_s,
+        max_rate_per_s=1_000_000.0,
+        dt_s=1.0 / 12.0,
+    )
+    corner_severity = follower._filter_corner_severity(0.0, dt_s=1.0 / 12.0)
+
+    assert filtered_turn < 0.0
+    assert corner_severity > 40.0
+
+
+def test_production_style_straight_road_keeps_full_speed_without_recovery():
+    points = [(320.0, float(y)) for y in range(460, 19, -10)]
+    follower = _follower(
+        max_vx_cm_s=45.0,
+        max_vy_cm_s=16.0,
+        normal_max_vy_cm_s=12.0,
+        max_yaw_rate_deg_s=55.0,
+        min_forward_lookahead_px=30.0,
+        max_forward_lookahead_px=130.0,
+        curvature_yaw_ff_kp=0.30,
+        curvature_yaw_ff_max_deg_s=18.0,
+        edge_recovery_start_ratio=0.55,
+        edge_recovery_full_ratio=0.90,
+        edge_recovery_max_vy_cm_s=16.0,
+    )
+
+    command = follower.update(
+        _perception(points, path_width_px=200.0), now_s=1.0
+    )
+    diagnostics = follower.last_diagnostics
+
+    assert command.vx_cm_s == pytest.approx(45.0)
+    assert command.vy_cm_s == pytest.approx(0.0)
+    assert command.yaw_rate_deg_s == pytest.approx(0.0)
+    assert diagnostics.yaw_feedforward_deg_s == pytest.approx(0.0)
+    assert diagnostics.edge_recovery_blend == pytest.approx(0.0)
+    assert diagnostics.corner_lookahead_cap_px == pytest.approx(130.0)
+
+
+def test_new_curve_speed_profile_keeps_sharp_turns_above_34_cm_s():
+    follower = _follower(
+        max_vx_cm_s=45.0,
+        curvature_slowdown_start_deg=35.0,
+        curvature_full_slowdown_deg=80.0,
+        min_curve_speed_cm_s=34.0,
+    )
+
+    assert follower._curve_speed_limit_cm_s(0.0) == pytest.approx(45.0)
+    assert follower._curve_speed_limit_cm_s(35.0) == pytest.approx(45.0)
+    assert follower._curve_speed_limit_cm_s(55.0) == pytest.approx(40.111111)
+    assert follower._curve_speed_limit_cm_s(80.0) == pytest.approx(34.0)
+    assert follower._curve_speed_limit_cm_s(90.0) == pytest.approx(34.0)
+
+
 def test_high_yaw_response_tracks_tangent_and_clamps_at_limit():
     diagonal = [(320.0, 460.0), (350.0, 408.0), (380.0, 356.0)]
     follower = _follower(
@@ -308,6 +451,131 @@ def test_lateral_deadband_keeps_forward_motion_without_lateral_correction():
 
     assert command.vx_cm_s > 0.0
     assert command.vy_cm_s == pytest.approx(0.0)
+
+
+def test_centerline_x_at_camera_y_interpolates_and_falls_back_safely():
+    follower = _follower()
+
+    assert follower._centerline_x_at_camera_y(
+        [(300.0, 300.0), (340.0, 200.0)], 240.0
+    ) == pytest.approx(324.0)
+    assert follower._centerline_x_at_camera_y(
+        [(300.0, 300.0), (340.0, 280.0)], 240.0
+    ) == pytest.approx(340.0)
+    assert follower._centerline_x_at_camera_y(
+        [(300.0, 240.0), (340.0, 240.0)], 240.0
+    ) == pytest.approx(320.0)
+    assert follower._centerline_x_at_camera_y([], 240.0) is None
+
+
+@pytest.mark.parametrize(
+    ("cross_track_px", "expected_ratio"),
+    [(0.0, 0.0), (50.0, 0.5), (80.0, 0.8), (100.0, 1.0)],
+)
+def test_edge_ratio_uses_current_cross_track_and_measured_width(
+    cross_track_px, expected_ratio
+):
+    x = 320.0 + cross_track_px
+    points = [(x, 300.0), (x, 240.0), (x, 180.0)]
+    follower = _follower(min_forward_lookahead_px=30.0)
+
+    follower.update(_perception(points, path_width_px=200.0), now_s=1.0)
+
+    assert follower.last_diagnostics.edge_ratio == pytest.approx(expected_ratio)
+
+
+def test_edge_recovery_blends_to_larger_vy_and_inward_yaw():
+    points = [(420.0, 300.0), (420.0, 240.0), (420.0, 180.0)]
+    follower = _follower(
+        max_vy_cm_s=16.0,
+        normal_max_vy_cm_s=12.0,
+        min_forward_lookahead_px=30.0,
+        lateral_deadband_px=24.0,
+        edge_recovery_start_ratio=0.55,
+        edge_recovery_full_ratio=0.90,
+        edge_recovery_lateral_kp=0.22,
+        edge_recovery_max_vy_cm_s=16.0,
+        edge_yaw_start_ratio=0.75,
+        edge_yaw_full_ratio=0.95,
+        edge_yaw_max_deg_s=8.0,
+    )
+
+    command = follower.update(
+        _perception(points, path_width_px=200.0), now_s=1.0
+    )
+    diagnostics = follower.last_diagnostics
+
+    assert diagnostics.edge_recovery_blend == pytest.approx(1.0)
+    assert abs(diagnostics.normal_vy_cm_s) <= 12.0
+    assert abs(diagnostics.recovery_vy_cm_s) == pytest.approx(16.0)
+    assert 12.0 < abs(command.vy_cm_s) <= 16.0
+    assert 0.0 < diagnostics.edge_yaw_bias_deg_s <= 8.0
+
+
+def test_edge_yaw_reverses_with_cross_track_and_requires_path_width():
+    config = dict(
+        min_forward_lookahead_px=30.0,
+        edge_yaw_start_ratio=0.75,
+        edge_yaw_full_ratio=0.95,
+        edge_yaw_max_deg_s=8.0,
+    )
+    right = _follower(**config)
+    left = _follower(**config)
+    no_width = _follower(**config)
+
+    right.update(
+        _perception([(420.0, 300.0), (420.0, 240.0), (420.0, 180.0)], path_width_px=200.0),
+        now_s=1.0,
+    )
+    left.update(
+        _perception([(220.0, 300.0), (220.0, 240.0), (220.0, 180.0)], path_width_px=200.0),
+        now_s=1.0,
+    )
+    no_width.update(
+        _perception([(420.0, 300.0), (420.0, 240.0), (420.0, 180.0)]),
+        now_s=1.0,
+    )
+
+    assert right.last_diagnostics.edge_yaw_bias_deg_s > 0.0
+    assert left.last_diagnostics.edge_yaw_bias_deg_s < 0.0
+    assert no_width.last_diagnostics.edge_ratio is None
+    assert no_width.last_diagnostics.edge_recovery_blend == 0.0
+    assert no_width.last_diagnostics.edge_yaw_bias_deg_s == 0.0
+
+
+def test_edge_speed_cap_is_smooth_and_never_raises_curve_limit():
+    follower = _follower(
+        edge_speed_slow_start_ratio=0.90,
+        edge_emergency_ratio=0.95,
+        edge_emergency_vx_cap_cm_s=38.0,
+    )
+
+    assert follower._edge_speed_cap_cm_s(45.0, 0.89) == pytest.approx(45.0)
+    assert 38.0 < follower._edge_speed_cap_cm_s(45.0, 0.925) < 45.0
+    assert follower._edge_speed_cap_cm_s(45.0, 0.95) == pytest.approx(38.0)
+    assert follower._edge_speed_cap_cm_s(34.0, 1.0) == pytest.approx(34.0)
+
+
+def test_planar_acceleration_and_deceleration_use_independent_rates():
+    accelerated = TrajectoryPointFollower._limit_planar_acceleration(
+        45.0, 0.0, 0.0, 0.0,
+        max_accel_cm_s2=55.0,
+        max_decel_cm_s2=120.0,
+        dt_s=0.1,
+    )
+    decelerated = TrajectoryPointFollower._limit_planar_acceleration(
+        34.0, 0.0, 45.0, 0.0,
+        max_accel_cm_s2=55.0,
+        max_decel_cm_s2=120.0,
+        dt_s=0.1,
+    )
+
+    assert accelerated[0] == pytest.approx(5.5)
+    assert accelerated[4] == pytest.approx(55.0)
+    assert not accelerated[5]
+    assert decelerated[0] == pytest.approx(34.0)
+    assert decelerated[4] == pytest.approx(120.0)
+    assert not decelerated[5]
 
 
 def test_planar_acceleration_limit_brakes_before_direction_reversal():

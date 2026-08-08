@@ -282,9 +282,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--trajectory-tangent-kp-yaw", type=float, default=0.25)
     parser.add_argument("--trajectory-lateral-deadband-px", type=float, default=8.0)
     parser.add_argument("--trajectory-lateral-kp-cm-s-per-px", type=float, default=0.10)
+    parser.add_argument("--trajectory-normal-max-vy-cm-s", type=float, default=12.0)
+    parser.add_argument("--trajectory-curvature-yaw-ff-kp", type=float, default=0.0)
+    parser.add_argument("--trajectory-curvature-yaw-ff-max-deg-s", type=float, default=0.0)
+    parser.add_argument("--trajectory-curvature-yaw-ff-deadband-deg", type=float, default=6.0)
+    parser.add_argument("--trajectory-signed-turn-filter-tau-s", type=float, default=0.08)
+    parser.add_argument("--trajectory-corner-lookahead-start-deg", type=float, default=30.0)
+    parser.add_argument("--trajectory-corner-lookahead-full-deg", type=float, default=75.0)
+    parser.add_argument("--trajectory-corner-min-lookahead-px", type=float, default=75.0)
+    parser.add_argument("--trajectory-corner-severity-release-tau-s", type=float, default=0.25)
+    parser.add_argument("--trajectory-edge-recovery-start-ratio", type=float, default=1.0)
+    parser.add_argument("--trajectory-edge-recovery-full-ratio", type=float, default=1.0)
+    parser.add_argument("--trajectory-edge-recovery-lateral-kp", type=float, default=0.22)
+    parser.add_argument("--trajectory-edge-recovery-max-vy-cm-s", type=float, default=0.0)
+    parser.add_argument("--trajectory-edge-yaw-start-ratio", type=float, default=1.0)
+    parser.add_argument("--trajectory-edge-yaw-full-ratio", type=float, default=1.0)
+    parser.add_argument("--trajectory-edge-yaw-max-deg-s", type=float, default=0.0)
+    parser.add_argument("--trajectory-edge-speed-slow-start-ratio", type=float, default=1.0)
+    parser.add_argument("--trajectory-edge-emergency-ratio", type=float, default=1.0)
+    parser.add_argument("--trajectory-edge-emergency-vx-cap-cm-s", type=float, default=0.0)
     parser.add_argument("--trajectory-target-filter-tau-s", type=float, default=0.15)
     parser.add_argument("--trajectory-tangent-filter-tau-s", type=float, default=0.20)
     parser.add_argument("--trajectory-max-planar-accel-cm-s2", type=float, default=24.0)
+    parser.add_argument("--trajectory-max-planar-decel-cm-s2", type=float, default=24.0)
     parser.add_argument("--trajectory-max-yaw-accel-deg-s2", type=float, default=20.0)
     parser.add_argument("--trajectory-degraded-speed-scale", type=float, default=0.85)
     parser.add_argument("--trajectory-curvature-slowdown-start-deg", type=float, default=8.0)
@@ -551,6 +571,31 @@ def main(argv: list[str] | None = None) -> None:
                 tangent_deadband_deg=args.road_angle_deadband_deg,
                 lateral_deadband_px=args.trajectory_lateral_deadband_px,
                 lateral_kp_cm_s_per_px=args.trajectory_lateral_kp_cm_s_per_px,
+                normal_max_vy_cm_s=args.trajectory_normal_max_vy_cm_s,
+                curvature_yaw_ff_kp=args.trajectory_curvature_yaw_ff_kp,
+                curvature_yaw_ff_max_deg_s=args.trajectory_curvature_yaw_ff_max_deg_s,
+                curvature_yaw_ff_deadband_deg=(
+                    args.trajectory_curvature_yaw_ff_deadband_deg
+                ),
+                signed_turn_filter_tau_s=args.trajectory_signed_turn_filter_tau_s,
+                corner_lookahead_start_deg=args.trajectory_corner_lookahead_start_deg,
+                corner_lookahead_full_deg=args.trajectory_corner_lookahead_full_deg,
+                corner_min_lookahead_px=args.trajectory_corner_min_lookahead_px,
+                corner_severity_release_tau_s=(
+                    args.trajectory_corner_severity_release_tau_s
+                ),
+                edge_recovery_start_ratio=args.trajectory_edge_recovery_start_ratio,
+                edge_recovery_full_ratio=args.trajectory_edge_recovery_full_ratio,
+                edge_recovery_lateral_kp=args.trajectory_edge_recovery_lateral_kp,
+                edge_recovery_max_vy_cm_s=args.trajectory_edge_recovery_max_vy_cm_s,
+                edge_yaw_start_ratio=args.trajectory_edge_yaw_start_ratio,
+                edge_yaw_full_ratio=args.trajectory_edge_yaw_full_ratio,
+                edge_yaw_max_deg_s=args.trajectory_edge_yaw_max_deg_s,
+                edge_speed_slow_start_ratio=args.trajectory_edge_speed_slow_start_ratio,
+                edge_emergency_ratio=args.trajectory_edge_emergency_ratio,
+                edge_emergency_vx_cap_cm_s=(
+                    args.trajectory_edge_emergency_vx_cap_cm_s
+                ),
                 yaw_sign=args.road_yaw_sign,
                 lateral_sign=args.road_lateral_sign,
                 target_filter_tau_s=args.trajectory_target_filter_tau_s,
@@ -558,6 +603,7 @@ def main(argv: list[str] | None = None) -> None:
                 target_filter_max_rate_px_s=args.road_pixel_filter_max_rate_px_s,
                 tangent_filter_max_rate_deg_s=args.road_angle_filter_max_rate_deg_s,
                 max_planar_accel_cm_s2=args.trajectory_max_planar_accel_cm_s2,
+                max_planar_decel_cm_s2=args.trajectory_max_planar_decel_cm_s2,
                 max_yaw_accel_deg_s2=args.trajectory_max_yaw_accel_deg_s2,
                 degraded_speed_scale=args.trajectory_degraded_speed_scale,
                 curvature_slowdown_start_deg=(
@@ -1115,6 +1161,24 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
         "trajectory_max_latency_prediction_px",
         "trajectory_lateral_deadband_px",
         "trajectory_lateral_kp_cm_s_per_px",
+        "trajectory_normal_max_vy_cm_s",
+        "trajectory_curvature_yaw_ff_kp",
+        "trajectory_curvature_yaw_ff_max_deg_s",
+        "trajectory_curvature_yaw_ff_deadband_deg",
+        "trajectory_signed_turn_filter_tau_s",
+        "trajectory_corner_lookahead_start_deg",
+        "trajectory_corner_min_lookahead_px",
+        "trajectory_corner_severity_release_tau_s",
+        "trajectory_edge_recovery_start_ratio",
+        "trajectory_edge_recovery_full_ratio",
+        "trajectory_edge_recovery_lateral_kp",
+        "trajectory_edge_recovery_max_vy_cm_s",
+        "trajectory_edge_yaw_start_ratio",
+        "trajectory_edge_yaw_full_ratio",
+        "trajectory_edge_yaw_max_deg_s",
+        "trajectory_edge_speed_slow_start_ratio",
+        "trajectory_edge_emergency_ratio",
+        "trajectory_edge_emergency_vx_cap_cm_s",
         "trajectory_lost_grace_s",
         "trajectory_curvature_slowdown_start_deg",
         "trajectory_min_curve_speed_cm_s",
@@ -1131,8 +1195,40 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
             "--trajectory-curvature-full-slowdown-deg must be greater than "
             "--trajectory-curvature-slowdown-start-deg"
         )
+    if args.trajectory_corner_lookahead_full_deg <= args.trajectory_corner_lookahead_start_deg:
+        raise ValueError(
+            "--trajectory-corner-lookahead-full-deg must be greater than "
+            "--trajectory-corner-lookahead-start-deg"
+        )
+    if (
+        args.trajectory_edge_recovery_max_vy_cm_s > 0.0
+        and args.trajectory_edge_recovery_full_ratio
+        <= args.trajectory_edge_recovery_start_ratio
+    ):
+        raise ValueError(
+            "--trajectory-edge-recovery-full-ratio must be greater than "
+            "--trajectory-edge-recovery-start-ratio when recovery is enabled"
+        )
+    if (
+        args.trajectory_edge_yaw_max_deg_s > 0.0
+        and args.trajectory_edge_yaw_full_ratio <= args.trajectory_edge_yaw_start_ratio
+    ):
+        raise ValueError(
+            "--trajectory-edge-yaw-full-ratio must be greater than "
+            "--trajectory-edge-yaw-start-ratio when edge yaw is enabled"
+        )
+    if (
+        args.trajectory_edge_emergency_vx_cap_cm_s > 0.0
+        and args.trajectory_edge_emergency_ratio
+        <= args.trajectory_edge_speed_slow_start_ratio
+    ):
+        raise ValueError(
+            "--trajectory-edge-emergency-ratio must be greater than "
+            "--trajectory-edge-speed-slow-start-ratio when edge speed cap is enabled"
+        )
     for option in (
         "trajectory_max_planar_accel_cm_s2",
+        "trajectory_max_planar_decel_cm_s2",
         "trajectory_max_yaw_accel_deg_s2",
     ):
         if getattr(args, option) <= 0.0:

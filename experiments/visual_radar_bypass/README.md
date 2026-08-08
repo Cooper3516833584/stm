@@ -1,73 +1,83 @@
-# 独立真实视觉 + 实体雷达静态障碍绕行实验
+# 真实视觉 + 双雷达融合 static-route
 
-生产视觉巡线逻辑保持不变。默认 `static-route` 模式用于绕开指定路线中的单个、静止、
-孤立管状障碍物。2026-08-07 根据真实飞行记录修正了主目录 `SafetyArbiter` 的侧向几何和
-组合仲裁，但没有降低原有安全阈值。
-
-## 当前稳定版本
-
-- 默认参数档为 `static-route-flight-v1`，状态为 `FROZEN_FLIGHT_VALIDATED`。
-- 不传 `--bypass-planner` 时即使用该方案；旧方案仍需显式选择且保持可运行。
-- v1 已通过实际飞行验证，绕行过程平滑，无左右摇摆，并能完成侧缘越过确认。
-- Git 冻结标签为 `static-route-flight-v1`，对应提交 `4c84333`。
-- 冻结的是 v1 默认参数，不是封死规划器；`StaticRouteBypassConfig` 仍可用于后续新增提速
-  v2，且不得静默覆盖 v1。
-
-## 默认行为
-
-- 雷达规划范围为机头前方 180°（机体系 `-90°..+90°`）。
-- 视觉路径切线继续控制 yaw，使机头跟随局部路径方向。
-- 避障完成前屏蔽视觉横向命令；`vy` 只由障碍侧别和实体表面净空决定。
-- 避障前向目标为 `14 cm/s × 60% = 8.4 cm/s`，Safety 可以降低或清零。
-- 障碍到达 80°～90°侧方并离开前半平面后，使用成功下发的最终
-  `vx/vy/yaw_rate` 做保守二维传播；整根管体位于机后 20 cm 后才恢复视觉横移。
-- 双雷达完整点云始终进入 Safety，80 cm 前向停车和 45 cm 侧向停车不变。
-- 50 cm × 50 cm 机身按半尺寸 25 cm 建模；侧向 Safety 只检查 `|x|≤25 cm` 的实际机体
-  扫掠走廊，避免侧后方近中心线杂点误报。
-
-详细状态与参数见 [STATIC_ROUTE_BYPASS.md](STATIC_ROUTE_BYPASS.md)，验证结果见
+该目录是当前视觉巡线与双雷达融合入口。默认使用 `ProcessRuntime` 的 spawn 多进程架构：视觉、
+双雷达、记录和控制相互隔离，控制进程只读取最新快照。详细实现、验证结果和已知限制见
 [OPTIMIZATION_REPORT.md](OPTIMIZATION_REPORT.md)。
 
-## 无飞控实体传感器验证
+根目录 `road_trajectory_main.py` 仍是复用 `road_follow_main` 的单视觉入口，当前没有接入这里的
+双雷达进程；融合验收以本目录的 static-route 入口为准。
+
+## 当前架构摘要
+
+- 控制主进程与雷达进程运行在 CPU0，视觉/NPU 进程运行在 CPU1；
+- 视觉图像使用 8 槽共享内存，合并雷达点云使用 2 槽共享内存；
+- 元数据通道有界并采用 latest-only，不补算历史传感器帧；
+- 双雷达统一批量读取、CRC 校验、时间戳回绕处理和 NumPy 地图更新；
+- SessionRecorder 使用低优先级独立进程处理 JSONL、日志、视频、JPEG 和 NPZ；
+- 雷达 CRC 新增立即触发不健康，连续 5 个新鲜快照无新增 CRC 后允许恢复；
+- 默认 `--runtime-mode process`；`threaded` 仅作为旧路径回退。
+
+static-route 的冻结 v1 参数和状态机行为继续保留为回归基线，详见
+[STATIC_ROUTE_BYPASS.md](STATIC_ROUTE_BYPASS.md)。
+
+## 指示灯
+
+| 飞行状态 | 指示灯 |
+|---|---|
+| 初始化完成 | 绿灯；`set_digital_output(0, True)` 后等待 15 秒 |
+| 即将起飞 | 红灯，等待 5 秒 |
+| 正常巡线 | 绿灯 |
+| 正常避障 | 红灯 |
+| 雷达、视觉、道路、Safety 或规划状态异常 | 红灯亮 0.2 秒、灭 0.2 秒循环 |
+
+指示灯只在真实飞行模式连接飞控后启用。dry-run 不连接飞控，不会改变实体灯或数字输出。
+
+## 无飞控验证
 
 ```bash
+cd /usr/local/ObstacleAvoidanceDrone
 PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \
   -m experiments.visual_radar_bypass.main \
-  --duration-s 60
+  --runtime-mode process \
+  --bypass-planner static-route \
+  --loop-hz 10 \
+  --duration-s 60 \
+  --no-record
 ```
 
-不要传入 `--enable-flight`、`--auto-takeoff` 或飞行确认参数。dry-run 会启动真实
-摄像头和双雷达，但保持 `fc=None`，也不会把规划命令计入已执行里程。
+不要加入 `--enable-flight`、`--auto-takeoff` 或飞行确认参数。该命令会打开真实摄像头和双雷达，
+但保持 `fc=None`，不会解锁、起飞或发送飞控命令。
 
-## 离线闭环断言与基准
+## 记录输出
 
-```bash
-PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \
-  -m experiments.visual_radar_bypass.benchmark_bypass --assert-only
+默认会话根目录为 `/data/stm_records`：
 
-PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \
-  -m experiments.visual_radar_bypass.benchmark_bypass --iterations 2000
-
-PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \
-  -m experiments.visual_radar_bypass.replay_radar_session \
-  /data/stm_records/<session>
+```text
+session.json
+runtime.log
+commands.jsonl
+frames.jsonl
+radar.jsonl
+camera.avi
+frames/*.jpg
+radar_points/*.npz
 ```
 
-## 旧模式兼容入口
+关键元数据与媒体任务使用不同队列；记录进程故障不会阻塞控制循环。真实飞行启动前记录器不可用
+时，程序仍拒绝飞行。
+
+## 旧模式
 
 ```bash
-# Legacy，0 仍表示禁用原 forward recovery
-python3 -m experiments.visual_radar_bypass.main \
-  --bypass-planner legacy --bypass-forward-transition-s 0
-
-# 原 smooth sidestep
-python3 -m experiments.visual_radar_bypass.main \
-  --bypass-planner smooth-sidestep
-
-# 原 circular 和 right-half 专用标志仍自动选择 legacy
+python3 -m experiments.visual_radar_bypass.main --runtime-mode threaded
+python3 -m experiments.visual_radar_bypass.main --bypass-planner legacy
+python3 -m experiments.visual_radar_bypass.main --bypass-planner smooth-sidestep
 python3 -m experiments.visual_radar_bypass.main --circular-tube-bypass
-python3 -m experiments.visual_radar_bypass.main --right-half-radar-then-visual
 ```
 
-真实飞行入口仍保留原有多重确认门。所有板端源码更新必须先提交到 Git，再由开发板
-`git fetch`/`git pull --ff-only` 获取；禁止 SCP 或直接编辑板端源码。
+这些入口仅用于兼容和诊断，不代表当前默认架构。
+
+## 部署
+
+板端源码只能通过 Git 获取已提交的版本：本地提交并推送后，板端执行 `git pull --ff-only`。
+禁止通过 SCP、编辑器或 SSH 命令直接修改板端项目源码，板端也不得向远端推送。

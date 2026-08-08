@@ -1,8 +1,33 @@
 # 🚁 Cooper_drone 伴随计算机系统配置与开发进度纪要
 
 **项目名称**: Cooper_drone (基于 MYiR 开发板的无人机机载/伴随计算机开发)
-**当前阶段**: M8 阶段 — 新道路语义分割模型已通过板端 NPU 验收并接入默认寻路链路
-**最后更新**: 2026年8月7日（新 SD 卡的项目、虚拟环境、模型和网络恢复完成；蓝牙 PAN 已在无网线状态下完成 SSH、公网与 Git 远端读取验证；板端软重启导致蓝牙 HCI 异常的经验已归档）
+**当前阶段**: M9 阶段 — 融合控制链路已完成多进程隔离、雷达批处理和独立记录进程接入
+**最后更新**: 2026年8月8日（当前架构、雷达 CRC 恢复和融合飞行状态指示灯已归档）
+
+## 当前融合运行架构（覆盖旧线程架构描述）
+
+融合入口当前默认使用 `ProcessRuntime` 的 Linux spawn 多进程架构：控制主进程和双雷达进程
+绑定 CPU0，视觉/NPU 进程绑定 CPU1，SessionRecorder 作为 `nice +10` 的独立记录进程运行。
+视觉通过 8 槽共享内存传递 BGR 帧，雷达通过 2 槽共享内存传递合并点云；控制端只消费最新
+快照，不等待传感器、压缩或磁盘。
+
+双雷达默认热路径已经从 `MultiRadar/LDRadar_Driver` 的多线程逐点更新，替换为单进程统一轮询、
+47-byte 批量解析、CRC/时间戳回绕统计和 NumPy 1080-bin 地图内核。`MultiRadar` 路径只在
+`--runtime-mode threaded` 下保留。CRC 新增立即触发不健康，连续 5 个新鲜快照没有新增 CRC
+后恢复，累计 CRC 继续写入日志。
+
+记录器的 JSON flush、诊断叠图、JPEG/MJPG 和点云 NPZ 压缩均已移出控制进程。STAI MPU
+6.0.1 `set_input()` 导致的 NPU worker RSS 持续增长仍是已知限制；当前保留 NPU，不采用会
+造成视觉长时间中断的周期性 worker 重启。
+
+融合实飞状态灯：初始化完成绿灯并置数字输出 0 为 True，15 秒后红灯预警 5 秒；起飞完成和
+正常巡线为绿灯，正常避障为红灯，传感器/Safety/规划异常为红灯 0.2 秒亮、0.2 秒灭循环。
+
+完整架构和验证记录见
+[experiments/visual_radar_bypass/OPTIMIZATION_REPORT.md](experiments/visual_radar_bypass/OPTIMIZATION_REPORT.md)。
+
+本文后续关于三线程 GIL 竞争、`Map_Circle` Python 热路径和主线程记录压缩的章节是历史调优
+记录，不再代表融合入口的默认运行方式。
 
 ## 0. 2026-07-17 新道路语义分割 NPU 模型接入
 

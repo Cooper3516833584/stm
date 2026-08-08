@@ -38,6 +38,12 @@ from .flight_runtime import (
     wait_for_radars,
     wait_for_visual_road,
 )
+from .flight_indicator import (
+    FusionFlightIndicator,
+    is_avoiding,
+    is_unexpected,
+    planner_state_name,
+)
 from .circular_tube_bypass import (
     CircularTubeBypassConfig,
     CircularTubeBypassPlanner,
@@ -393,6 +399,7 @@ def main(argv: list[str] | None = None) -> None:
     interrupted = False
     guidance_started = False
     radars_started = False
+    indicator = None
     period_s = 1.0 / args.loop_hz
     loop_monitor = LoopRateMonitor(args.loop_hz)
     try:
@@ -408,7 +415,15 @@ def main(argv: list[str] | None = None) -> None:
         if actual_flight:
             fc = connect_fc(FCConnectConfig(port=args.fc_port, mode=2, timeout_s=10.0))
             flight_owned = True
+            indicator = FusionFlightIndicator(fc)
+            logger.warning(
+                "[VIS-RADAR] initialization complete; green indicator and "
+                "digital output 0 enabled for 15 seconds, followed by a "
+                "5-second red takeoff warning"
+            )
+            indicator.pre_takeoff_countdown()
             auto_takeoff(fc, flight_config)
+            indicator.set_green()
         else:
             logger.warning(
                 "[VIS-RADAR] dry run: real camera/radars active, no FC connection"
@@ -498,6 +513,27 @@ def main(argv: list[str] | None = None) -> None:
                 health,
                 dry_run=not actual_flight,
             )
+            if indicator is not None:
+                state_name = planner_state_name(planner)
+                indicator.update(
+                    now_s=loop_start,
+                    avoiding=is_avoiding(
+                        planner_state=state_name,
+                        safety_state=safe.state,
+                    ),
+                    unexpected=is_unexpected(
+                        planner_state=state_name,
+                        safety_state=safe.state,
+                        decision_allowed=decision.allowed,
+                        radar_required=not radar_retired,
+                        radar_fresh=radar_fresh,
+                        camera_ok=sample.camera_ok,
+                        perception_stale=sample.perception_stale,
+                        road_found=bool(
+                            getattr(sample.perception, "is_road_found", False)
+                        ),
+                    ),
+                )
             command_applied = bool(actual_flight and decision.allowed)
             report_applied = getattr(planner, "report_applied_command", None)
             if callable(report_applied):
@@ -647,7 +683,13 @@ def main(argv: list[str] | None = None) -> None:
             _sleep_to_rate(loop_start, period_s)
     except KeyboardInterrupt:
         interrupted = True
+        if indicator is not None:
+            indicator.set_red()
         logger.warning("[VIS-RADAR] interrupted")
+    except BaseException:
+        if indicator is not None:
+            indicator.set_red()
+        raise
     finally:
         if fc is not None:
             try:

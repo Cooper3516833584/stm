@@ -68,6 +68,45 @@ def test_default_policy_is_front_180_and_sixty_percent_forward_speed():
     assert config.avoidance_vx_cm_s == pytest.approx(8.4)
 
 
+def test_target_guidance_override_allows_bypass_without_road_and_suppresses_yaw():
+    planner = StaticRouteBypassPlanner()
+    field = _field(_cluster(100.0, -40.0))
+    target = Command(13.2, 0.0, 0.0, 12.0, "purple_target:approach")
+
+    assert planner.has_obstacle_conflict(field)
+    assert planner.state == StaticRouteBypassState.NORMAL
+
+    first = planner.update(
+        desired=target,
+        perception=None,
+        radar_field=field,
+        now_s=1.0,
+        guidance_usable=True,
+        preserve_guidance_yaw=False,
+    )
+    active = planner.update(
+        desired=target,
+        perception=None,
+        radar_field=field,
+        now_s=1.1,
+        guidance_usable=True,
+        preserve_guidance_yaw=False,
+    )
+    active = planner.update(
+        desired=target,
+        perception=None,
+        radar_field=field,
+        now_s=1.2,
+        guidance_usable=True,
+        preserve_guidance_yaw=False,
+    )
+
+    assert first == target
+    assert planner.state != StaticRouteBypassState.NORMAL
+    assert active.vy_cm_s > 0.0
+    assert active.yaw_rate_deg_s == 0.0
+
+
 def test_flight_validated_v1_profile_defaults_are_frozen():
     config = StaticRouteBypassConfig()
 

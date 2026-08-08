@@ -16,7 +16,14 @@ from .ProcessRuntime import (
 )
 
 
-def vision_worker_main(config, frame_ring_descriptor, output, ready_event, stop_event) -> None:
+def vision_worker_main(
+    config,
+    frame_ring_descriptor,
+    output,
+    ready_event,
+    stop_event,
+    target_stop_event=None,
+) -> None:
     """Own camera capture and NPU inference for the lifetime of the worker."""
     _set_affinity(1, bool(config.apply_cpu_affinity))
     ring = _SharedArrayRing.attach(frame_ring_descriptor)
@@ -48,14 +55,22 @@ def vision_worker_main(config, frame_ring_descriptor, output, ready_event, stop_
             wb_g=config.wb_g,
             wb_b=config.wb_b,
             offset_comp_config=config.offset_comp_config,
-            target_enable=config.target_enable,
-            target_max_dimension=config.target_max_dimension,
-            target_min_area_ratio=config.target_min_area_ratio,
+            target_enable=getattr(config, "target_enable", True),
+            target_max_dimension=getattr(config, "target_max_dimension", 256),
+            target_hue_min=getattr(config, "target_hue_min", 135.0),
+            target_hue_max=getattr(config, "target_hue_max", 179.0),
+            target_saturation_min=getattr(config, "target_saturation_min", 90.0),
+            target_value_min=getattr(config, "target_value_min", 60.0),
+            target_min_area_ratio=getattr(config, "target_min_area_ratio", 0.005),
+            target_max_rate_hz=getattr(config, "target_max_rate_hz", 10.0),
+            target_stale_timeout_s=getattr(config, "target_stale_timeout_s", 0.5),
         )
         pipeline.start()
         ready_event.set()
 
         while not stop_event.is_set():
+            if target_stop_event is not None and target_stop_event.is_set():
+                pipeline.disable_target()
             frame, frame_time_s = pipeline.latest_frame()
             if frame is not None and id(frame) != last_frame_identity:
                 array = np.asarray(frame)
@@ -81,6 +96,7 @@ def vision_worker_main(config, frame_ring_descriptor, output, ready_event, stop_
                 now_s = time.perf_counter()
                 capture_s = max(0.0, now_s - max(0.0, float(age_s)))
                 target, _target_age_s, _target_stale = pipeline.latest_target()
+                target_enabled = pipeline.target is not None
                 target_capture_time_s = (
                     float(target.capture_time_s) if target is not None else 0.0
                 )
@@ -96,6 +112,7 @@ def vision_worker_main(config, frame_ring_descriptor, output, ready_event, stop_
                         frame_ref=latest_frame_ref,
                         target=target,
                         target_capture_time_s=target_capture_time_s,
+                        target_enabled=target_enabled,
                         inference_ms=float(pipeline.yolo.last_inference_ms),
                         normalize_ms=float(stage_timing.get("normalize_ms", 0.0)),
                         preprocess_ms=float(stage_timing.get("preprocess_ms", 0.0)),

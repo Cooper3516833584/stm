@@ -39,6 +39,7 @@ class VisionSnapshot:
     frame_ref: FrameRef | None
     target: Any | None = None
     target_capture_time_s: float = 0.0
+    target_enabled: bool = True
     inference_ms: float = 0.0
     normalize_ms: float = 0.0
     preprocess_ms: float = 0.0
@@ -120,7 +121,13 @@ class ProcessRuntimeConfig:
     wb_b: float = 1.0
     target_enable: bool = True
     target_max_dimension: int = 256
+    target_hue_min: float = 135.0
+    target_hue_max: float = 179.0
+    target_saturation_min: float = 90.0
+    target_value_min: float = 60.0
     target_min_area_ratio: float = 0.005
+    target_max_rate_hz: float = 10.0
+    target_stale_timeout_s: float = 0.5
     upper_port: str = "/dev/ttySTM4"
     lower_port: str = "/dev/ttySTM9"
     radar_timeout_s: float = 0.5
@@ -272,6 +279,7 @@ class ProcessRuntime:
         self.config = config or ProcessRuntimeConfig()
         self._ctx = mp.get_context("spawn")
         self._vision_stop_event = self._ctx.Event()
+        self._target_stop_event = self._ctx.Event()
         self._radar_stop_event = self._ctx.Event()
         self._vision_ready = self._ctx.Event()
         self._radar_ready = self._ctx.Event()
@@ -311,7 +319,8 @@ class ProcessRuntime:
             self._vision_process = self._ctx.Process(
                 target=vision_worker_main,
                 args=(self.config, self._frame_ring.descriptor(), self._vision_queue,
-                      self._vision_ready, self._vision_stop_event),
+                      self._vision_ready, self._vision_stop_event,
+                      self._target_stop_event),
                 name="vision-worker",
                 daemon=True,
             )
@@ -418,6 +427,10 @@ class ProcessRuntime:
         self._vision_stop_event.set()
         _join_process(self._vision_process)
 
+    def disable_target(self) -> None:
+        """Ask the vision worker to stop only target detection."""
+        self._target_stop_event.set()
+
     def stop_radar_worker(self) -> None:
         self._radar_stop_event.set()
         _join_process(self._radar_process)
@@ -475,6 +488,9 @@ class ProcessVisionPipeline:
             else float("inf")
         )
         return self._last.target, age, age > max_age_s
+
+    def disable_target(self) -> None:
+        self.runtime.disable_target()
 
     @property
     def camera_ok(self) -> bool:

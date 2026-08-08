@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .static_route_bypass import StaticRouteBypassConfig
+from .purple_target_mission import PurpleTargetMissionConfig
+from .visual_guidance import FrozenVisualConfig
 
 
 class ParameterSource(str, Enum):
@@ -40,6 +42,8 @@ def build_parameter_registry(
     radar_timeout_s: float,
     tuning_log_every_n: int,
     radar_snapshot_every_n: int,
+    target_config: PurpleTargetMissionConfig | None = None,
+    visual_config: FrozenVisualConfig | None = None,
 ) -> list[dict[str, object]]:
     fixed = ParameterSource.FIXED_REQUIREMENT
     existing = ParameterSource.EXISTING_PROJECT
@@ -73,13 +77,80 @@ def build_parameter_registry(
         ParameterRecord("max_encounter_s", config.max_encounter_s, validated, "latched timeout", True),
         ParameterRecord("radar_timeout_s", radar_timeout_s, existing, "Safety radar freshness gate", True),
         ParameterRecord("obstacle_stop_distance_cm", 80.0, existing, "Safety forward stop", True),
+        ParameterRecord("obstacle_slow_distance_cm", 150.0, existing, "Safety forward slowdown", True),
+        ParameterRecord("slow_speed_limit_cm_s", 10.0, unverified, "Safety slowdown speed cap", True),
         ParameterRecord("side_stop_distance_cm", 45.0, existing, "Safety lateral stop", True),
         ParameterRecord("body_x_half_cm", 25.0, fixed, "50 cm rectangular body longitudinal half-size", True),
         ParameterRecord("body_y_half_cm", 25.0, fixed, "50 cm rectangular body lateral half-size", True),
         ParameterRecord("side_corridor_x_half_cm", 25.0, fixed, "finite lateral swept-body corridor", True),
         ParameterRecord("tuning_log_every_n", tuning_log_every_n, existing, "command diagnostic sampling"),
         ParameterRecord("radar_snapshot_every_n", radar_snapshot_every_n, existing, "physical point snapshot sampling"),
+        ParameterRecord("control_rate_hz", 10.0, existing, "fused control-loop rate", True),
     ]
+    if visual_config is not None:
+        rows.extend(
+            [
+                ParameterRecord("camera_width", visual_config.camera_width, existing, "shared camera width"),
+                ParameterRecord("camera_height", visual_config.camera_height, existing, "shared camera height"),
+                ParameterRecord("camera_fps", visual_config.camera_fps, existing, "shared camera capture rate"),
+                ParameterRecord("road_max_vx_cm_s", visual_config.max_vx_cm_s, unverified, "optimized road forward-speed cap", True),
+                ParameterRecord("road_max_vy_cm_s", visual_config.max_vy_cm_s, unverified, "optimized road lateral-speed cap", True),
+                ParameterRecord("road_yaw_kp", visual_config.tangent_kp_yaw, unverified, "optimized road tangent yaw gain", True),
+                ParameterRecord("road_yaw_deadband_deg", visual_config.angle_deadband_deg, unverified, "optimized road yaw deadband"),
+                ParameterRecord("road_max_yaw_rate_deg_s", visual_config.max_yaw_rate_deg_s, unverified, "optimized road yaw-rate cap", True),
+                ParameterRecord("road_max_yaw_accel_deg_s2", visual_config.max_yaw_accel_deg_s2, unverified, "optimized road yaw acceleration cap", True),
+                ParameterRecord("road_max_planar_accel_cm_s2", visual_config.max_planar_accel_cm_s2, unverified, "optimized road planar acceleration cap", True),
+                ParameterRecord("target_max_dimension", visual_config.target_max_dimension, existing, "low-cost target downsample"),
+                ParameterRecord("target_hue_min", visual_config.target_hue_min, existing, "purple HSV lower hue"),
+                ParameterRecord("target_hue_max", visual_config.target_hue_max, existing, "purple HSV upper hue"),
+                ParameterRecord("target_saturation_min", visual_config.target_saturation_min, existing, "purple HSV saturation gate"),
+                ParameterRecord("target_value_min", visual_config.target_value_min, existing, "purple HSV value gate"),
+                ParameterRecord("target_min_area_ratio", visual_config.target_min_area_ratio, existing, "purple connected-area gate"),
+                ParameterRecord("target_max_rate_hz", visual_config.target_max_rate_hz, fixed, "match target work to the control loop"),
+                ParameterRecord("target_stale_timeout_s", visual_config.target_stale_timeout_s, fixed, "target freshness gate", True),
+            ]
+        )
+    if target_config is not None:
+        target_purposes = {
+            "target_vx_cm_s": "60 percent target approach speed",
+            "yaw_kp": "target bearing yaw gain",
+            "yaw_deadband_deg": "target bearing yaw deadband",
+            "max_yaw_rate_deg_s": "target yaw-rate cap",
+            "max_yaw_accel_deg_s2": "target yaw acceleration cap",
+            "forward_bearing_limit_deg": "rotate before forward flight",
+            "offset_filter_tau_s": "target offset low-pass time constant",
+            "offset_filter_max_rate_px_s": "target offset slew cap",
+            "max_planar_accel_cm_s2": "target forward acceleration cap",
+            "acquire_confirm_frames": "initial target debounce",
+            "clearance_confirm_frames": "radar-clear handoff debounce",
+            "reach_confirm_frames": "target-centering debounce",
+            "high_reach_x_px": "high-altitude vertical image threshold",
+            "high_reach_y_px": "high-altitude lateral image threshold",
+            "low_reach_x_px": "low-altitude vertical image threshold",
+            "low_reach_y_px": "low-altitude lateral image threshold",
+            "high_hover_s": "hover before descent",
+            "low_hover_s": "hover before release",
+            "target_altitude_cm": "payload calibration altitude",
+            "return_altitude_cm": "road-follow return altitude",
+            "max_vz_cm_s": "height-loop speed cap",
+            "altitude_kp_s": "ALT_ADD proportional height gain",
+            "altitude_tolerance_cm": "height completion band",
+            "altitude_confirm_frames": "height completion debounce",
+            "altitude_phase_timeout_s": "descent/climb timeout",
+            "target_loss_timeout_s": "target reacquisition hold",
+            "approach_timeout_s": "maximum time to high centering",
+            "post_release_wait_s": "payload release settling wait",
+        }
+        for name, value in target_config.__dict__.items():
+            rows.append(
+                ParameterRecord(
+                    f"target_mission.{name}",
+                    value,
+                    fixed if name not in {"yaw_kp", "yaw_deadband_deg", "max_yaw_rate_deg_s", "max_yaw_accel_deg_s2", "offset_filter_tau_s", "offset_filter_max_rate_px_s", "max_planar_accel_cm_s2"} else unverified,
+                    target_purposes[name],
+                    name in {"target_vx_cm_s", "max_yaw_rate_deg_s", "max_yaw_accel_deg_s2", "forward_bearing_limit_deg", "max_planar_accel_cm_s2", "target_altitude_cm", "return_altitude_cm", "max_vz_cm_s", "altitude_kp_s", "altitude_tolerance_cm", "altitude_phase_timeout_s", "approach_timeout_s"},
+                )
+            )
     return [row.as_dict() for row in rows]
 
 

@@ -13,6 +13,12 @@ from .static_route_bypass import (
     StaticRouteBypassPlanner,
     StaticRouteBypassState,
 )
+from .purple_target_mission import (
+    PurpleTargetMissionConfig,
+    PurpleTargetMissionController,
+    PurpleTargetMissionDecision,
+    PurpleTargetMissionState,
+)
 
 __all__ = [
     "FrozenVisualConfig",
@@ -26,4 +32,8 @@ __all__ = [
     "StaticRouteBypassConfig",
     "StaticRouteBypassPlanner",
     "StaticRouteBypassState",
+    "PurpleTargetMissionConfig",
+    "PurpleTargetMissionController",
+    "PurpleTargetMissionDecision",
+    "PurpleTargetMissionState",
 ]

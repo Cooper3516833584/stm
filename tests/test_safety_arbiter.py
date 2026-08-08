@@ -1,4 +1,5 @@
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -11,11 +12,29 @@ from FlightController.Solutions.Safety import (
     RadarObstacleField,
     SafetyArbiter,
     SafetyConfig,
+    flight_status_from_fc,
 )
 
 
 def _healthy_flight():
     return FlightStatus(connected=True, mode=2, unlocked=True, roll_deg=0.0, pitch_deg=0.0)
+
+
+def test_flight_status_uses_alt_add_for_mission_height():
+    value = lambda item: SimpleNamespace(value=item)
+    fc = SimpleNamespace(
+        connected=True,
+        state=SimpleNamespace(
+            mode=value(2),
+            unlock=value(True),
+            bat=value(12.0),
+            rol=value(0.0),
+            pit=value(0.0),
+            alt_add=value(63),
+        ),
+    )
+
+    assert flight_status_from_fc(fc).alt_cm == 63
 
 
 def _radar_field(points):

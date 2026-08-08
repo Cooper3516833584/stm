@@ -1,0 +1,92 @@
+# 紫色目标追踪与投放任务
+
+该任务只在默认 `static-route` 融合入口启用。道路 NPU、紫色连通区域检测和双雷达从启动阶段并行运行；
+目标接管后道路结果不参与期望命令，但道路 NPU 不关闭，以便任务完成或放弃后立即恢复巡线。
+
+## 控制链
+
+```text
+道路期望 / 紫色目标状态机期望
+  → StaticRouteBypassPlanner
+  → SafetyArbiter
+  → send_command_safely
+  → 投放安全门（仅零速、雷达新鲜、planner normal、Safety OK）
+```
+
+目标状态为：
+
+```text
+ROAD_SEARCH → TARGET_CLEARANCE → TARGET_APPROACH
+ → HIGH_HOVER → DESCEND_60 → LOW_CALIBRATE → LOW_HOVER
+ → RELEASE_PENDING → POST_RELEASE_WAIT → ASCEND_100 → COMPLETE
+```
+
+目标丢失、30 秒未到达、终端阶段障碍冲突或高度阶段超时进入 `ABORT_RECOVERY`。放弃后先回到
+100 cm 再恢复巡线；若规划器自身已进入 `FAILSAFE_STOP` 或 `TIMEOUT_STOP`，任务不会重置规划器或
+绕过 Safety。
+
+## 目标与绕障并行规则
+
+- 连续 3 个不同捕获时间的有效目标结果才接管巡线。
+- 目标方位使用 `atan2(offset_y_px, offset_x_px)`；`+X` 为画面上方/机体前方，`+Y` 为画面左侧。
+- FC 偏航顺时针为正，因此目标左侧输出负 yaw，目标右侧输出正 yaw。
+- 方位绝对值超过 18° 时只转向；进入 18° 后目标前速为 13.2 cm/s，目标控制的 `vy` 永远为 0。
+- `static-route` 激活时屏蔽目标 yaw，由雷达生成净空 `vy`；规划器恢复 normal 且连续 3 帧雷达
+  新鲜、没有新障碍冲突后再恢复追踪。新冲突在规划器状态正式切换前也会立即暂停目标 yaw。
+- 高空悬停、下降、低空校准和投放前若绕障状态再次激活，放弃本次投放。
+
+## 高度和投放
+
+- 高空居中：连续 3 帧满足 `|offset_x|≤30`、`|offset_y|≤40`，悬停 2 秒。
+- 使用 `ALT_ADD` 闭环下降到 `60±5 cm`，最大垂速 10 cm/s，连续 3 帧确认。
+- 低空校准：连续 3 帧满足 `|offset_x|≤18`、`|offset_y|≤24`，悬停 1 秒。
+- 只有 planner normal、雷达新鲜、当前无障碍观测、Safety 为 OK、最终实时控制帧四轴全零时，真实飞行才调用一次
+  `set_digital_output(0, False)`；dry-run 只记录模拟投放。
+- 投放后停止紫色检测，等待 1 秒，再使用 ALT_ADD 闭环回升 `100±5 cm` 后恢复巡线。
+
+## 参数与依据
+
+| 参数 | 默认值 | 依据 |
+|---|---:|---|
+| 摄像头 | 640×480@30 FPS | 现有优化视觉配置 |
+| 控制频率 | 10 Hz | 现有融合入口主循环 |
+| 紫色检测频率 | 10 Hz | 与控制循环一致，避免逐个相机帧处理 |
+| 检测缩放上限 | 256 px | 现有低成本检测器 |
+| HSV H/S/V 门限 | 135–179 / 90 / 60 | 现有紫色连通区域实现 |
+| 最小连通面积 | 0.005 | 现有实现，约为画面 0.5% |
+| 目标 stale | 0.5 s | 与雷达 freshness 同级 |
+| 初次确认 | 3 帧 | 抑制单帧紫色噪声 |
+| 巡线最大 `vx` / `vy` | 22 / 12 cm/s | 当前优化实验配置 |
+| 目标前速 | 13.2 cm/s | 当前巡线最大 22 cm/s 的 60% |
+| 目标 `vy` | 0 cm/s | 固定需求；绕障 `vy` 例外 |
+| yaw Kp/死区/上限 | 0.45 / 4° / 18°/s | 当前 22 cm/s 巡线实验配置 |
+| yaw 加速度上限 | 50°/s² | 当前巡线实验配置 |
+| 前进方位门 | 18° | 当前巡线减速起始角 |
+| 偏移滤波 τ/变化率 | 0.12 s / 500 px/s | 当前巡线实验配置 |
+| 平面加速度上限 | 36 cm/s² | 当前巡线实验配置 |
+| 高/低居中门 | ±30,±40 / ±18,±24 px | 任务需求 |
+| 到达与净空确认 | 3 帧 | 沿用 static-route 确认策略 |
+| 目标丢失等待 | 2 s | 任务确认值 |
+| 到达高空目标超时 | 30 s | 任务确认值 |
+| 高/低悬停 | 2 s / 1 s | 任务需求 |
+| 下降/返回高度 | 60 / 100 cm | 任务需求，数据源仅 ALT_ADD |
+| 高度 Kp/最大垂速 | 0.5 s⁻¹ / 10 cm/s | 40 cm 高差先限速、近目标减速 |
+| 高度确认 | ±5 cm，连续 3 帧 | 任务确认值 |
+| 单高度阶段超时 | 12 s | 正常约 4 秒，保留传感器与加减速余量 |
+| 投放输出 | digital output 0=False | 任务需求；起飞前已置 True |
+| 投放后等待 | 1 s | 任务需求 |
+| 雷达 stale | 0.5 s | 现有 Safety |
+| 前方停车/减速 | 80 / 150 cm | 现有 Safety |
+| 减速速度上限 | 10 cm/s | 当前融合实验配置 |
+| 侧向停车 | 45 cm | 现有 Safety |
+| 绕障净空/回差 | 85 / 75 cm | static-route 冻结几何 |
+| 绕障前速/最大 `vy` | 13.2 / 12 cm/s | 当前 22 cm/s static-route 实验配置 |
+
+所有运行值也写入 `session.json` 的 `parameter_registry` 和 `target_mission_config`，用于复盘。
+
+## 兼容与关闭
+
+- `--disable-target-mission` 可在 static-route 中关闭该任务。
+- legacy、smooth-sidestep、circular 等旧实验模式不启动目标任务。
+- 目标任务不能与会退休雷达的 right-half handoff 组合。
+- process 模式通过独立事件停止目标线程；threaded 模式直接停止目标线程。两者均保留相机和道路 NPU。

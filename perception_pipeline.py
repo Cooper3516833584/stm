@@ -575,7 +575,13 @@ class PerceptionPipeline:
         offset_comp_config=None,
         target_enable: bool = True,
         target_max_dimension: int = 256,
+        target_hue_min: float = 135.0,
+        target_hue_max: float = 179.0,
+        target_saturation_min: float = 90.0,
+        target_value_min: float = 60.0,
         target_min_area_ratio: float = 0.005,
+        target_max_rate_hz: float = 10.0,
+        target_stale_timeout_s: float = 0.5,
     ) -> None:
         self.camera = CameraThread(
             camera_index=camera_index,
@@ -604,16 +610,28 @@ class PerceptionPipeline:
             self.target = PurpleTargetInferenceThread(
                 self.camera,
                 max_dimension=target_max_dimension,
+                hue_min=target_hue_min,
+                hue_max=target_hue_max,
+                saturation_min=target_saturation_min,
+                value_min=target_value_min,
                 min_area_ratio=target_min_area_ratio,
+                max_rate_hz=target_max_rate_hz,
+                stale_timeout_s=target_stale_timeout_s,
             )
 
     # ── lifecycle ───────────────────────────────────────────────────
 
     def start(self) -> None:
         self.camera.start()
-        self.yolo.start()
         if self.target is not None:
             self.target.start()
+        try:
+            self.yolo.start()
+        except Exception:
+            if self.target is not None:
+                self.target.stop()
+            self.camera.stop()
+            raise
 
     def stop(self) -> None:
         # Stop YOLO first (so it doesn't try to read frames while
@@ -634,6 +652,14 @@ class PerceptionPipeline:
         if self.target is None:
             return None, float("inf"), True
         return self.target.latest_result(max_age_s=max_age_s)
+
+    def disable_target(self) -> None:
+        """Stop only the low-cost target worker; keep camera and road NPU alive."""
+        target = self.target
+        if target is None:
+            return
+        target.stop()
+        self.target = None
 
     def latest_frame(self) -> tuple[Any, float]:
         """Return ``(frame, timestamp)`` — for recording / debug."""

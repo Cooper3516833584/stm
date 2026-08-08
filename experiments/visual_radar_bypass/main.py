@@ -62,6 +62,10 @@ from FlightController.Runtime import (
     ProcessRuntimeConfig,
 )
 from .parameter_registry import build_parameter_registry
+from .purple_target_mission import (
+    PurpleTargetMissionConfig,
+    PurpleTargetMissionController,
+)
 from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance
 
 
@@ -71,7 +75,10 @@ EXPERIMENTAL_PROFILE_STATUS = "EXPERIMENTAL_UNVALIDATED"
 
 
 def build_experimental_visual_config(
-    *, camera_index: int = 7, npu_model_path: str | None = None
+    *,
+    camera_index: int = 7,
+    npu_model_path: str | None = None,
+    target_enable: bool = True,
 ) -> FrozenVisualConfig:
     """Build the current 22 cm/s trial without changing the frozen v1 defaults."""
     base = FrozenVisualConfig(camera_index=camera_index)
@@ -79,6 +86,7 @@ def build_experimental_visual_config(
         base = replace(base, npu_model_path=npu_model_path)
     return replace(
         base,
+        target_enable=bool(target_enable),
         max_vx_cm_s=22.0,
         max_vy_cm_s=12.0,
         max_yaw_rate_deg_s=18.0,
@@ -165,6 +173,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tuning-log-every-n", type=int, default=2)
     parser.add_argument("--radar-snapshot-every-n", type=int, default=5)
     parser.add_argument("--no-record", action="store_true")
+    parser.add_argument(
+        "--disable-target-mission",
+        action="store_true",
+        help="Disable the purple-target payload mission in static-route mode",
+    )
     parser.add_argument("--enable-flight", action="store_true")
     parser.add_argument("--auto-takeoff", action="store_true")
     parser.add_argument(
@@ -196,6 +209,15 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--tuning-log-every-n must be a positive integer")
     if args.radar_snapshot_every_n <= 0:
         raise ValueError("--radar-snapshot-every-n must be a positive integer")
+    if (
+        args.bypass_planner == "static-route"
+        and not args.disable_target_mission
+        and args.right_half_radar_then_visual
+    ):
+        raise ValueError(
+            "purple target mission requires radars for the whole mission; "
+            "disable the target mission before using right-half radar retirement"
+        )
     if args.right_half_radar_then_visual:
         if args.bypass_planner != "legacy":
             raise ValueError("--right-half-radar-then-visual requires legacy planner")
@@ -238,9 +260,26 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     validate_args(args)
     actual_flight = bool(args.enable_flight)
+    target_mission_enabled = bool(
+        args.bypass_planner == "static-route"
+        and not args.disable_target_mission
+        and not args.circular_tube_bypass
+    )
     visual_config = build_experimental_visual_config(
         camera_index=args.camera_index,
         npu_model_path=args.model_npu,
+        target_enable=target_mission_enabled,
+    )
+    target_mission_config = PurpleTargetMissionConfig(
+        target_vx_cm_s=visual_config.max_vx_cm_s * 0.60,
+        yaw_kp=visual_config.tangent_kp_yaw,
+        yaw_deadband_deg=visual_config.angle_deadband_deg,
+        max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
+        max_yaw_accel_deg_s2=visual_config.max_yaw_accel_deg_s2,
+        forward_bearing_limit_deg=visual_config.curvature_slowdown_start_deg,
+        offset_filter_tau_s=visual_config.target_filter_tau_s,
+        offset_filter_max_rate_px_s=visual_config.target_filter_max_rate_px_s,
+        max_planar_accel_cm_s2=visual_config.max_planar_accel_cm_s2,
     )
     flight_config = FlightRuntimeConfig(
         takeoff_height_cm=args.takeoff_height_cm,
@@ -254,6 +293,8 @@ def main(argv: list[str] | None = None) -> None:
         radar_timeout_s=args.radar_timeout_s,
         tuning_log_every_n=args.tuning_log_every_n,
         radar_snapshot_every_n=args.radar_snapshot_every_n,
+        target_config=target_mission_config if target_mission_enabled else None,
+        visual_config=visual_config,
     )
     process_runtime = None
     if args.runtime_mode == "process":
@@ -269,6 +310,15 @@ def main(argv: list[str] | None = None) -> None:
                 instance_selection=visual_config.instance_selection,
                 flight_height_m=visual_config.flight_height_m,
                 offset_comp_config=CameraOffsetCompensationConfig(enabled=False),
+                target_enable=visual_config.target_enable,
+                target_max_dimension=visual_config.target_max_dimension,
+                target_hue_min=visual_config.target_hue_min,
+                target_hue_max=visual_config.target_hue_max,
+                target_saturation_min=visual_config.target_saturation_min,
+                target_value_min=visual_config.target_value_min,
+                target_min_area_ratio=visual_config.target_min_area_ratio,
+                target_max_rate_hz=visual_config.target_max_rate_hz,
+                target_stale_timeout_s=visual_config.target_stale_timeout_s,
                 upper_port=args.upper_port,
                 lower_port=args.lower_port,
                 radar_timeout_s=args.radar_timeout_s,
@@ -321,6 +371,10 @@ def main(argv: list[str] | None = None) -> None:
                 "tube_radius_cm": args.tube_radius_cm,
                 "tube_safety_radius_cm": args.tube_safety_radius_cm,
                 "parameter_registry": parameter_registry,
+                "target_mission_enabled": target_mission_enabled,
+                "target_mission_config": (
+                    target_mission_config.__dict__ if target_mission_enabled else None
+                ),
             },
         )
     )
@@ -364,6 +418,11 @@ def main(argv: list[str] | None = None) -> None:
         )
     right_half_handoff = (
         RightHalfRadarHandoff() if args.right_half_radar_then_visual else None
+    )
+    target_mission = (
+        PurpleTargetMissionController(target_mission_config)
+        if target_mission_enabled
+        else None
     )
     arbiter = SafetyArbiter(
         SafetyConfig(
@@ -441,6 +500,10 @@ def main(argv: list[str] | None = None) -> None:
             sample = guidance.sample(loop_start)
             planner_elapsed_us = 0.0
             previous_planner_state = planner.state
+            previous_target_state = (
+                target_mission.state if target_mission is not None else None
+            )
+            flight_status = flight_status_from_fc(fc)
             radar_retired = bool(
                 right_half_handoff is not None
                 and right_half_handoff.radar_disabled
@@ -448,7 +511,6 @@ def main(argv: list[str] | None = None) -> None:
             if radar_retired:
                 radar_age_s = None
                 radar_fresh = False
-                planned = sample.desired
             else:
                 points = radars.get_obstacle_points_body_cm(max_distance_cm=300.0)
                 if right_half_handoff is not None:
@@ -459,12 +521,43 @@ def main(argv: list[str] | None = None) -> None:
                     radars.connected
                     and radars.is_fresh(max_age_s=args.radar_timeout_s)
                 )
+
+            obstacle_conflict = False
+            conflict_probe = getattr(planner, "has_obstacle_conflict", None)
+            if not radar_retired and radar_fresh and callable(conflict_probe):
+                obstacle_conflict = bool(conflict_probe(radar_field))
+
+            target_decision = None
+            selected_desired = sample.desired
+            if target_mission is not None:
+                target_decision = target_mission.update(
+                    now_s=loop_start,
+                    road_desired=sample.desired,
+                    target=sample.target,
+                    target_stale=sample.target_stale,
+                    planner_state=planner_state_name(planner),
+                    radar_fresh=radar_fresh,
+                    altitude_cm=flight_status.alt_cm,
+                    obstacle_conflict=obstacle_conflict,
+                )
+                selected_desired = target_decision.desired
+
+            if radar_retired:
+                planned = selected_desired
+            else:
                 planner_started_ns = time.perf_counter_ns()
+                planner_options = {}
+                if target_decision is not None and target_decision.mission_owns_command:
+                    planner_options = {
+                        "guidance_usable": target_decision.guidance_usable,
+                        "preserve_guidance_yaw": target_decision.preserve_guidance_yaw,
+                    }
                 planned = planner.update(
-                    desired=sample.desired,
+                    desired=selected_desired,
                     perception=sample.perception,
                     radar_field=radar_field,
                     now_s=loop_start,
+                    **planner_options,
                 )
                 planner_elapsed_us = (
                     time.perf_counter_ns() - planner_started_ns
@@ -490,7 +583,7 @@ def main(argv: list[str] | None = None) -> None:
                     radar_age_s = None
                     radar_fresh = False
                     radar_retired = True
-                    planned = sample.desired
+                    planned = selected_desired
             active_arbiter = visual_only_arbiter if radar_retired else arbiter
             health = flight_health_from_sources(
                 fc=fc,
@@ -500,7 +593,7 @@ def main(argv: list[str] | None = None) -> None:
             )
             safe = active_arbiter.filter(
                 planned,
-                flight=flight_status_from_fc(fc),
+                flight=flight_status,
                 radar_connected=radar_fresh,
                 radar_age_s=radar_age_s,
                 radar_field=radar_field,
@@ -513,8 +606,49 @@ def main(argv: list[str] | None = None) -> None:
                 health,
                 dry_run=not actual_flight,
             )
+            payload_release_event = False
+            if target_mission is not None and target_mission.release_is_authorized(
+                planner_state=planner_state_name(planner),
+                radar_fresh=radar_fresh,
+                safety_state=safe.state,
+                command_allowed=decision.allowed,
+                final_command=decision.command,
+                obstacle_clear=not bool(
+                    planner.diagnostics().get("observation_valid", False)
+                ),
+            ):
+                if actual_flight:
+                    if fc is None:
+                        raise RuntimeError("payload release requested without FC")
+                    fc.set_digital_output(0, False)
+                    logger.warning("[PURPLE-TARGET] payload released: digital output 0=False")
+                else:
+                    logger.warning("[PURPLE-TARGET] dry-run payload release simulated")
+                target_mission.mark_payload_released(loop_start)
+                payload_release_event = True
+            if (
+                target_mission is not None
+                and target_mission.consume_disable_target_request()
+            ):
+                guidance.disable_target()
+                logger.info("[PURPLE-TARGET] target detector stopped; road NPU remains active")
             if indicator is not None:
                 state_name = planner_state_name(planner)
+                target_observation_ok = bool(
+                    sample.target is not None
+                    and getattr(sample.target, "found", False)
+                    and not sample.target_stale
+                )
+                mission_guidance_required = bool(
+                    target_mission is not None
+                    and target_mission.mission_active
+                    and target_mission.target_required
+                )
+                mission_nonvisual_phase = bool(
+                    target_mission is not None
+                    and target_mission.mission_active
+                    and not target_mission.target_required
+                )
                 indicator.update(
                     now_s=loop_start,
                     avoiding=is_avoiding(
@@ -528,9 +662,19 @@ def main(argv: list[str] | None = None) -> None:
                         radar_required=not radar_retired,
                         radar_fresh=radar_fresh,
                         camera_ok=sample.camera_ok,
-                        perception_stale=sample.perception_stale,
-                        road_found=bool(
-                            getattr(sample.perception, "is_road_found", False)
+                        perception_stale=(
+                            not target_observation_ok
+                            if mission_guidance_required
+                            else (False if mission_nonvisual_phase else sample.perception_stale)
+                        ),
+                        road_found=(
+                            target_observation_ok
+                            if mission_guidance_required
+                            else (
+                                True
+                                if mission_nonvisual_phase
+                                else bool(getattr(sample.perception, "is_road_found", False))
+                            )
                         ),
                     ),
                 )
@@ -540,7 +684,13 @@ def main(argv: list[str] | None = None) -> None:
                 report_applied(decision.command, dt_s, command_applied)
             planner_diagnostics = planner.diagnostics()
             planner_diagnostics["visual_vy_cm_s"] = sample.desired.vy_cm_s
+            planner_diagnostics["selected_guidance_vy_cm_s"] = selected_desired.vy_cm_s
             planner_diagnostics["planner_elapsed_us"] = planner_elapsed_us
+            target_mission_diagnostics = (
+                target_mission.diagnostics(loop_start)
+                if target_mission is not None
+                else None
+            )
             if planner.state != previous_planner_state:
                 logger.info(
                     "[VIS-RADAR][EVENT] state_transition={} -> {} reason={} encounter={} side={}",
@@ -549,6 +699,16 @@ def main(argv: list[str] | None = None) -> None:
                     planner_diagnostics.get("transition_reason"),
                     planner_diagnostics.get("encounter_id"),
                     planner_diagnostics.get("active_bypass_side"),
+                )
+            if (
+                target_mission is not None
+                and target_mission.state != previous_target_state
+            ):
+                logger.info(
+                    "[PURPLE-TARGET][EVENT] state_transition={} -> {} reason={}",
+                    getattr(previous_target_state, "value", previous_target_state),
+                    target_mission.state.value,
+                    target_mission.transition_reason,
                 )
             final_delta = {
                 "vx_cm_s": decision.command.vx_cm_s - previous_final_command.vx_cm_s,
@@ -578,9 +738,32 @@ def main(argv: list[str] | None = None) -> None:
                     "camera_ok": sample.camera_ok,
                     "controller": sample.diagnostics,
                 },
+                "purple_target": {
+                    "enabled_for_mission": target_mission is not None,
+                    "found": bool(
+                        sample.target is not None
+                        and getattr(sample.target, "found", False)
+                        and not sample.target_stale
+                    ),
+                    "offset_x_px": _float_or_none(
+                        getattr(sample.target, "offset_x_px", None)
+                    ),
+                    "offset_y_px": _float_or_none(
+                        getattr(sample.target, "offset_y_px", None)
+                    ),
+                    "capture_time_s": _float_or_none(
+                        getattr(sample.target, "capture_time_s", None)
+                    ),
+                    "age_s": _float_or_none(sample.target_age_s),
+                    "stale": sample.target_stale,
+                    "error": getattr(sample.target, "error", None),
+                    "mission": target_mission_diagnostics,
+                    "payload_release_event": payload_release_event,
+                },
                 "tube_obstacle_bypass": planner_diagnostics,
                 "commands": {
-                    "desired": sample.desired.as_fc_tuple(),
+                    "road_desired": sample.desired.as_fc_tuple(),
+                    "desired": selected_desired.as_fc_tuple(),
                     "planned": planned.as_fc_tuple(),
                     "safe": safe.command.as_fc_tuple(),
                     "final": decision.command.as_fc_tuple(),
@@ -618,7 +801,7 @@ def main(argv: list[str] | None = None) -> None:
                     multi_radar=radars,
                     radar_age_s=radar_age_s,
                     radar_connected=radar_fresh,
-                    desired=sample.desired,
+                    desired=selected_desired,
                     safe_command=decision.command,
                     decision_reason=decision.reason,
                     extra=extra,
@@ -627,7 +810,7 @@ def main(argv: list[str] | None = None) -> None:
                 recorder.record_command(
                     loop_count=loop_count,
                     now_s=loop_start,
-                    desired=sample.desired,
+                    desired=selected_desired,
                     safe_command=decision.command,
                     decision_reason=decision.reason,
                     extra=extra,
@@ -636,7 +819,7 @@ def main(argv: list[str] | None = None) -> None:
                 last_log_s = loop_start
                 logger.info(
                     "[VIS-RADAR] road={} err={} angle={} radar={} retired={} bypass={} "
-                    "target_y={} desired={} planned={} safe={} sent={}",
+                    "target_y={} mission={} desired={} planned={} safe={} sent={}",
                     getattr(sample.perception, "is_road_found", False),
                     _float_or_none(
                         getattr(sample.perception, "corrected_pixel_error", None)
@@ -648,7 +831,12 @@ def main(argv: list[str] | None = None) -> None:
                     radar_retired,
                     planner.state.value,
                     planner.target_y_cm,
-                    sample.desired.as_fc_tuple(),
+                    (
+                        target_mission.state.value
+                        if target_mission is not None
+                        else "disabled"
+                    ),
+                    selected_desired.as_fc_tuple(),
                     planned.as_fc_tuple(),
                     safe.command.as_fc_tuple(),
                     bool(actual_flight and decision.allowed),

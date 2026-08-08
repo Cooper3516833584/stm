@@ -152,6 +152,7 @@ class StaticRouteBypassPlanner:
         self._association_status = "idle"
         self._nearest_candidate_to_prediction_cm: float | None = None
         self._last_static_model_error_cm: float | None = None
+        self._preserve_guidance_yaw = True
 
     @property
     def active_bypass_side(self) -> int | None:
@@ -163,6 +164,14 @@ class StaticRouteBypassPlanner:
             return None
         return self._locked_side * self.config.target_surface_clearance_cm
 
+    def has_obstacle_conflict(self, radar_field: RadarObstacleField) -> bool:
+        """Report a current route conflict without advancing planner state."""
+
+        return self._observe(
+            radar_field,
+            tracking=self.state != StaticRouteBypassState.NORMAL,
+        ) is not None
+
     def update(
         self,
         *,
@@ -170,11 +179,18 @@ class StaticRouteBypassPlanner:
         perception,
         radar_field: RadarObstacleField,
         now_s: float,
+        guidance_usable: bool | None = None,
+        preserve_guidance_yaw: bool = True,
     ) -> Command:
         now = float(now_s)
+        self._preserve_guidance_yaw = bool(preserve_guidance_yaw)
         dt = self._step_dt(now)
         confirmation_due = self._confirmation_due(now)
-        road_usable = self._road_usable(perception, desired)
+        road_usable = (
+            self._road_usable(perception, desired)
+            if guidance_usable is None
+            else bool(guidance_usable)
+        )
         observation = self._observe(radar_field, tracking=self.state != StaticRouteBypassState.NORMAL)
         self._last_radar_forward_clear = radar_field.nearest_forward_obstacle_cm() is None
         self._accept_observation(observation, now, advance_counters=confirmation_due)
@@ -578,7 +594,7 @@ class StaticRouteBypassPlanner:
             self.config.avoidance_vx_cm_s,
             vy,
             desired.vz_cm_s,
-            desired.yaw_rate_deg_s,
+            desired.yaw_rate_deg_s if self._preserve_guidance_yaw else 0.0,
             _append_reason(desired.reason, f"static_route:{self.state.value}"),
         )
 
@@ -600,7 +616,7 @@ class StaticRouteBypassPlanner:
             _lerp(self.config.avoidance_vx_cm_s, desired.vx_cm_s, alpha),
             _lerp(0.0, desired.vy_cm_s, alpha),
             desired.vz_cm_s,
-            desired.yaw_rate_deg_s,
+            desired.yaw_rate_deg_s if self._preserve_guidance_yaw else 0.0,
             _append_reason(desired.reason, f"static_route:blend_back:alpha={alpha:.2f}"),
         )
 

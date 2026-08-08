@@ -34,6 +34,15 @@ class FrozenVisualConfig:
     postprocess_mode: str = "fast-main"
     instance_selection: str = "highest-confidence"
     flight_height_m: float = 1.0
+    target_enable: bool = True
+    target_max_dimension: int = 256
+    target_hue_min: float = 135.0
+    target_hue_max: float = 179.0
+    target_saturation_min: float = 90.0
+    target_value_min: float = 60.0
+    target_min_area_ratio: float = 0.005
+    target_max_rate_hz: float = 10.0
+    target_stale_timeout_s: float = 0.5
 
     max_vx_cm_s: float = 14.0
     max_vy_cm_s: float = 10.0
@@ -73,6 +82,9 @@ class VisualSample:
     frame: Any | None
     frame_time_s: float
     diagnostics: dict[str, object]
+    target: Any | None = None
+    target_age_s: float = float("inf")
+    target_stale: bool = True
 
 
 class FrozenVisualGuidance:
@@ -98,6 +110,15 @@ class FrozenVisualGuidance:
                 wb_g=1.0,
                 wb_b=1.0,
                 offset_comp_config=CameraOffsetCompensationConfig(enabled=False),
+                target_enable=cfg.target_enable,
+                target_max_dimension=cfg.target_max_dimension,
+                target_hue_min=cfg.target_hue_min,
+                target_hue_max=cfg.target_hue_max,
+                target_saturation_min=cfg.target_saturation_min,
+                target_value_min=cfg.target_value_min,
+                target_min_area_ratio=cfg.target_min_area_ratio,
+                target_max_rate_hz=cfg.target_max_rate_hz,
+                target_stale_timeout_s=cfg.target_stale_timeout_s,
             )
         else:
             from FlightController.Runtime import ProcessVisionPipeline
@@ -147,8 +168,16 @@ class FrozenVisualGuidance:
     def latest_perception(self):
         return self.pipeline.latest_perception()
 
+    def disable_target(self) -> None:
+        disable = getattr(self.pipeline, "disable_target", None)
+        if callable(disable):
+            disable()
+
     def sample(self, now_s: float) -> VisualSample:
         perception, age_s, stale = self.pipeline.latest_perception()
+        target, target_age_s, target_stale = self.pipeline.latest_target(
+            max_age_s=self.config.target_stale_timeout_s
+        )
         frame, frame_time_s = self.pipeline.latest_frame()
         usable = perception is not None and not stale
         desired = self.follower.update(
@@ -164,4 +193,7 @@ class FrozenVisualGuidance:
             frame=frame,
             frame_time_s=float(frame_time_s or 0.0),
             diagnostics=self.follower.last_diagnostics.as_dict(),
+            target=target,
+            target_age_s=float(target_age_s),
+            target_stale=bool(target_stale),
         )

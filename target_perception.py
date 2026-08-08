@@ -33,21 +33,33 @@ class PurpleTargetInferenceThread:
         camera_thread,
         *,
         max_dimension: int = 256,
+        hue_min: float = 135.0,
+        hue_max: float = 179.0,
+        saturation_min: float = 90.0,
+        value_min: float = 60.0,
         min_area_ratio: float = 0.005,
+        max_rate_hz: float = 10.0,
         poll_interval_s: float = 0.005,
-        stale_timeout_s: float = 1.0,
+        stale_timeout_s: float = 0.5,
     ):
         if int(max_dimension) < 32:
             raise ValueError("max_dimension must be at least 32")
         if not 0.0 < float(min_area_ratio) <= 1.0:
             raise ValueError("min_area_ratio must be within (0, 1]")
+        if float(max_rate_hz) <= 0.0:
+            raise ValueError("max_rate_hz must be greater than zero")
         self._frames = (
             camera_thread.subscribe_frames()
             if hasattr(camera_thread, "subscribe_frames")
             else camera_thread.frame_buffer
         )
         self._max_dimension = int(max_dimension)
+        self._hue_min = float(hue_min)
+        self._hue_max = float(hue_max)
+        self._saturation_min = float(saturation_min)
+        self._value_min = float(value_min)
         self._min_area_ratio = float(min_area_ratio)
+        self._minimum_period_s = 1.0 / float(max_rate_hz)
         self._poll_interval_s = float(poll_interval_s)
         self._stale_timeout_s = float(stale_timeout_s)
         self.target_buffer = None
@@ -91,18 +103,29 @@ class PurpleTargetInferenceThread:
 
     def _task(self) -> None:
         last_frame_id = id(None)
+        last_processed_s = 0.0
         while self._running:
             frame, frame_ts = self._frames.latest()
             if frame is None or id(frame) == last_frame_id:
                 time.sleep(self._poll_interval_s)
                 continue
+            now_s = time.monotonic()
+            remaining_s = self._minimum_period_s - (now_s - last_processed_s)
+            if last_processed_s > 0.0 and remaining_s > 0.0:
+                time.sleep(min(self._poll_interval_s, remaining_s))
+                continue
             last_frame_id = id(frame)
+            last_processed_s = now_s
             error = None
             try:
                 offset = find_purple_target_offset(
                     frame,
                     color_order="bgr",
                     max_dimension=self._max_dimension,
+                    hue_min=self._hue_min,
+                    hue_max=self._hue_max,
+                    saturation_min=self._saturation_min,
+                    value_min=self._value_min,
                     min_area_ratio=self._min_area_ratio,
                 )
             except Exception as exc:  # detector failures must not stop road following

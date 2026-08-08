@@ -432,11 +432,18 @@ def send_command_safely(
 
 def flight_status_from_fc(fc: Any | None) -> FlightStatus:
     health = flight_health_from_sources(fc=fc, radar_timeout_s=0.0)
+    alt_cm = None
+    if fc is not None:
+        try:
+            alt_cm = _field_value(getattr(getattr(fc, "state", None), "alt_add", None))
+        except Exception:
+            alt_cm = None
     return FlightStatus(
         connected=health.fc_connected,
         mode=health.fc_mode,
         unlocked=health.unlock,
         battery_v=health.battery_v,
+        alt_cm=alt_cm,
         roll_deg=health.roll_deg,
         pitch_deg=health.pitch_deg,
     )

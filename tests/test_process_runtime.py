@@ -16,6 +16,7 @@ from FlightController.Runtime.ProcessRuntime import (
     ProcessRadarClient,
     ProcessRuntime,
     ProcessRuntimeConfig,
+    ProcessVisionPipeline,
     RadarSnapshot,
     _SharedArrayRing,
     _drain_latest,
@@ -157,6 +158,27 @@ def test_latest_only_channel_discards_stale_item_without_blocking():
     assert _send_latest(output, "old") == 0
     assert _send_latest(output, "new") == 1
     assert _drain_latest(output, None) == "new"
+
+
+def test_process_pipeline_target_shutdown_does_not_stop_vision_worker():
+    class _Runtime:
+        def __init__(self):
+            self.target_stops = 0
+            self.vision_stops = 0
+
+        def disable_target(self):
+            self.target_stops += 1
+
+        def stop_vision_worker(self):
+            self.vision_stops += 1
+
+    runtime = _Runtime()
+    pipeline = ProcessVisionPipeline(runtime)
+
+    pipeline.disable_target()
+
+    assert runtime.target_stops == 1
+    assert runtime.vision_stops == 0
 
 
 def test_loop_rate_monitor_reports_work_and_deadlines():

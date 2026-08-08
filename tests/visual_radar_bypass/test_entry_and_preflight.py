@@ -9,6 +9,7 @@ import road_follow_main
 import road_trajectory_main
 from experiments.visual_radar_bypass import main
 from experiments.visual_radar_bypass.parameter_registry import build_parameter_registry
+from experiments.visual_radar_bypass.purple_target_mission import PurpleTargetMissionConfig
 from experiments.visual_radar_bypass.static_route_bypass import StaticRouteBypassConfig
 from experiments.visual_radar_bypass.flight_runtime import (
     wait_for_radars,
@@ -46,6 +47,7 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.record_dir == "/data/stm_records"
     assert args.tuning_log_every_n == 2
     assert args.radar_snapshot_every_n == 5
+    assert not args.disable_target_mission
     assert not hasattr(args, "synthetic_radar")
 
 
@@ -103,6 +105,32 @@ def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
         assert by_name[name]["requires_flight_tuning"]
 
 
+def test_target_registry_records_detection_control_height_and_safety_parameters():
+    visual = main.build_experimental_visual_config()
+    route = main.build_experimental_static_route_config(
+        visual_max_vx_cm_s=visual.max_vx_cm_s
+    )
+    registry = build_parameter_registry(
+        route,
+        radar_timeout_s=0.5,
+        tuning_log_every_n=2,
+        radar_snapshot_every_n=5,
+        target_config=PurpleTargetMissionConfig(),
+        visual_config=visual,
+    )
+    by_name = {row["parameter"]: row["value"] for row in registry}
+
+    assert by_name["control_rate_hz"] == 10.0
+    assert (by_name["camera_width"], by_name["camera_height"], by_name["camera_fps"]) == (640, 480, 30)
+    assert by_name["target_max_rate_hz"] == 10.0
+    assert by_name["target_stale_timeout_s"] == 0.5
+    assert by_name["road_max_vx_cm_s"] == 22.0
+    assert by_name["target_mission.target_vx_cm_s"] == 13.2
+    assert by_name["target_mission.target_altitude_cm"] == 60.0
+    assert by_name["target_mission.return_altitude_cm"] == 100.0
+    assert by_name["obstacle_stop_distance_cm"] == 80.0
+
+
 def test_smooth_sidestep_remains_explicit(tmp_path):
     args = main.parse_args(
         [
@@ -115,6 +143,28 @@ def test_smooth_sidestep_remains_explicit(tmp_path):
 
     main.validate_args(args)
     assert args.bypass_planner == "smooth-sidestep"
+
+
+def test_target_mission_can_be_disabled_for_static_route(tmp_path):
+    args = main.parse_args(
+        ["--model-npu", _model(tmp_path), "--disable-target-mission"]
+    )
+    main.validate_args(args)
+    assert args.disable_target_mission
+
+
+def test_target_mission_rejects_explicit_static_route_radar_retirement(tmp_path):
+    args = main.parse_args(
+        [
+            "--model-npu",
+            _model(tmp_path),
+            "--bypass-planner",
+            "static-route",
+            "--right-half-radar-then-visual",
+        ]
+    )
+    with pytest.raises(ValueError, match="target mission requires radars"):
+        main.validate_args(args)
 
 
 def test_legacy_forward_transition_duration_is_configurable(tmp_path):

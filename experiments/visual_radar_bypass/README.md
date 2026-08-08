@@ -20,6 +20,16 @@
 static-route 的冻结 v1 参数和状态机行为继续保留为回归基线，详见
 [STATIC_ROUTE_BYPASS.md](STATIC_ROUTE_BYPASS.md)。
 
+## 紫色目标与投放任务
+
+默认 static-route 入口同时启动 10 Hz 紫色连通区域检测。目标连续确认后，目标状态机暂时替代巡线
+期望命令，但仍经过同一个绕障规划器、Safety 和命令发送门；道路 NPU 全程保持运行。完成投放或
+放弃后只停止目标检测，并立即恢复巡线。完整状态、投放安全门和参数依据见
+[PURPLE_TARGET_MISSION.md](PURPLE_TARGET_MISSION.md)。
+
+诊断时可使用 `--disable-target-mission` 关闭该任务。legacy、smooth-sidestep 和 circular 旧模式
+不会启动目标任务。
+
 ## 指示灯
 
 | 飞行状态 | 指示灯 |
@@ -28,6 +38,7 @@ static-route 的冻结 v1 参数和状态机行为继续保留为回归基线，
 | 即将起飞 | 红灯，等待 5 秒 |
 | 正常巡线 | 绿灯 |
 | 正常避障 | 红灯 |
+| 紫色目标追踪/高度与投放任务 | 由任务和绕障健康状态决定；异常时红灯闪烁 |
 | 雷达、视觉、道路、Safety 或规划状态异常 | 红灯亮 0.2 秒、灭 0.2 秒循环 |
 
 指示灯只在真实飞行模式连接飞控后启用。dry-run 不连接飞控，不会改变实体灯或数字输出。

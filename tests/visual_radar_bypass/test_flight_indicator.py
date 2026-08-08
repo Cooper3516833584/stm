@@ -20,19 +20,16 @@ class _FakeFC:
         self.calls.append(("digital", channel, on))
 
 
-def test_pre_takeoff_countdown_orders_green_output_wait_and_red_warning():
+def test_ground_countdown_prepare_arms_payload_and_sets_red():
     fc = _FakeFC()
-    waits = []
     indicator = FusionFlightIndicator(fc)
 
-    indicator.pre_takeoff_countdown(sleep_fn=waits.append)
+    indicator.prepare_for_ground_countdown()
 
     assert fc.calls == [
-        ("led", *GREEN),
         ("digital", 0, True),
         ("led", *RED),
     ]
-    assert waits == [15.0, 5.0]
 
 
 def test_indicator_uses_green_for_road_yellow_for_target_red_for_avoidance_and_flashes_errors():

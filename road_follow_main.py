@@ -115,6 +115,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
     parser.add_argument("--camera-fps", type=int, default=30)
+    parser.add_argument(
+        "--disable-target",
+        action="store_true",
+        help="Disable purple target detection while retaining the shared camera stream",
+    )
+    parser.add_argument("--target-max-dimension", type=int, default=256)
+    parser.add_argument("--target-min-area-ratio", type=float, default=0.005)
     parser.add_argument("--camera", default=None, help="Deprecated alias; use --camera-index for numeric V4L2 devices")
     parser.add_argument("--width", type=int, default=None, help="Deprecated alias for --camera-width")
     parser.add_argument("--height", type=int, default=None, help="Deprecated alias for --camera-height")
@@ -471,6 +478,9 @@ def main(argv: list[str] | None = None) -> None:
                 wb_g=args.wb_g,
                 wb_b=args.wb_b,
                 offset_comp_config=offset_comp,
+                target_enable=not args.disable_target,
+                target_max_dimension=args.target_max_dimension,
+                target_min_area_ratio=args.target_min_area_ratio,
                 upper_port=args.upper_port,
                 lower_port=args.lower_port,
                 radar_timeout_s=args.radar_timeout_s,
@@ -667,6 +677,9 @@ def main(argv: list[str] | None = None) -> None:
                 wb_g=args.wb_g,
                 wb_b=args.wb_b,
                 offset_comp_config=offset_comp,
+                target_enable=not args.disable_target,
+                target_max_dimension=args.target_max_dimension,
+                target_min_area_ratio=args.target_min_area_ratio,
             )
         pipeline.start()
 
@@ -701,6 +714,10 @@ def main(argv: list[str] | None = None) -> None:
 
             # ── 1. Non-blocking: read latest perception + frame from pipeline
             perception, percept_age_s, percept_stale = pipeline.latest_perception()
+            if hasattr(pipeline, "latest_target"):
+                target, target_age_s, target_stale = pipeline.latest_target()
+            else:
+                target, target_age_s, target_stale = None, float("inf"), True
             camera_ok = pipeline.camera_ok
 
             frame, frame_ts = pipeline.latest_frame()
@@ -768,6 +785,14 @@ def main(argv: list[str] | None = None) -> None:
                 frame_age_s=frame_age_s,
                 fc_telemetry=fc_telemetry,
             )
+            diagnostic_extra["purple_target"] = {
+                "found": bool(target is not None and target.found and not target_stale),
+                "offset_x_px": getattr(target, "offset_x_px", None),
+                "offset_y_px": getattr(target, "offset_y_px", None),
+                "age_s": _float_or_none(target_age_s),
+                "stale": bool(target_stale),
+                "error": getattr(target, "error", None),
+            }
             diagnostic_extra["send_gate"] = {
                 "command": _command_extra(decision.command),
                 "allowed": bool(decision.allowed),
@@ -1040,6 +1065,10 @@ def _validate_flight_args(args: argparse.Namespace) -> None:
         raise ValueError("--takeoff-height-cm must be within the FC one-key takeoff range of 40..500")
     if args.no_radar and args.road_bypass_enable:
         raise ValueError("--road-bypass-enable requires --enable-radar")
+    if args.target_max_dimension < 32:
+        raise ValueError("--target-max-dimension must be at least 32")
+    if not 0.0 < args.target_min_area_ratio <= 1.0:
+        raise ValueError("--target-min-area-ratio must be within (0, 1]")
     for option in (
         "post_unlock_delay_s",
         "takeoff_timeout_s",

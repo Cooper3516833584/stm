@@ -37,6 +37,8 @@ class VisionSnapshot:
     camera_ok: bool
     perception: Any | None
     frame_ref: FrameRef | None
+    target: Any | None = None
+    target_capture_time_s: float = 0.0
     inference_ms: float = 0.0
     normalize_ms: float = 0.0
     preprocess_ms: float = 0.0
@@ -116,6 +118,9 @@ class ProcessRuntimeConfig:
     wb_r: float = 1.0
     wb_g: float = 1.0
     wb_b: float = 1.0
+    target_enable: bool = True
+    target_max_dimension: int = 256
+    target_min_area_ratio: float = 0.005
     upper_port: str = "/dev/ttySTM4"
     lower_port: str = "/dev/ttySTM9"
     radar_timeout_s: float = 0.5
@@ -455,6 +460,21 @@ class ProcessVisionPipeline:
         if self._last is None or self._last.frame_ref is None:
             return None, 0.0
         return self._last.frame_ref, self._last.frame_ref.capture_time_s
+
+    def latest_target(self, max_age_s: float | None = None):
+        snapshot = self.runtime.latest_vision()
+        if snapshot is not None:
+            self._last = snapshot
+        if self._last is None or self._last.target is None:
+            return None, float("inf"), True
+        max_age_s = self.stale_timeout_s if max_age_s is None else float(max_age_s)
+        capture_time_s = float(self._last.target_capture_time_s)
+        age = (
+            max(0.0, time.perf_counter() - capture_time_s)
+            if capture_time_s > 0.0
+            else float("inf")
+        )
+        return self._last.target, age, age > max_age_s
 
     @property
     def camera_ok(self) -> bool:

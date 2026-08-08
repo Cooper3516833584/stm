@@ -119,6 +119,37 @@ class SharedLatest:
             return self._value is not None
 
 
+class CameraFrameSubscription:
+    """Read-only latest-frame view owned by one visual consumer."""
+
+    __slots__ = ("_source",)
+
+    def __init__(self, source: "CameraFrameDistributor") -> None:
+        self._source = source
+
+    def latest(self) -> tuple[Any, float]:
+        return self._source.latest()
+
+    def age_s(self, now_s: float) -> float:
+        return self._source.age_s(now_s)
+
+    @property
+    def has_value(self) -> bool:
+        return self._source.has_value
+
+
+class CameraFrameDistributor(SharedLatest):
+    """Single camera publication point with independent consumer subscriptions.
+
+    Consumers receive the same latest frame and never call ``VideoCapture``.
+    The subclass keeps ``SharedLatest``'s lock-free-for-work semantics while
+    making the ownership boundary explicit to new visual modules.
+    """
+
+    def subscribe(self) -> CameraFrameSubscription:
+        return CameraFrameSubscription(self)
+
+
 # ── CameraThread ────────────────────────────────────────────────────────
 
 class CameraThread:
@@ -141,7 +172,9 @@ class CameraThread:
         self._height = height
         self._fps = fps
 
-        self.frame_buffer = SharedLatest()
+        self.frame_distributor = CameraFrameDistributor()
+        # Compatibility for existing road and recording callers.
+        self.frame_buffer = self.frame_distributor
         self._cap: Any = None
         self._thread: threading.Thread | None = None
         self._running = False
@@ -214,6 +247,10 @@ class CameraThread:
         if self.frame_buffer.age_s(time.monotonic()) > max_age_s:
             return None, 0.0
         return frame, ts
+
+    def subscribe_frames(self) -> CameraFrameSubscription:
+        """Return a read-only logical subscription to the camera stream."""
+        return self.frame_distributor.subscribe()
 
     @property
     def ok(self) -> bool:
@@ -303,6 +340,11 @@ class YOLOInferenceThread:
         stale_timeout_s: float = 1.0,
     ) -> None:
         self._camera = camera_thread
+        self._frames = (
+            camera_thread.subscribe_frames()
+            if hasattr(camera_thread, "subscribe_frames")
+            else camera_thread.frame_buffer
+        )
         self._model_path = model_path
         self._npu_model_path = npu_model_path
         self._inference_backend = inference_backend
@@ -423,7 +465,7 @@ class YOLOInferenceThread:
         last_frame_id = id(None)  # sentinel — any real frame will differ
 
         while self._running:
-            frame, frame_ts = self._camera.frame_buffer.latest()
+            frame, frame_ts = self._frames.latest()
             if frame is None:
                 time.sleep(self._poll_interval_s)
                 continue
@@ -531,6 +573,9 @@ class PerceptionPipeline:
         wb_g: float = 1.00,
         wb_b: float = 1.00,
         offset_comp_config=None,
+        target_enable: bool = True,
+        target_max_dimension: int = 256,
+        target_min_area_ratio: float = 0.005,
     ) -> None:
         self.camera = CameraThread(
             camera_index=camera_index,
@@ -552,16 +597,29 @@ class PerceptionPipeline:
             wb_b=wb_b,
             offset_comp_config=offset_comp_config,
         )
+        self.target = None
+        if target_enable:
+            from target_perception import PurpleTargetInferenceThread
+
+            self.target = PurpleTargetInferenceThread(
+                self.camera,
+                max_dimension=target_max_dimension,
+                min_area_ratio=target_min_area_ratio,
+            )
 
     # ── lifecycle ───────────────────────────────────────────────────
 
     def start(self) -> None:
         self.camera.start()
         self.yolo.start()
+        if self.target is not None:
+            self.target.start()
 
     def stop(self) -> None:
         # Stop YOLO first (so it doesn't try to read frames while
         # camera is shutting down)
+        if self.target is not None:
+            self.target.stop()
         self.yolo.stop()
         self.camera.stop()
 
@@ -570,6 +628,12 @@ class PerceptionPipeline:
     def latest_perception(self) -> tuple[Any, float, bool]:
         """Return ``(perception, age_s, is_stale)`` for the control loop."""
         return self.yolo.latest_result()
+
+    def latest_target(self, max_age_s: float | None = None):
+        """Return ``(PurpleTargetObservation | None, age_s, is_stale)``."""
+        if self.target is None:
+            return None, float("inf"), True
+        return self.target.latest_result(max_age_s=max_age_s)
 
     def latest_frame(self) -> tuple[Any, float]:
         """Return ``(frame, timestamp)`` — for recording / debug."""

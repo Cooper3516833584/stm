@@ -48,6 +48,9 @@ def vision_worker_main(config, frame_ring_descriptor, output, ready_event, stop_
             wb_g=config.wb_g,
             wb_b=config.wb_b,
             offset_comp_config=config.offset_comp_config,
+            target_enable=config.target_enable,
+            target_max_dimension=config.target_max_dimension,
+            target_min_area_ratio=config.target_min_area_ratio,
         )
         pipeline.start()
         ready_event.set()
@@ -77,6 +80,10 @@ def vision_worker_main(config, frame_ring_descriptor, output, ready_event, stop_
                     compact.debug_mask = None
                 now_s = time.perf_counter()
                 capture_s = max(0.0, now_s - max(0.0, float(age_s)))
+                target, _target_age_s, _target_stale = pipeline.latest_target()
+                target_capture_time_s = (
+                    float(target.capture_time_s) if target is not None else 0.0
+                )
                 stage_timing = dict(pipeline.yolo.last_stage_timing)
                 publish_drops += _send_latest(
                     output,
@@ -87,6 +94,8 @@ def vision_worker_main(config, frame_ring_descriptor, output, ready_event, stop_
                         camera_ok=bool(pipeline.camera_ok),
                         perception=compact,
                         frame_ref=latest_frame_ref,
+                        target=target,
+                        target_capture_time_s=target_capture_time_s,
                         inference_ms=float(pipeline.yolo.last_inference_ms),
                         normalize_ms=float(stage_timing.get("normalize_ms", 0.0)),
                         preprocess_ms=float(stage_timing.get("preprocess_ms", 0.0)),

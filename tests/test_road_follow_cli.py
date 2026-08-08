@@ -41,6 +41,20 @@ def test_radar_bypass_requires_radar_opt_in():
         road_follow_main._validate_flight_args(args)
 
 
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (["--target-max-dimension", "31"], "target-max-dimension"),
+        (["--target-min-area-ratio", "0"], "target-min-area-ratio"),
+    ],
+)
+def test_invalid_target_detector_parameters_are_rejected(options, message):
+    args = road_follow_main.parse_args(options)
+
+    with pytest.raises(ValueError, match=message):
+        road_follow_main._validate_flight_args(args)
+
+
 def test_auto_takeoff_rejects_sustained_loaded_battery_sag(monkeypatch):
     class _Field:
         def __init__(self, value):

@@ -25,6 +25,10 @@ ROAD_SEARCH → TARGET_CLEARANCE → TARGET_APPROACH
 100 cm 再恢复巡线；若规划器自身已进入 `FAILSAFE_STOP` 或 `TIMEOUT_STOP`，任务不会重置规划器或
 绕过 Safety。
 
+连续 3 帧确认目标并进入 `TARGET_CLEARANCE` 后，现有灯光仲裁显示黄灯，直到状态机进入
+`COMPLETE` 或 `ABORTED` 并把控制权交还巡线。目标任务中的正常避障优先显示红灯，净空后恢复
+黄灯；异常状态继续使用最高优先级的红灯闪烁。目标控制器不直接调用飞控协议。
+
 ## 目标与绕障并行规则
 
 - 连续 3 个不同捕获时间的有效目标结果才接管巡线。

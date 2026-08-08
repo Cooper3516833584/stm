@@ -7,6 +7,7 @@ from typing import Callable
 
 
 GREEN = (0, 255, 0)
+YELLOW = (255, 255, 0)
 RED = (255, 0, 0)
 OFF = (0, 0, 0)
 
@@ -34,6 +35,9 @@ class FusionFlightIndicator:
     def set_red(self) -> None:
         self._set_color(RED)
 
+    def set_yellow(self) -> None:
+        self._set_color(YELLOW)
+
     def pre_takeoff_countdown(
         self,
         *,
@@ -53,12 +57,15 @@ class FusionFlightIndicator:
         now_s: float,
         avoiding: bool,
         unexpected: bool,
+        target_active: bool = False,
     ) -> None:
         if unexpected:
             phase = int(max(0.0, float(now_s)) / self.flash_period_s)
             self._set_color(RED if phase % 2 == 0 else OFF)
         elif avoiding:
             self.set_red()
+        elif target_active:
+            self.set_yellow()
         else:
             self.set_green()
 
@@ -108,6 +115,7 @@ __all__ = [
     "GREEN",
     "OFF",
     "RED",
+    "YELLOW",
     "UNEXPECTED_PLANNER_STATES",
     "is_avoiding",
     "is_unexpected",

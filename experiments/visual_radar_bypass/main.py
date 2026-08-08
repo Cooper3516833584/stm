@@ -711,6 +711,14 @@ def main(argv: list[str] | None = None) -> None:
                             )
                         ),
                     ),
+                    # Mission-active begins only after the configured target
+                    # confirmation frames and remains true through completion
+                    # or abort recovery.  The indicator policy, rather than
+                    # the mission controller, owns the FC LED command.
+                    target_active=bool(
+                        target_mission is not None
+                        and target_mission.mission_active
+                    ),
                 )
             command_applied = bool(actual_flight and decision.allowed)
             report_applied = getattr(planner, "report_applied_command", None)

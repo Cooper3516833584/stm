@@ -262,6 +262,25 @@ def test_signed_preview_turn_reports_direction_and_consistency():
     assert consistency >= 0.60
 
 
+def test_signed_preview_turn_does_not_read_beyond_final_target_horizon():
+    points = [
+        (320.0, 320.0),
+        (320.0, 300.0),
+        (325.0, 280.0),
+        (340.0, 260.0),
+        (365.0, 245.0),
+        (395.0, 238.0),
+        (360.0, 225.0),
+        (320.0, 205.0),
+        (280.0, 180.0),
+    ]
+    follower = _follower(tangent_window_points=3)
+
+    turn, _ = follower._signed_preview_turn_deg(points, 0, 5)
+
+    assert turn > 0.0
+
+
 def test_yaw_feedforward_acts_before_feedback_and_is_clamped():
     points = [
         (320.0, 300.0),
@@ -457,15 +476,49 @@ def test_centerline_x_at_camera_y_interpolates_and_falls_back_safely():
     follower = _follower()
 
     assert follower._centerline_x_at_camera_y(
-        [(300.0, 300.0), (340.0, 200.0)], 240.0
+        [(300.0, 300.0), (340.0, 200.0)], 240.0, 0, 320.0
     ) == pytest.approx(324.0)
     assert follower._centerline_x_at_camera_y(
-        [(300.0, 300.0), (340.0, 280.0)], 240.0
+        [(300.0, 300.0), (340.0, 280.0)], 240.0, 0, 320.0
     ) == pytest.approx(340.0)
     assert follower._centerline_x_at_camera_y(
-        [(300.0, 240.0), (340.0, 240.0)], 240.0
+        [(300.0, 240.0), (340.0, 240.0)], 240.0, 0, 320.0
     ) == pytest.approx(320.0)
-    assert follower._centerline_x_at_camera_y([], 240.0) is None
+    assert follower._centerline_x_at_camera_y([], 240.0, 0, 320.0) is None
+
+
+def test_centerline_x_at_camera_y_prefers_crossing_near_nearest_index():
+    points = [
+        (300.0, 300.0),
+        (300.0, 240.0),
+        (340.0, 200.0),
+        (500.0, 180.0),
+        (520.0, 220.0),
+        (500.0, 260.0),
+        (460.0, 300.0),
+    ]
+    follower = _follower()
+
+    result = follower._centerline_x_at_camera_y(points, 240.0, 1, 320.0)
+
+    assert result == pytest.approx(300.0)
+
+
+def test_centerline_x_at_camera_y_can_select_far_crossing_when_nearest_index_moves():
+    points = [
+        (300.0, 300.0),
+        (300.0, 240.0),
+        (340.0, 200.0),
+        (500.0, 180.0),
+        (520.0, 220.0),
+        (500.0, 260.0),
+        (460.0, 300.0),
+    ]
+    follower = _follower()
+
+    result = follower._centerline_x_at_camera_y(points, 240.0, 4, 320.0)
+
+    assert result == pytest.approx(510.0)
 
 
 @pytest.mark.parametrize(
@@ -576,6 +629,24 @@ def test_planar_acceleration_and_deceleration_use_independent_rates():
     assert decelerated[0] == pytest.approx(34.0)
     assert decelerated[4] == pytest.approx(120.0)
     assert not decelerated[5]
+
+
+def test_planar_deceleration_limiter_clamps_large_speed_drop():
+    result = TrajectoryPointFollower._limit_planar_acceleration(
+        20.0,
+        0.0,
+        45.0,
+        0.0,
+        max_accel_cm_s2=55.0,
+        max_decel_cm_s2=120.0,
+        dt_s=0.1,
+    )
+
+    assert result[0] == pytest.approx(33.0)
+    assert result[1] == pytest.approx(0.0)
+    assert result[2]
+    assert result[4] == pytest.approx(120.0)
+    assert result[5]
 
 
 def test_planar_acceleration_limit_brakes_before_direction_reversal():

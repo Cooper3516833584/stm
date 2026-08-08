@@ -298,6 +298,8 @@ class TrajectoryPointFollower:
         centerline_x_at_camera_y_px = self._centerline_x_at_camera_y(
             points,
             center_y,
+            nearest_index,
+            center_x,
         )
         current_cross_track_px = (
             centerline_x_at_camera_y_px - center_x
@@ -565,6 +567,37 @@ class TrajectoryPointFollower:
             return -dx, -dy
         return dx, dy
 
+    def _local_forward_tangent_bounded(
+        self,
+        points: list[Point],
+        index: int,
+        *,
+        min_index: int,
+        max_index: int,
+    ) -> Point:
+        if not points:
+            return 0.0, -1.0
+
+        min_index = max(0, min(int(min_index), len(points) - 1))
+        max_index = max(min_index, min(int(max_index), len(points) - 1))
+        index = max(min_index, min(int(index), max_index))
+        window = max(1, int(self.config.tangent_window_points))
+        first = max(min_index, index - window)
+        last = min(max_index, index + window)
+        if first == last:
+            if last < max_index:
+                last += 1
+            elif first > min_index:
+                first -= 1
+
+        dx = points[last][0] - points[first][0]
+        dy = points[last][1] - points[first][1]
+        if math.hypot(dx, dy) < 1e-6:
+            return 0.0, -1.0
+        if dy > 0.0:
+            return -dx, -dy
+        return dx, dy
+
     def _adaptive_lookahead_px(self, current_speed_cm_s: float) -> float:
         minimum = max(0.0, float(self.config.min_forward_lookahead_px))
         maximum = max(minimum, float(self.config.max_forward_lookahead_px))
@@ -679,7 +712,12 @@ class TrajectoryPointFollower:
         )
         headings = []
         for index in probe_indices:
-            tangent_dx, tangent_dy = self._local_forward_tangent(points, index)
+            tangent_dx, tangent_dy = self._local_forward_tangent_bounded(
+                points,
+                index,
+                min_index=nearest_index,
+                max_index=target_index,
+            )
             headings.append(math.degrees(math.atan2(tangent_dx, -tangent_dy)))
         deltas = [
             _wrap_angle_deg(second - first)
@@ -736,22 +774,37 @@ class TrajectoryPointFollower:
     def _centerline_x_at_camera_y(
         points: list[Point],
         center_y: float,
+        nearest_index: int,
+        center_x: float,
     ) -> float | None:
         if not points:
             return None
-        crossings: list[tuple[float, float]] = []
-        for first, second in zip(points, points[1:]):
+        nearest_index = int(_clamp(nearest_index, 0, len(points) - 1))
+        crossings: list[tuple[int, float, float]] = []
+        for index, (first, second) in enumerate(zip(points, points[1:])):
             x1, y1 = first
             x2, y2 = second
             if abs(y2 - y1) < 1e-9:
                 if abs(center_y - y1) < 1e-9:
-                    crossings.append((0.0, 0.5 * (x1 + x2)))
+                    x = 0.5 * (x1 + x2)
+                    distance_to_nearest = min(
+                        abs(index - nearest_index),
+                        abs(index + 1 - nearest_index),
+                    )
+                    crossings.append(
+                        (distance_to_nearest, abs(x - center_x), x)
+                    )
                 continue
             if min(y1, y2) <= center_y <= max(y1, y2):
                 ratio = (center_y - y1) / (y2 - y1)
-                crossings.append((abs(ratio - 0.5), x1 + ratio * (x2 - x1)))
+                x = x1 + ratio * (x2 - x1)
+                distance_to_nearest = min(
+                    abs(index - nearest_index),
+                    abs(index + 1 - nearest_index),
+                )
+                crossings.append((distance_to_nearest, abs(x - center_x), x))
         if crossings:
-            return min(crossings, key=lambda item: item[0])[1]
+            return min(crossings, key=lambda item: (item[0], item[1]))[2]
         return min(points, key=lambda point: abs(point[1] - center_y))[0]
 
     @staticmethod

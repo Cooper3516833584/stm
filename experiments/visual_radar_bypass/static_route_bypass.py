@@ -71,6 +71,15 @@ class StaticRouteBypassConfig:
     edge_missing_frames: int = 3
     activation_frames: int = 2
     clearance_frames: int = 3
+    # ``None`` preserves the frozen v1 predicted-rear-margin completion.
+    # The current 22 cm/s profile sets 1.5 s and uses a fresh acquisition gate
+    # instead of tracking the old tube through CLEARANCE_RUN.
+    clearance_run_s: float | None = None
+    # Optional current-profile radial gates.  ``None`` preserves the frozen
+    # v1 10..180 cm acquisition rectangle.
+    normal_activation_radius_cm: float | None = None
+    clearance_reacquire_radius_cm: float | None = None
+    trusted_point_cloud_max_x_cm: float = 300.0
     pass_complete_frames: int = 3
     rear_margin_cm: float = 20.0
     translation_credit_ratio: float = 0.70
@@ -130,6 +139,7 @@ class StaticRouteBypassPlanner:
         self._clearance_count = 0
         self._missing_count = 0
         self._pass_complete_count = 0
+        self._clearance_forward_s = 0.0
         self._forward_decrease_count = 0
         self._static_model_bad_count = 0
         self._encounter_started_s: float | None = None
@@ -167,9 +177,23 @@ class StaticRouteBypassPlanner:
     def has_obstacle_conflict(self, radar_field: RadarObstacleField) -> bool:
         """Report a current route conflict without advancing planner state."""
 
+        timed_clearance = bool(
+            self.state == StaticRouteBypassState.CLEARANCE_RUN
+            and self.config.clearance_run_s is not None
+        )
         return self._observe(
             radar_field,
-            tracking=self.state != StaticRouteBypassState.NORMAL,
+            tracking=(
+                self.state != StaticRouteBypassState.NORMAL
+                and not timed_clearance
+            ),
+            acquisition_radius_cm=(
+                self.config.clearance_reacquire_radius_cm
+                if timed_clearance
+                else self.config.normal_activation_radius_cm
+                if self.state == StaticRouteBypassState.NORMAL
+                else None
+            ),
         ) is not None
 
     def update(
@@ -191,9 +215,35 @@ class StaticRouteBypassPlanner:
             if guidance_usable is None
             else bool(guidance_usable)
         )
-        observation = self._observe(radar_field, tracking=self.state != StaticRouteBypassState.NORMAL)
+        timed_clearance = bool(
+            self.state == StaticRouteBypassState.CLEARANCE_RUN
+            and self.config.clearance_run_s is not None
+        )
+        observation = self._observe(
+            radar_field,
+            tracking=(
+                self.state != StaticRouteBypassState.NORMAL
+                and not timed_clearance
+            ),
+            acquisition_radius_cm=(
+                self.config.clearance_reacquire_radius_cm
+                if timed_clearance
+                else self.config.normal_activation_radius_cm
+                if self.state == StaticRouteBypassState.NORMAL
+                else None
+            ),
+        )
         self._last_radar_forward_clear = radar_field.nearest_forward_obstacle_cm() is None
-        self._accept_observation(observation, now, advance_counters=confirmation_due)
+        if timed_clearance:
+            # This is a new-obstacle acquisition result, not another
+            # measurement of the tube that already left through the side edge.
+            self._observation = observation
+        else:
+            self._accept_observation(
+                observation,
+                now,
+                advance_counters=confirmation_due,
+            )
 
         if self.state in {StaticRouteBypassState.FAILSAFE_STOP, StaticRouteBypassState.TIMEOUT_STOP}:
             return self._stop_command(desired, self.state.value)
@@ -296,6 +346,31 @@ class StaticRouteBypassPlanner:
             return self._avoidance_command(desired, now)
 
         if self.state == StaticRouteBypassState.CLEARANCE_RUN:
+            if self.config.clearance_run_s is not None:
+                if observation is not None:
+                    # Any candidate interrupts the continuous clear-forward
+                    # window.  Require the normal two acquisition frames before
+                    # beginning a new independently side-locked encounter.
+                    self._clearance_forward_s = 0.0
+                    if confirmation_due:
+                        self._intrusion_count += 1
+                    if self._intrusion_count >= max(
+                        1, int(self.config.activation_frames)
+                    ):
+                        self._start_encounter(observation, radar_field, now)
+                        return self._avoidance_command(desired, now)
+                else:
+                    self._intrusion_count = 0
+                if self._clearance_forward_s + 1e-9 >= max(
+                    0.0, float(self.config.clearance_run_s)
+                ):
+                    self._transition(
+                        StaticRouteBypassState.WAIT_VISUAL,
+                        "clearance_forward_time_complete",
+                        now,
+                    )
+                    return self._stop_command(desired, "wait_visual")
+                return self._avoidance_command(desired, now)
             if observation is not None and observation.center_x_cm > 0.0:
                 self._edge_armed = abs(observation.bearing_deg) >= self.config.edge_arm_deg
                 self._transition(
@@ -340,6 +415,17 @@ class StaticRouteBypassPlanner:
 
     def report_applied_command(self, final_command: Command, dt_s: float, applied: bool) -> None:
         self._last_applied = bool(applied)
+        if (
+            self.state == StaticRouteBypassState.CLEARANCE_RUN
+            and self.config.clearance_run_s is not None
+        ):
+            if applied and float(final_command.vx_cm_s) > 0.0:
+                self._clearance_forward_s += max(0.0, min(0.5, float(dt_s)))
+            else:
+                # The requirement is one continuous forward interval.  A
+                # Safety hard/obstacle stop or an unapplied frame restarts it.
+                self._clearance_forward_s = 0.0
+            return
         if not applied or self._predicted_center.size != 2 or self.state not in self.ACTIVE_STATES:
             return
         dt = max(0.0, min(0.5, float(dt_s)))
@@ -382,6 +468,7 @@ class StaticRouteBypassPlanner:
         self._association_status = "idle"
         self._nearest_candidate_to_prediction_cm = None
         self._last_static_model_error_cm = None
+        self._clearance_forward_s = 0.0
 
     def diagnostics(self) -> dict[str, object]:
         observation = self._observation
@@ -411,6 +498,7 @@ class StaticRouteBypassPlanner:
             "edge_armed": self._edge_armed,
             "edge_missing_count": self._missing_count,
             "pass_complete_count": self._pass_complete_count,
+            "clearance_forward_s": self._clearance_forward_s,
             "credited_translation_cm": self._credited_translation_cm,
             "credited_yaw_deg": self._credited_yaw_deg,
             "last_applied": self._last_applied,
@@ -424,6 +512,22 @@ class StaticRouteBypassPlanner:
 
     def _start_encounter(self, observation: StaticTubeObservation, radar_field: RadarObstacleField, now: float) -> None:
         self.encounter_id += 1
+        self._observation = observation
+        self._predicted_center = np.asarray(
+            [observation.center_x_cm, observation.center_y_cm],
+            dtype=float,
+        )
+        self._intrusion_count = 0
+        self._clearance_count = 0
+        self._missing_count = 0
+        self._pass_complete_count = 0
+        self._clearance_forward_s = 0.0
+        self._forward_decrease_count = 0
+        self._static_model_bad_count = 0
+        self._last_static_model_error_cm = None
+        self._last_observed_x_cm = observation.center_x_cm
+        self._last_seen_s = now
+        self._last_outward_vy_cm_s = 0.0
         self._locked_side = self._choose_bypass_side(observation, radar_field)
         self._encounter_started_s = now
         self._credited_translation_cm = 0.0
@@ -461,7 +565,13 @@ class StaticRouteBypassPlanner:
             self._forward_decrease_count = 0
         self._last_observed_x_cm = observation.center_x_cm
 
-    def _observe(self, radar_field: RadarObstacleField, *, tracking: bool) -> StaticTubeObservation | None:
+    def _observe(
+        self,
+        radar_field: RadarObstacleField,
+        *,
+        tracking: bool,
+        acquisition_radius_cm: float | None = None,
+    ) -> StaticTubeObservation | None:
         points = np.asarray(getattr(radar_field, "points_body_cm", np.empty((0, 2))), dtype=float)
         if points.size == 0:
             self._association_status = "no_points"
@@ -473,11 +583,25 @@ class StaticRouteBypassPlanner:
         if tracking:
             mask &= np.linalg.norm(points, axis=1) <= 300.0
         else:
-            mask &= (
-                (points[:, 0] >= self.config.min_x_cm)
-                & (points[:, 0] <= self.config.lookahead_cm)
-                & (np.abs(points[:, 1]) <= self.config.intrusion_half_width_cm)
-            )
+            if acquisition_radius_cm is None:
+                mask &= (
+                    (points[:, 0] >= self.config.min_x_cm)
+                    & (points[:, 0] <= self.config.lookahead_cm)
+                    & (np.abs(points[:, 1]) <= self.config.intrusion_half_width_cm)
+                )
+            else:
+                # Current fused profile: use the full trusted radar X range,
+                # retain the existing near-body/lateral gates, and apply the
+                # state-specific Euclidean body-radius threshold.
+                mask &= (
+                    (points[:, 0] > self.config.min_x_cm)
+                    & (points[:, 0] < self.config.trusted_point_cloud_max_x_cm)
+                    & (np.abs(points[:, 1]) <= self.config.intrusion_half_width_cm)
+                    & (
+                        np.linalg.norm(points, axis=1)
+                        < max(0.0, float(acquisition_radius_cm))
+                    )
+                )
         candidates = points[mask]
         if len(candidates) < self.config.min_cluster_points:
             self._association_status = "insufficient_candidates"
@@ -661,6 +785,16 @@ class StaticRouteBypassPlanner:
         self._phase_started_s = float(now)
         if new_state in {StaticRouteBypassState.TRACK_LOST_HOLD, StaticRouteBypassState.PATH_LOST_HOLD}:
             self._hold_started_s = float(now)
+        if (
+            new_state == StaticRouteBypassState.CLEARANCE_RUN
+            and self.config.clearance_run_s is not None
+        ):
+            # The old tube has completed its expected side-edge exit.  The
+            # timed profile deliberately stops propagating or associating it.
+            self._observation = None
+            self._predicted_center = np.empty((0,), dtype=float)
+            self._intrusion_count = 0
+            self._clearance_forward_s = 0.0
 
     def _diverge_state(self) -> StaticRouteBypassState:
         return StaticRouteBypassState.DIVERGE_LEFT if (self._locked_side or 1) > 0 else StaticRouteBypassState.DIVERGE_RIGHT

@@ -94,12 +94,16 @@ def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
     assert visual.max_vx_cm_s == 22.0
     assert route.avoidance_forward_ratio == 0.60
     assert route.avoidance_vx_cm_s == pytest.approx(13.2)
+    assert route.clearance_run_s == 1.5
+    assert route.normal_activation_radius_cm == 100.0
+    assert route.clearance_reacquire_radius_cm == 80.0
     for name in (
         "visual_max_vx_cm_s",
         "avoidance_vx_cm_s",
         "max_outward_vy_cm_s",
         "lateral_kp_s",
         "ramp_in_s",
+        "clearance_run_s",
     ):
         assert by_name[name]["source"] == "UNVERIFIED_TUNING"
         assert by_name[name]["requires_flight_tuning"]
@@ -132,6 +136,9 @@ def test_target_registry_records_detection_control_height_and_safety_parameters(
     assert by_name["road_edge_recovery_max_vy_cm_s"] == 12.0
     assert by_name["road_edge_yaw_max_deg_s"] == 3.0
     assert by_name["road_edge_emergency_vx_cap_cm_s"] == 18.5
+    assert by_name["clearance_run_s"] == 1.5
+    assert by_name["normal_activation_radius_cm"] == 100.0
+    assert by_name["clearance_reacquire_radius_cm"] == 80.0
     assert by_name["target_mission.target_vx_cm_s"] == 13.2
     assert by_name["target_mission.target_altitude_cm"] == 60.0
     assert by_name["target_mission.return_altitude_cm"] == 100.0

@@ -84,7 +84,7 @@ def planner_state_name(planner) -> str:
 def is_avoiding(*, planner_state: str, safety_state: str) -> bool:
     return bool(
         planner_state != "normal"
-        or safety_state in {"LIMITED", "OBSTACLE_STOP"}
+        or safety_state == "OBSTACLE_STOP"
     )
 
 

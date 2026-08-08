@@ -68,6 +68,23 @@ def test_default_policy_is_front_180_and_sixty_percent_forward_speed():
     assert config.avoidance_vx_cm_s == pytest.approx(8.4)
 
 
+def test_current_normal_activation_uses_10_to_300_x_and_100_cm_body_radius():
+    config = replace(
+        StaticRouteBypassConfig(),
+        normal_activation_radius_cm=100.0,
+    )
+    planner = StaticRouteBypassPlanner(config)
+
+    _update(planner, _field(_cluster(110.0, 0.0)), 1.0)
+    _update(planner, _field(_cluster(110.0, 0.0)), 1.1)
+    assert planner.state == StaticRouteBypassState.NORMAL
+
+    near_low_x = _field(_cluster(11.0, 40.0))
+    _update(planner, near_low_x, 1.2)
+    _update(planner, near_low_x, 1.3)
+    assert planner.state == StaticRouteBypassState.DIVERGE_RIGHT
+
+
 def test_target_guidance_override_allows_bypass_without_road_and_suppresses_yaw():
     planner = StaticRouteBypassPlanner()
     field = _field(_cluster(100.0, -40.0))
@@ -120,6 +137,7 @@ def test_flight_validated_v1_profile_defaults_are_frozen():
         config.max_outward_vy_cm_s,
         config.association_radius_cm,
         config.edge_arm_deg,
+        config.clearance_run_s,
         config.rear_margin_cm,
         config.translation_credit_ratio,
         config.track_lost_hold_s,
@@ -132,6 +150,7 @@ def test_flight_validated_v1_profile_defaults_are_frozen():
         8.0,
         50.0,
         80.0,
+        None,
         20.0,
         0.70,
         1.0,
@@ -314,6 +333,97 @@ def test_expected_90_degree_exit_requires_rear_margin_before_visual_blend():
     assert not visual_return_seen_early
     assert planner.state == StaticRouteBypassState.BLEND_BACK
     assert planner.diagnostics()["predicted_center_x_cm"] + config.tube_radius_cm + config.rear_margin_cm <= 0.0
+
+
+def test_timed_clearance_uses_applied_forward_time_and_ignores_distant_background():
+    config = replace(
+        StaticRouteBypassConfig(),
+        target_surface_clearance_cm=70.0,
+        reshift_surface_clearance_cm=60.0,
+        clearance_run_s=1.5,
+        blend_back_s=0.2,
+    )
+    planner = StaticRouteBypassPlanner(config)
+    _activate_right(planner)
+    for index, point in enumerate(
+        ((90.0, -60.0), (65.0, -75.0), (45.0, -80.0), (12.0, -90.0), (6.0, -90.0))
+    ):
+        _update(planner, _field(_cluster(*point)), 1.2 + index * 0.1)
+    assert planner.state == StaticRouteBypassState.SIDE_PASS_CONFIRM
+    for index in range(3):
+        _update(planner, _field([]), 1.7 + index * 0.1)
+    assert planner.state == StaticRouteBypassState.CLEARANCE_RUN
+    assert planner.diagnostics()["predicted_center_x_cm"] is None
+
+    # Stopped or rejected frames do not count toward the continuous 1.5 s.
+    planner.report_applied_command(Command.zero("safety_stop"), 0.5, True)
+    planner.report_applied_command(Command(8.4, 0.0, 0.0, 0.0), 0.5, False)
+    assert planner.diagnostics()["clearance_forward_s"] == 0.0
+
+    # This return keeps the legacy ±75 cm forward corridor non-empty, but it
+    # is beyond the 180 cm route-acquisition lookahead and must not block the
+    # simplified clearance timer.
+    distant_background = _field(_cluster(220.0, 0.0))
+    now = 2.0
+    for _ in range(15):
+        command = _update(planner, distant_background, now)
+        assert planner.state == StaticRouteBypassState.CLEARANCE_RUN
+        planner.report_applied_command(command, 0.1, True)
+        now += 0.1
+
+    assert not planner.diagnostics()["front_corridor_clear"]
+    assert planner.diagnostics()["clearance_forward_s"] == pytest.approx(1.5)
+    stopped = _update(planner, distant_background, now)
+    assert planner.state == StaticRouteBypassState.WAIT_VISUAL
+    assert planner.transition_reason == "clearance_forward_time_complete"
+    assert stopped.vx_cm_s == 0.0
+    _update(planner, distant_background, now + 0.1)
+    assert planner.state == StaticRouteBypassState.BLEND_BACK
+
+
+def test_timed_clearance_restarts_for_a_confirmed_new_route_obstacle():
+    config = replace(
+        StaticRouteBypassConfig(),
+        target_surface_clearance_cm=70.0,
+        reshift_surface_clearance_cm=60.0,
+        clearance_run_s=1.5,
+        clearance_reacquire_radius_cm=80.0,
+    )
+    planner = StaticRouteBypassPlanner(config)
+    _activate_right(planner)
+    for index, point in enumerate(
+        ((90.0, -60.0), (65.0, -75.0), (45.0, -80.0), (12.0, -90.0), (6.0, -90.0))
+    ):
+        _update(planner, _field(_cluster(*point)), 1.2 + index * 0.1)
+    for index in range(3):
+        _update(planner, _field([]), 1.7 + index * 0.1)
+    assert planner.state == StaticRouteBypassState.CLEARANCE_RUN
+    first_encounter = planner.encounter_id
+
+    now = 2.0
+    for _ in range(12):
+        command = _update(planner, _field([]), now)
+        planner.report_applied_command(command, 0.1, True)
+        now += 0.1
+    assert planner.diagnostics()["clearance_forward_s"] == pytest.approx(1.2)
+
+    outside_radius = _field(_cluster(85.0, 0.0))
+    for _ in range(2):
+        command = _update(planner, outside_radius, now)
+        planner.report_applied_command(command, 0.1, True)
+        now += 0.1
+    assert planner.diagnostics()["clearance_forward_s"] == pytest.approx(1.4)
+
+    new_obstacle = _field(_cluster(70.0, 0.0))
+    first = _update(planner, new_obstacle, now)
+    assert planner.state == StaticRouteBypassState.CLEARANCE_RUN
+    assert planner.diagnostics()["clearance_forward_s"] == 0.0
+    planner.report_applied_command(first, 0.1, True)
+    _update(planner, new_obstacle, now + 0.1)
+
+    assert planner.encounter_id == first_encounter + 1
+    assert planner.state == StaticRouteBypassState.DIVERGE_RIGHT
+    assert planner.diagnostics()["predicted_center_x_cm"] is not None
 
 
 def test_expected_edge_exit_does_not_switch_to_opposite_background_cluster():

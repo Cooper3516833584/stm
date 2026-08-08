@@ -154,6 +154,9 @@ def build_experimental_static_route_config(
         max_outward_vy_cm_s=12.0,
         lateral_kp_s=0.25,
         ramp_in_s=0.7,
+        clearance_run_s=1.5,
+        normal_activation_radius_cm=100.0,
+        clearance_reacquire_radius_cm=80.0,
     )
 
 

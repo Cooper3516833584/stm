@@ -90,6 +90,7 @@ ROAD_SEARCH → TARGET_CLEARANCE → TARGET_APPROACH
 | 减速速度上限 | 10 cm/s | 当前融合实验配置 |
 | 侧向停车 | 45 cm | 现有 Safety |
 | 绕障净空/回差 | 85 / 75 cm | static-route 冻结几何 |
+| 绕障退出前飞 | 1.5 s | 当前22 cm/s配置；实际正向帧连续累计，无新路径障碍 |
 | 绕障前速/最大 `vy` | 13.2 / 12 cm/s | 当前 22 cm/s static-route 实验配置 |
 
 所有运行值也写入 `session.json` 的 `parameter_registry` 和 `target_mission_config`，用于复盘。

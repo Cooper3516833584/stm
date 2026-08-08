@@ -92,7 +92,9 @@ def test_indicator_uses_green_for_road_yellow_for_target_red_for_avoidance_and_f
 
 def test_indicator_state_classification():
     assert not is_avoiding(planner_state="normal", safety_state="OK")
+    assert not is_avoiding(planner_state="normal", safety_state="LIMITED")
     assert is_avoiding(planner_state="diverge_left", safety_state="OK")
+    assert is_avoiding(planner_state="diverge_left", safety_state="LIMITED")
     assert is_avoiding(planner_state="normal", safety_state="OBSTACLE_STOP")
 
     common = {

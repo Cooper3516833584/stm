@@ -74,6 +74,35 @@ def test_default_static_route_profile_is_marked_flight_validated():
         assert not by_name[name]["requires_flight_tuning"]
 
 
+def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
+    visual = main.build_experimental_visual_config()
+    route = main.build_experimental_static_route_config(
+        visual_max_vx_cm_s=visual.max_vx_cm_s
+    )
+    registry = build_parameter_registry(
+        route,
+        radar_timeout_s=0.5,
+        tuning_log_every_n=2,
+        radar_snapshot_every_n=5,
+    )
+    by_name = {row["parameter"]: row for row in registry}
+
+    assert FrozenVisualConfig().max_vx_cm_s == 14.0
+    assert StaticRouteBypassConfig().avoidance_vx_cm_s == pytest.approx(8.4)
+    assert visual.max_vx_cm_s == 22.0
+    assert route.avoidance_forward_ratio == 0.60
+    assert route.avoidance_vx_cm_s == pytest.approx(13.2)
+    for name in (
+        "visual_max_vx_cm_s",
+        "avoidance_vx_cm_s",
+        "max_outward_vy_cm_s",
+        "lateral_kp_s",
+        "ramp_in_s",
+    ):
+        assert by_name[name]["source"] == "UNVERIFIED_TUNING"
+        assert by_name[name]["requires_flight_tuning"]
+
+
 def test_smooth_sidestep_remains_explicit(tmp_path):
     args = main.parse_args(
         [

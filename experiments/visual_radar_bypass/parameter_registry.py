@@ -44,17 +44,25 @@ def build_parameter_registry(
     fixed = ParameterSource.FIXED_REQUIREMENT
     existing = ParameterSource.EXISTING_PROJECT
     validated = ParameterSource.FLIGHT_VALIDATED
+    unverified = ParameterSource.UNVERIFIED_TUNING
+    v1 = StaticRouteBypassConfig()
+
+    def v1_source(name: str) -> ParameterSource:
+        return validated if getattr(config, name) == getattr(v1, name) else unverified
+
     rows = [
         ParameterRecord("front_fov_deg", config.front_fov_deg, fixed, "front-half-plane planner search"),
-        ParameterRecord("visual_max_vx_cm_s", config.visual_max_vx_cm_s, existing, "isolated visual speed limit", True),
+        ParameterRecord("visual_max_vx_cm_s", config.visual_max_vx_cm_s, v1_source("visual_max_vx_cm_s"), "isolated visual speed limit", True),
         ParameterRecord("avoidance_forward_ratio", config.avoidance_forward_ratio, fixed, "60 percent avoidance speed", True),
-        ParameterRecord("avoidance_vx_cm_s", config.avoidance_vx_cm_s, fixed, "fixed active forward target", True),
+        ParameterRecord("avoidance_vx_cm_s", config.avoidance_vx_cm_s, v1_source("visual_max_vx_cm_s"), "fixed active forward target", True),
         ParameterRecord("tube_radius_cm", config.tube_radius_cm, existing, "known physical tube radius", True),
         ParameterRecord("lookahead_cm", config.lookahead_cm, existing, "initial acquisition distance", True),
         ParameterRecord("intrusion_half_width_cm", config.intrusion_half_width_cm, existing, "route intrusion gate", True),
-        ParameterRecord("target_surface_clearance_cm", config.target_surface_clearance_cm, validated, "outward clearance target", True),
-        ParameterRecord("reshift_surface_clearance_cm", config.reshift_surface_clearance_cm, validated, "clearance hysteresis", True),
-        ParameterRecord("max_outward_vy_cm_s", config.max_outward_vy_cm_s, validated, "radar-only lateral correction cap", True),
+        ParameterRecord("target_surface_clearance_cm", config.target_surface_clearance_cm, v1_source("target_surface_clearance_cm"), "outward clearance target", True),
+        ParameterRecord("reshift_surface_clearance_cm", config.reshift_surface_clearance_cm, v1_source("reshift_surface_clearance_cm"), "clearance hysteresis", True),
+        ParameterRecord("max_outward_vy_cm_s", config.max_outward_vy_cm_s, v1_source("max_outward_vy_cm_s"), "radar-only lateral correction cap", True),
+        ParameterRecord("lateral_kp_s", config.lateral_kp_s, v1_source("lateral_kp_s"), "radar-only lateral correction gain", True),
+        ParameterRecord("ramp_in_s", config.ramp_in_s, v1_source("ramp_in_s"), "avoidance lateral ramp duration", True),
         ParameterRecord("association_radius_cm", config.association_radius_cm, validated, "same-tube prediction gate", True),
         ParameterRecord("static_model_tolerance_cm", config.static_model_tolerance_cm, validated, "stationary-model residual gate", True),
         ParameterRecord("static_model_bad_frames", config.static_model_bad_frames, validated, "consecutive residual failures before stop", True),

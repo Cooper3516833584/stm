@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import os
 from pathlib import Path
 import sys
@@ -45,8 +46,6 @@ from .radar_bypass import ObstacleBypassConfig, ObstacleBypassPlanner
 from .right_half_handoff import RightHalfRadarHandoff
 from .smooth_sidestep import SmoothSidestepPlanner
 from .static_route_bypass import (
-    STATIC_ROUTE_PROFILE_NAME,
-    STATIC_ROUTE_PROFILE_STATUS,
     StaticRouteBypassConfig,
     StaticRouteBypassPlanner,
 )
@@ -61,6 +60,53 @@ from .visual_guidance import FrozenVisualConfig, FrozenVisualGuidance
 
 
 DEFAULT_BYPASS_PLANNER = "static-route"
+EXPERIMENTAL_PROFILE_NAME = "static-route-22cm-experiment"
+EXPERIMENTAL_PROFILE_STATUS = "EXPERIMENTAL_UNVALIDATED"
+
+
+def build_experimental_visual_config(
+    *, camera_index: int = 7, npu_model_path: str | None = None
+) -> FrozenVisualConfig:
+    """Build the current 22 cm/s trial without changing the frozen v1 defaults."""
+    base = FrozenVisualConfig(camera_index=camera_index)
+    if npu_model_path is not None:
+        base = replace(base, npu_model_path=npu_model_path)
+    return replace(
+        base,
+        max_vx_cm_s=22.0,
+        max_vy_cm_s=12.0,
+        max_yaw_rate_deg_s=18.0,
+        min_forward_lookahead_px=28.0,
+        max_forward_lookahead_px=88.0,
+        lookahead_speed_gain_px_per_cm_s=1.4,
+        max_latency_prediction_px=24.0,
+        tangent_kp_yaw=0.45,
+        angle_deadband_deg=4.0,
+        lateral_deadband_px=16.0,
+        target_filter_tau_s=0.12,
+        tangent_filter_tau_s=0.13,
+        target_filter_max_rate_px_s=500.0,
+        tangent_filter_max_rate_deg_s=100.0,
+        max_planar_accel_cm_s2=36.0,
+        max_yaw_accel_deg_s2=50.0,
+        degraded_speed_scale=0.90,
+        curvature_slowdown_start_deg=18.0,
+        curvature_full_slowdown_deg=52.0,
+        min_curve_speed_cm_s=15.0,
+    )
+
+
+def build_experimental_static_route_config(
+    *, tube_radius_cm: float = 15.0, visual_max_vx_cm_s: float = 22.0
+) -> StaticRouteBypassConfig:
+    """Apply only the unfrozen avoidance changes needed by the 22 cm/s trial."""
+    return StaticRouteBypassConfig(
+        tube_radius_cm=tube_radius_cm,
+        visual_max_vx_cm_s=visual_max_vx_cm_s,
+        max_outward_vy_cm_s=12.0,
+        lateral_kp_s=0.25,
+        ramp_in_s=0.7,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -186,14 +232,14 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     validate_args(args)
     actual_flight = bool(args.enable_flight)
-    visual_config = FrozenVisualConfig(
+    visual_config = build_experimental_visual_config(
         camera_index=args.camera_index,
         npu_model_path=args.model_npu,
     )
     flight_config = FlightRuntimeConfig(
         takeoff_height_cm=args.takeoff_height_cm,
     )
-    static_route_config = StaticRouteBypassConfig(
+    static_route_config = build_experimental_static_route_config(
         tube_radius_cm=args.tube_radius_cm,
         visual_max_vx_cm_s=visual_config.max_vx_cm_s,
     )
@@ -255,12 +301,12 @@ def main(argv: list[str] | None = None) -> None:
                 "radar_points": "physical only; no synthetic injection",
                 "bypass_planner": args.bypass_planner,
                 "avoidance_profile": (
-                    STATIC_ROUTE_PROFILE_NAME
+                    EXPERIMENTAL_PROFILE_NAME
                     if args.bypass_planner == DEFAULT_BYPASS_PLANNER
                     else None
                 ),
                 "avoidance_profile_status": (
-                    STATIC_ROUTE_PROFILE_STATUS
+                    EXPERIMENTAL_PROFILE_STATUS
                     if args.bypass_planner == DEFAULT_BYPASS_PLANNER
                     else None
                 ),

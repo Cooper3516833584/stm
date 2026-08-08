@@ -16,21 +16,11 @@ from .ProcessRuntime import (
 )
 
 
-def vision_worker_main(
-    config,
-    frame_ring_descriptor,
-    output,
-    ready_event,
-    stop_event,
-    worker_generation: int = 0,
-    sequence_counter=None,
-    frame_sequence_counter=None,
-) -> None:
+def vision_worker_main(config, frame_ring_descriptor, output, ready_event, stop_event) -> None:
     """Own camera capture and NPU inference for the lifetime of the worker."""
     _set_affinity(1, bool(config.apply_cpu_affinity))
     ring = _SharedArrayRing.attach(frame_ring_descriptor)
     pipeline = None
-    _ = worker_generation
     sequence = 0
     frame_sequence = 0
     latest_frame_ref: FrameRef | None = None
@@ -70,7 +60,7 @@ def vision_worker_main(
             if frame is not None and id(frame) != last_frame_identity:
                 array = np.asarray(frame)
                 if array.shape == tuple(frame_ring_descriptor["shape"]) and array.dtype == np.uint8:
-                    frame_sequence = _next_sequence(frame_sequence_counter, frame_sequence)
+                    frame_sequence += 1
                     slot, generation = ring.write(frame_sequence, array)
                     latest_frame_ref = FrameRef(
                         slot=slot,
@@ -84,7 +74,7 @@ def vision_worker_main(
             result, age_s, stale = pipeline.latest_perception()
             result_identity = id(result) if result is not None else None
             if result is not None and result_identity != last_result_identity:
-                sequence = _next_sequence(sequence_counter, sequence)
+                sequence += 1
                 compact = copy.copy(result)
                 if hasattr(compact, "debug_mask"):
                     compact.debug_mask = None
@@ -116,12 +106,6 @@ def vision_worker_main(
                     ),
                 )
                 last_result_identity = result_identity
-                max_inferences = max(
-                    0,
-                    int(getattr(config, "vision_worker_max_inferences", 0)),
-                )
-                if max_inferences and pipeline.yolo.inference_count >= max_inferences:
-                    break
             elif stale and result is None:
                 time.sleep(0.005)
             else:
@@ -138,14 +122,6 @@ def vision_worker_main(
             output.close()
         except (OSError, ValueError):
             pass
-
-
-def _next_sequence(counter, local_value: int) -> int:
-    if counter is None:
-        return int(local_value) + 1
-    with counter.get_lock():
-        counter.value += 1
-        return int(counter.value)
 
 
 __all__ = ["vision_worker_main"]

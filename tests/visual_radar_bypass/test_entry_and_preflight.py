@@ -41,6 +41,8 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.hc14_baudrate is None
     assert args.hc14_connect_timeout_s == 5.0
     assert args.loop_hz == 10.0
+    assert args.speed_profile == "32-experiment"
+    assert args.radar_timeout_s == 0.35
     assert args.bypass_planner == "static-route"
     assert args.bypass_forward_transition_s == 2.0
     assert not args.right_half_radar_then_visual
@@ -52,6 +54,53 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.radar_snapshot_every_n == 5
     assert not args.disable_target_mission
     assert not hasattr(args, "synthetic_radar")
+
+
+def test_frozen_v2_speed_profile_restores_its_validated_radar_timeout(tmp_path):
+    args = main.parse_args(
+        ["--model-npu", _model(tmp_path), "--speed-profile", "frozen-v2"]
+    )
+    main.validate_args(args)
+
+    assert args.speed_profile == "frozen-v2"
+    assert args.radar_timeout_s == 0.5
+
+
+def test_frozen_v2_registry_is_flight_validated_against_itself():
+    visual = main.build_frozen_v2_visual_config()
+    route = main.build_frozen_v2_static_route_config()
+    target = PurpleTargetMissionConfig(
+        high_planar_speed_cm_s=visual.max_vx_cm_s * 0.60,
+        offset_filter_tau_s=visual.target_filter_tau_s,
+        offset_filter_max_rate_px_s=visual.target_filter_max_rate_px_s,
+        max_planar_accel_cm_s2=visual.max_planar_accel_cm_s2,
+    )
+    registry = build_parameter_registry(
+        route,
+        radar_timeout_s=0.5,
+        tuning_log_every_n=2,
+        radar_snapshot_every_n=5,
+        target_config=target,
+        visual_config=visual,
+        validated_route_config=route,
+        validated_visual_config=visual,
+        validated_target_config=target,
+    )
+    by_name = {row["parameter"]: row for row in registry}
+
+    for name in (
+        "visual_max_vx_cm_s",
+        "clearance_run_s",
+        "radar_timeout_s",
+        "road_max_vx_cm_s",
+        "road_curvature_yaw_ff_max_deg_s",
+        "road_edge_emergency_vx_cap_cm_s",
+        "target_mission.high_planar_speed_cm_s",
+        "target_mission.offset_filter_tau_s",
+        "target_mission.max_planar_accel_cm_s2",
+    ):
+        assert by_name[name]["source"] == "FLIGHT_VALIDATED"
+        assert not by_name[name]["requires_flight_tuning"]
 
 
 def test_default_static_route_profile_is_marked_flight_validated():
@@ -79,33 +128,43 @@ def test_default_static_route_profile_is_marked_flight_validated():
         assert not by_name[name]["requires_flight_tuning"]
 
 
-def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
+def test_32cm_experiment_preserves_frozen_profiles_and_marks_overrides_unverified():
+    v2_visual = main.build_frozen_v2_visual_config()
+    v2_route = main.build_frozen_v2_static_route_config()
     visual = main.build_experimental_visual_config()
     route = main.build_experimental_static_route_config(
         visual_max_vx_cm_s=visual.max_vx_cm_s
     )
     registry = build_parameter_registry(
         route,
-        radar_timeout_s=0.5,
+        radar_timeout_s=0.35,
         tuning_log_every_n=2,
         radar_snapshot_every_n=5,
+        validated_route_config=v2_route,
+        validated_visual_config=v2_visual,
+        validated_radar_timeout_s=0.5,
     )
     by_name = {row["parameter"]: row for row in registry}
 
     assert FrozenVisualConfig().max_vx_cm_s == 14.0
     assert StaticRouteBypassConfig().avoidance_vx_cm_s == pytest.approx(8.4)
-    assert visual.max_vx_cm_s == 22.0
+    assert main.FROZEN_V2_PROFILE_NAME == "static-route-flight-v2"
+    assert main.FROZEN_V2_PROFILE_STATUS == "FROZEN_FLIGHT_VALIDATED"
+    assert v2_visual.max_vx_cm_s == 22.0
+    assert v2_route.avoidance_vx_cm_s == pytest.approx(13.2)
+    assert visual.max_vx_cm_s == 32.0
     assert route.avoidance_forward_ratio == 0.60
-    assert route.avoidance_vx_cm_s == pytest.approx(13.2)
+    assert route.avoidance_vx_cm_s == pytest.approx(19.2)
     assert route.active_diverge_vx_cm_s == 0.0
     assert route.require_target_clearance_before_forward
-    assert route.target_surface_clearance_cm == 85.0
-    assert route.active_diverge_target_surface_clearance_cm == 95.0
-    assert route.reshift_surface_clearance_cm == 75.0
-    assert route.clearance_frames == 1
-    assert route.clearance_run_s == 1.5
-    assert route.normal_activation_radius_cm == 100.0
-    assert route.clearance_reacquire_radius_cm == 80.0
+    assert route.target_surface_clearance_cm == 90.0
+    assert route.active_diverge_target_surface_clearance_cm == 100.0
+    assert route.reshift_surface_clearance_cm == 80.0
+    assert route.clearance_frames == 2
+    assert route.clearance_run_s == 1.2
+    assert route.normal_activation_radius_cm == 145.0
+    assert route.clearance_reacquire_radius_cm == 115.0
+    assert route.track_lost_forward_vx_cm_s == 13.2
     assert route.max_encounter_s is None
     for name in (
         "visual_max_vx_cm_s",
@@ -117,44 +176,75 @@ def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
         "lateral_kp_s",
         "ramp_in_s",
         "clearance_run_s",
+        "normal_activation_radius_cm",
+        "clearance_reacquire_radius_cm",
+        "tracked_obstacle_disappear_distance_cm",
+        "radar_timeout_s",
         "max_encounter_s",
     ):
-        assert by_name[name]["source"] == "UNVERIFIED_TUNING"
-        assert by_name[name]["requires_flight_tuning"]
+        expected = (
+            "FLIGHT_VALIDATED"
+            if name in {
+                "diverge_vx_cm_s",
+                "require_target_clearance_before_forward",
+                "max_encounter_s",
+            }
+            else "UNVERIFIED_TUNING"
+        )
+        assert by_name[name]["source"] == expected
+        assert by_name[name]["requires_flight_tuning"] == (expected == "UNVERIFIED_TUNING")
 
 
 def test_target_registry_records_detection_control_height_and_safety_bypass():
+    v2_visual = main.build_frozen_v2_visual_config()
+    v2_route = main.build_frozen_v2_static_route_config()
     visual = main.build_experimental_visual_config()
     route = main.build_experimental_static_route_config(
         visual_max_vx_cm_s=visual.max_vx_cm_s
     )
+    v2_target = PurpleTargetMissionConfig(
+        high_planar_speed_cm_s=v2_visual.max_vx_cm_s * 0.60,
+        offset_filter_tau_s=v2_visual.target_filter_tau_s,
+        offset_filter_max_rate_px_s=v2_visual.target_filter_max_rate_px_s,
+        max_planar_accel_cm_s2=v2_visual.max_planar_accel_cm_s2,
+    )
     registry = build_parameter_registry(
         route,
-        radar_timeout_s=0.5,
+        radar_timeout_s=0.35,
         tuning_log_every_n=2,
         radar_snapshot_every_n=5,
-        target_config=PurpleTargetMissionConfig(),
+        target_config=PurpleTargetMissionConfig(
+            high_planar_speed_cm_s=visual.max_vx_cm_s * 0.60,
+            offset_filter_tau_s=visual.target_filter_tau_s,
+            offset_filter_max_rate_px_s=visual.target_filter_max_rate_px_s,
+            max_planar_accel_cm_s2=visual.max_planar_accel_cm_s2,
+        ),
         visual_config=visual,
+        validated_route_config=v2_route,
+        validated_visual_config=v2_visual,
+        validated_target_config=v2_target,
     )
-    by_name = {row["parameter"]: row["value"] for row in registry}
+    by_record = {row["parameter"]: row for row in registry}
+    by_name = {name: row["value"] for name, row in by_record.items()}
 
     assert by_name["control_rate_hz"] == 10.0
     assert (by_name["camera_width"], by_name["camera_height"], by_name["camera_fps"]) == (640, 480, 30)
     assert by_name["target_max_rate_hz"] == 10.0
     assert by_name["target_stale_timeout_s"] == 0.5
-    assert by_name["road_max_vx_cm_s"] == 22.0
-    assert by_name["road_tangent_window_points"] == 3
-    assert by_name["road_max_planar_decel_cm_s2"] == 60.0
-    assert by_name["road_curvature_yaw_ff_max_deg_s"] == 6.0
+    assert by_name["road_max_vx_cm_s"] == 32.0
+    assert by_name["road_tangent_window_points"] == 4
+    assert by_name["road_max_planar_decel_cm_s2"] == 85.0
+    assert by_name["road_curvature_yaw_ff_max_deg_s"] == 9.0
     assert by_name["road_corner_min_lookahead_px"] == 75.0
-    assert by_name["road_edge_recovery_max_vy_cm_s"] == 12.0
-    assert by_name["road_edge_yaw_max_deg_s"] == 3.0
-    assert by_name["road_edge_emergency_vx_cap_cm_s"] == 18.5
-    assert by_name["clearance_run_s"] == 1.5
+    assert by_name["road_edge_recovery_max_vy_cm_s"] == 14.0
+    assert by_name["road_edge_yaw_max_deg_s"] == 4.0
+    assert by_name["road_edge_emergency_vx_cap_cm_s"] == 27.0
+    assert by_name["clearance_run_s"] == 1.2
     assert by_name["max_encounter_s"] is None
-    assert by_name["normal_activation_radius_cm"] == 100.0
-    assert by_name["clearance_reacquire_radius_cm"] == 80.0
-    assert by_name["target_mission.high_planar_speed_cm_s"] == 13.2
+    assert by_name["normal_activation_radius_cm"] == 145.0
+    assert by_name["clearance_reacquire_radius_cm"] == 115.0
+    assert by_name["target_mission.high_planar_speed_cm_s"] == 19.2
+    assert by_record["target_mission.high_planar_speed_cm_s"]["source"] == "UNVERIFIED_TUNING"
     assert by_name["target_mission.low_planar_speed_cm_s"] == 5.0
     assert by_name["target_mission.camera_ground_width_cm_at_reference"] == 130.0
     assert by_name["target_mission.camera_reference_altitude_cm"] == 100.0
@@ -434,8 +524,8 @@ def test_visual_snapshot_keeps_flight_validated_v1_defaults():
     assert config.edge_emergency_vx_cap_cm_s == 0.0
 
 
-def test_22cm_profile_uses_speed_scaled_production_turn_features():
-    config = main.build_experimental_visual_config()
+def test_frozen_v2_keeps_22cm_speed_scaled_turn_features():
+    config = main.build_frozen_v2_visual_config()
 
     assert (config.max_vx_cm_s, config.max_vy_cm_s, config.max_yaw_rate_deg_s) == (
         22.0,
@@ -467,7 +557,39 @@ def test_22cm_profile_uses_speed_scaled_production_turn_features():
     ) == (0.90, 0.95, 18.5)
 
 
-def test_22cm_profile_turn_feedforward_and_fixed_width_edge_recovery_are_active():
+def test_32cm_profile_uses_intermediate_speed_scaled_turn_features():
+    config = main.build_experimental_visual_config()
+
+    assert (config.max_vx_cm_s, config.max_vy_cm_s, config.max_yaw_rate_deg_s) == (
+        32.0,
+        14.0,
+        28.0,
+    )
+    assert (
+        config.min_forward_lookahead_px,
+        config.max_forward_lookahead_px,
+        config.lookahead_speed_gain_px_per_cm_s,
+        config.max_latency_prediction_px,
+    ) == (30.0, 108.0, 1.5, 28.0)
+    assert config.tangent_window_points == 4
+    assert (config.max_planar_accel_cm_s2, config.max_planar_decel_cm_s2) == (
+        45.0,
+        85.0,
+    )
+    assert (config.curvature_yaw_ff_kp, config.curvature_yaw_ff_max_deg_s) == (
+        0.15,
+        9.0,
+    )
+    assert (config.edge_recovery_lateral_kp, config.edge_recovery_max_vy_cm_s) == (
+        0.19,
+        14.0,
+    )
+    assert config.edge_yaw_max_deg_s == 4.0
+    assert config.edge_emergency_vx_cap_cm_s == 27.0
+    assert config.road_loss_grace_s == 0.22
+
+
+def test_32cm_profile_turn_feedforward_and_fixed_width_edge_recovery_are_active():
     curved = FrozenVisualGuidance(main.build_experimental_visual_config())
     curve_points = [
         (320.0 + 0.004 * max(0.0, 240.0 - y) ** 2, float(y))
@@ -481,16 +603,16 @@ def test_22cm_profile_turn_feedforward_and_fixed_width_edge_recovery_are_active(
         road_state="normal",
     )
 
-    # Let the acceleration-limited command build its 22 cm/s lookahead.  At
+    # Let the acceleration-limited command build its 32 cm/s lookahead.  At
     # the first zero-speed frame the minimum horizon intentionally has no
     # useful signed-turn separation yet.
     for index in range(6):
         curved.follower.update(perception, now_s=1.0 + index * 0.1)
     curve_diagnostics = curved.follower.last_diagnostics
 
-    assert 0.0 < abs(curve_diagnostics.yaw_feedforward_deg_s) <= 6.0
+    assert 0.0 < abs(curve_diagnostics.yaw_feedforward_deg_s) <= 9.0
     assert curve_diagnostics.corner_lookahead_cap_px >= 75.0
-    assert curve_diagnostics.corner_lookahead_cap_px < 88.0
+    assert curve_diagnostics.corner_lookahead_cap_px < 108.0
 
     edge = FrozenVisualGuidance(main.build_experimental_visual_config())
     edge_points = [(420.0, 300.0), (420.0, 240.0), (420.0, 180.0)]
@@ -508,9 +630,9 @@ def test_22cm_profile_turn_feedforward_and_fixed_width_edge_recovery_are_active(
 
     assert edge_diagnostics.edge_ratio == pytest.approx(1.0)
     assert edge_diagnostics.edge_recovery_blend == pytest.approx(1.0)
-    assert abs(edge_diagnostics.recovery_vy_cm_s) == pytest.approx(12.0)
-    assert abs(edge_diagnostics.edge_yaw_bias_deg_s) == pytest.approx(3.0)
-    assert edge_diagnostics.edge_speed_cap_cm_s == pytest.approx(18.5)
+    assert abs(edge_diagnostics.recovery_vy_cm_s) == pytest.approx(14.0)
+    assert abs(edge_diagnostics.edge_yaw_bias_deg_s) == pytest.approx(4.0)
+    assert edge_diagnostics.edge_speed_cap_cm_s == pytest.approx(27.0)
 
 
 def test_visual_guidance_passes_final_adaptive_parameters_to_follower():

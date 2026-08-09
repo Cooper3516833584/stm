@@ -8,8 +8,10 @@ PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \
   -m experiments.visual_radar_bypass.main \
   --runtime-mode process \
   --bypass-planner static-route \
+  --speed-profile 32-experiment \
   --loop-hz 10 \
   --duration-s 100 \
+  --radar-timeout-s 0.35 \
   --takeoff-height-cm 100 \
   --hc14-port /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 \
   --hc14-baudrate 115200 \
@@ -21,14 +23,17 @@ PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \
 
 cd /usr/local/ObstacleAvoidanceDrone
 PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \
-  -m experiments.road_contour_bypass.main \
+  -m experiments.visual_radar_bypass.main \
   --runtime-mode process \
+  --bypass-planner static-route \
+  --speed-profile frozen-v2 \
   --loop-hz 10 \
   --duration-s 100 \
+  --radar-timeout-s 0.5 \
   --takeoff-height-cm 100 \
   --hc14-port /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 \
   --hc14-baudrate 115200 \
   --hc14-connect-timeout-s 5 \
   --enable-flight \
   --auto-takeoff \
-  --confirm-road-contour-bypass-flight-test
+  --confirm-visual-radar-flight-test

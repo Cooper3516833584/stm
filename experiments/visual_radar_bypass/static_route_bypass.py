@@ -82,8 +82,8 @@ class StaticRouteBypassConfig:
     activation_frames: int = 2
     clearance_frames: int = 3
     # ``None`` preserves the frozen v1 predicted-rear-margin completion.
-    # The current 22 cm/s profile sets 1.5 s and uses a fresh acquisition gate
-    # instead of tracking the old tube through CLEARANCE_RUN.
+    # v2 and later profiles use a timed fresh-acquisition gate instead of
+    # tracking the old tube through CLEARANCE_RUN.
     clearance_run_s: float | None = None
     # Optional current-profile radial gates.  ``None`` preserves the frozen
     # v1 10..180 cm acquisition rectangle.

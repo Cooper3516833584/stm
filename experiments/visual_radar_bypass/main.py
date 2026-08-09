@@ -78,19 +78,25 @@ from fleet_bus import attach_air_fleet_node
 
 
 DEFAULT_BYPASS_PLANNER = "static-route"
-EXPERIMENTAL_PROFILE_NAME = "static-route-22cm-experiment"
+FROZEN_V2_PROFILE_NAME = "static-route-flight-v2"
+FROZEN_V2_PROFILE_STATUS = "FROZEN_FLIGHT_VALIDATED"
+EXPERIMENTAL_PROFILE_NAME = "static-route-32cm-experiment"
 EXPERIMENTAL_PROFILE_STATUS = "EXPERIMENTAL_UNVALIDATED"
+FROZEN_V2_SPEED_PROFILE = "frozen-v2"
+EXPERIMENTAL_SPEED_PROFILE = "32-experiment"
+FROZEN_V2_RADAR_TIMEOUT_S = 0.5
+EXPERIMENTAL_RADAR_TIMEOUT_S = 0.35
 FLEET_LANDING_REPORT_GRACE_S = 1.2
 SAFETY_BYPASS_STATE = "BYPASSED"
 
 
-def build_experimental_visual_config(
+def build_frozen_v2_visual_config(
     *,
     camera_index: int = 7,
     npu_model_path: str | None = None,
     target_enable: bool = True,
 ) -> FrozenVisualConfig:
-    """Build the current 22 cm/s trial without changing the frozen v1 defaults."""
+    """Return the flight-validated 22 cm/s v2 visual profile."""
     base = FrozenVisualConfig(camera_index=camera_index)
     if npu_model_path is not None:
         base = replace(base, npu_model_path=npu_model_path)
@@ -154,10 +160,10 @@ def build_experimental_visual_config(
     )
 
 
-def build_experimental_static_route_config(
+def build_frozen_v2_static_route_config(
     *, tube_radius_cm: float = 15.0, visual_max_vx_cm_s: float = 22.0
 ) -> StaticRouteBypassConfig:
-    """Apply only the unfrozen avoidance changes needed by the 22 cm/s trial."""
+    """Return the flight-validated 22 cm/s v2 avoidance profile."""
     return StaticRouteBypassConfig(
         tube_radius_cm=tube_radius_cm,
         visual_max_vx_cm_s=visual_max_vx_cm_s,
@@ -176,6 +182,80 @@ def build_experimental_static_route_config(
         normal_activation_radius_cm=100.0,
         clearance_reacquire_radius_cm=80.0,
         max_encounter_s=None,
+    )
+
+
+def build_experimental_visual_config(
+    *,
+    camera_index: int = 7,
+    npu_model_path: str | None = None,
+    target_enable: bool = True,
+) -> FrozenVisualConfig:
+    """Build the active 32 cm/s trial on top of the frozen v2 profile."""
+    v2 = build_frozen_v2_visual_config(
+        camera_index=camera_index,
+        npu_model_path=npu_model_path,
+        target_enable=target_enable,
+    )
+    return replace(
+        v2,
+        max_vx_cm_s=32.0,
+        max_vy_cm_s=14.0,
+        max_yaw_rate_deg_s=28.0,
+        min_forward_lookahead_px=30.0,
+        max_forward_lookahead_px=108.0,
+        lookahead_speed_gain_px_per_cm_s=1.5,
+        max_latency_prediction_px=28.0,
+        tangent_window_points=4,
+        tangent_kp_yaw=0.65,
+        angle_deadband_deg=4.5,
+        lateral_deadband_px=20.0,
+        normal_max_vy_cm_s=12.0,
+        curvature_yaw_ff_kp=0.15,
+        curvature_yaw_ff_max_deg_s=9.0,
+        edge_recovery_lateral_kp=0.19,
+        edge_recovery_max_vy_cm_s=14.0,
+        edge_yaw_max_deg_s=4.0,
+        edge_emergency_vx_cap_cm_s=27.0,
+        target_filter_tau_s=0.11,
+        tangent_filter_tau_s=0.11,
+        target_filter_max_rate_px_s=650.0,
+        tangent_filter_max_rate_deg_s=135.0,
+        max_planar_accel_cm_s2=45.0,
+        max_planar_decel_cm_s2=85.0,
+        max_yaw_accel_deg_s2=65.0,
+        road_loss_grace_s=0.22,
+        degraded_speed_scale=0.92,
+        curvature_slowdown_start_deg=25.0,
+        curvature_full_slowdown_deg=65.0,
+        min_curve_speed_cm_s=23.0,
+    )
+
+
+def build_experimental_static_route_config(
+    *, tube_radius_cm: float = 15.0, visual_max_vx_cm_s: float = 32.0
+) -> StaticRouteBypassConfig:
+    """Build the active 32 cm/s avoidance trial on top of frozen v2."""
+    v2 = build_frozen_v2_static_route_config(
+        tube_radius_cm=tube_radius_cm,
+        visual_max_vx_cm_s=22.0,
+    )
+    return replace(
+        v2,
+        visual_max_vx_cm_s=visual_max_vx_cm_s,
+        target_surface_clearance_cm=90.0,
+        diverge_target_surface_clearance_cm=100.0,
+        reshift_surface_clearance_cm=80.0,
+        max_outward_vy_cm_s=14.0,
+        lateral_kp_s=0.30,
+        ramp_in_s=0.6,
+        clearance_frames=2,
+        clearance_run_s=1.2,
+        normal_activation_radius_cm=145.0,
+        clearance_reacquire_radius_cm=115.0,
+        # Do not scale blind forward motion with the new cruise speed.
+        track_lost_forward_vx_cm_s=13.2,
+        tracked_obstacle_disappear_distance_cm=140.0,
     )
 
 
@@ -207,7 +287,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Isolate vision/radar in spawned processes (default) or use the legacy threads",
     )
     parser.add_argument("--duration-s", type=float, default=60.0)
-    parser.add_argument("--radar-timeout-s", type=float, default=0.5)
+    parser.add_argument(
+        "--speed-profile",
+        choices=(FROZEN_V2_SPEED_PROFILE, EXPERIMENTAL_SPEED_PROFILE),
+        default=EXPERIMENTAL_SPEED_PROFILE,
+        help="Select frozen 22 cm/s v2 or the active 32 cm/s trial",
+    )
+    parser.add_argument(
+        "--radar-timeout-s",
+        type=float,
+        default=None,
+    )
     parser.add_argument(
         "--bypass-planner",
         choices=("legacy", "smooth-sidestep", "static-route"),
@@ -253,6 +343,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--takeoff-height-cm", type=int, default=100)
     args = parser.parse_args(raw_argv)
+    if args.radar_timeout_s is None:
+        args.radar_timeout_s = (
+            FROZEN_V2_RADAR_TIMEOUT_S
+            if args.speed_profile == FROZEN_V2_SPEED_PROFILE
+            else EXPERIMENTAL_RADAR_TIMEOUT_S
+        )
     if (
         args.right_half_radar_then_visual or args.circular_tube_bypass
     ) and "--bypass-planner" not in raw_argv:
@@ -336,7 +432,32 @@ def main(argv: list[str] | None = None) -> None:
         and not args.disable_target_mission
         and not args.circular_tube_bypass
     )
-    visual_config = build_experimental_visual_config(
+    visual_builder = (
+        build_frozen_v2_visual_config
+        if args.speed_profile == FROZEN_V2_SPEED_PROFILE
+        else build_experimental_visual_config
+    )
+    route_builder = (
+        build_frozen_v2_static_route_config
+        if args.speed_profile == FROZEN_V2_SPEED_PROFILE
+        else build_experimental_static_route_config
+    )
+    active_profile_name = (
+        FROZEN_V2_PROFILE_NAME
+        if args.speed_profile == FROZEN_V2_SPEED_PROFILE
+        else EXPERIMENTAL_PROFILE_NAME
+    )
+    active_profile_status = (
+        FROZEN_V2_PROFILE_STATUS
+        if args.speed_profile == FROZEN_V2_SPEED_PROFILE
+        else EXPERIMENTAL_PROFILE_STATUS
+    )
+    visual_config = visual_builder(
+        camera_index=args.camera_index,
+        npu_model_path=args.model_npu,
+        target_enable=target_mission_enabled,
+    )
+    frozen_v2_visual_config = build_frozen_v2_visual_config(
         camera_index=args.camera_index,
         npu_model_path=args.model_npu,
         target_enable=target_mission_enabled,
@@ -348,12 +469,25 @@ def main(argv: list[str] | None = None) -> None:
         offset_filter_max_rate_px_s=visual_config.target_filter_max_rate_px_s,
         max_planar_accel_cm_s2=visual_config.max_planar_accel_cm_s2,
     )
+    frozen_v2_target_mission_config = PurpleTargetMissionConfig(
+        high_planar_speed_cm_s=frozen_v2_visual_config.max_vx_cm_s * 0.60,
+        camera_width_px=frozen_v2_visual_config.camera_width,
+        offset_filter_tau_s=frozen_v2_visual_config.target_filter_tau_s,
+        offset_filter_max_rate_px_s=(
+            frozen_v2_visual_config.target_filter_max_rate_px_s
+        ),
+        max_planar_accel_cm_s2=frozen_v2_visual_config.max_planar_accel_cm_s2,
+    )
     flight_config = FlightRuntimeConfig(
         takeoff_height_cm=args.takeoff_height_cm,
     )
-    static_route_config = build_experimental_static_route_config(
+    static_route_config = route_builder(
         tube_radius_cm=args.tube_radius_cm,
         visual_max_vx_cm_s=visual_config.max_vx_cm_s,
+    )
+    frozen_v2_route_config = build_frozen_v2_static_route_config(
+        tube_radius_cm=args.tube_radius_cm,
+        visual_max_vx_cm_s=frozen_v2_visual_config.max_vx_cm_s,
     )
     parameter_registry = build_parameter_registry(
         static_route_config,
@@ -362,6 +496,10 @@ def main(argv: list[str] | None = None) -> None:
         radar_snapshot_every_n=args.radar_snapshot_every_n,
         target_config=target_mission_config if target_mission_enabled else None,
         visual_config=visual_config,
+        validated_route_config=frozen_v2_route_config,
+        validated_visual_config=frozen_v2_visual_config,
+        validated_target_config=frozen_v2_target_mission_config,
+        validated_radar_timeout_s=FROZEN_V2_RADAR_TIMEOUT_S,
     )
     process_runtime = None
     if args.runtime_mode == "process":
@@ -424,12 +562,22 @@ def main(argv: list[str] | None = None) -> None:
                 "radar_points": "physical only; no synthetic injection",
                 "bypass_planner": args.bypass_planner,
                 "avoidance_profile": (
-                    EXPERIMENTAL_PROFILE_NAME
+                    active_profile_name
                     if args.bypass_planner == DEFAULT_BYPASS_PLANNER
                     else None
                 ),
                 "avoidance_profile_status": (
-                    EXPERIMENTAL_PROFILE_STATUS
+                    active_profile_status
+                    if args.bypass_planner == DEFAULT_BYPASS_PLANNER
+                    else None
+                ),
+                "validated_baseline_profile": (
+                    FROZEN_V2_PROFILE_NAME
+                    if args.bypass_planner == DEFAULT_BYPASS_PLANNER
+                    else None
+                ),
+                "validated_baseline_profile_status": (
+                    FROZEN_V2_PROFILE_STATUS
                     if args.bypass_planner == DEFAULT_BYPASS_PLANNER
                     else None
                 ),

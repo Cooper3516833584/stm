@@ -2,9 +2,9 @@
 
 This module deliberately does not add radar behavior to the production visual
 files.  It calls their stable public APIs while freezing the flight-validated
-v1 controller defaults.  The 22 cm/s experiment selectively enables
-speed-scaled corner feed-forward and edge recovery from
-``road_trajectory_main.py`` without inheriting its 45 cm/s limits.
+v1 controller defaults.  Higher-speed profiles selectively enable speed-scaled
+corner feed-forward and edge recovery from ``road_trajectory_main.py`` without
+inheriting its 45 cm/s limits wholesale.
 """
 
 from __future__ import annotations

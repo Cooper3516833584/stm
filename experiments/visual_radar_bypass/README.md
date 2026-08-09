@@ -17,12 +17,14 @@
 - 雷达 CRC 新增立即触发不健康，连续 5 个新鲜快照无新增 CRC 后允许恢复；
 - 默认 `--runtime-mode process`；`threaded` 仅作为旧路径回退。
 
-static-route 的冻结 v1 参数和状态机行为继续保留为回归基线，详见
+static-route 同时保留冻结 v1 和已验证的 22 cm/s 冻结 v2；默认运行新的 32 cm/s 未验证档。
+完整参数、缩放公式、推荐命令和 v2 回退方式见
+[SPEED_PROFILE_32.md](SPEED_PROFILE_32.md)，状态机基线见
 [STATIC_ROUTE_BYPASS.md](STATIC_ROUTE_BYPASS.md)。
 
-## 22 cm/s 巡线转弯折中配置
+## 冻结 v2：22 cm/s 巡线转弯配置
 
-冻结 `FrozenVisualConfig()` 的 v1 行为不变；仅 `static-route-22cm-experiment` 启用根目录
+冻结 `FrozenVisualConfig()` 的 v1 行为不变；`static-route-flight-v2` 启用根目录
 45 cm/s 巡线入口中已经单元验证的转弯机制。数值按当前 22 cm/s 前速、18°/s yaw 和 12 cm/s
 横移上限折中缩放，没有照搬生产入口的激进幅值：
 
@@ -40,10 +42,10 @@ static-route 的冻结 v1 参数和状态机行为继续保留为回归基线，
 曲率降速仍使用已经选定的 `18° → 52°`、最低 15 cm/s；总速度上限仍为
 `vx=22 cm/s`、`vy=12 cm/s`、yaw=18°/s。新鲜画面单帧丢线设有 0.30 s 短时宽限，
 宽限期间按进入时指令的 `vx/vy/yaw = 0.80/0.50/0.70` 保持，并同时用于灯光和
-static-route 的道路可用判定；摄像头异常或感知过期仍立即悬停并触发异常灯光。上述新增值仍属于未飞行验证参数，
-必须先完成当前 22 cm/s 实验，不能据此提高巡线速度。
+static-route 的道路可用判定；摄像头异常或感知过期仍立即悬停并触发异常灯光。该组参数现冻结为
+`static-route-flight-v2`，可用 `--speed-profile frozen-v2` 完整回退。
 
-## 22 cm/s 绕障退出
+## 冻结 v2：22 cm/s 绕障退出
 
 当前融合配置仅在由 `NORMAL` 进入 `DIVERGE` 时将 `vx` 置零，只做横向移动；从其他状态进入
 `DIVERGE` 时保持绕障前速。由 `NORMAL` 进入后，管表面侧向净空 `y > 75 cm` 即进入

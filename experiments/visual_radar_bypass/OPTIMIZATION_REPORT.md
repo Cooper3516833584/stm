@@ -307,14 +307,20 @@ Kp 0.16/最大12 cm/s，边缘yaw最大3°/s，边缘前速下限18.5 cm/s。无
 0.55/0.90和0.75/0.95；曲率降速仍为18°到52°、最低15 cm/s。根目录的0.18秒丢线继续飞行
 未接入，避免影响static-route路径丢失停车和Safety语义。
 
-所有值均进入会话参数注册表，来源标记为 `UNVERIFIED_TUNING`；在22 cm/s飞行实验通过前，
-不得提升速度或把这些数值标记为飞行验证。
+该组参数已完成当前全任务验证并冻结为 `static-route-flight-v2`；新的速度档以 v2 为参数来源基线。
 
 ## 18. 22 cm/s 绕障退出简化
 
 冻结 `static-route-flight-v1` 仍保留预测圆心、管半径、机后余量和全前向走廊净空的完成条件。
-当前 `static-route-22cm-experiment` 改为 `clearance_run_s=1.5`：进入 `CLEARANCE_RUN` 后清除旧管体
+冻结 v2 使用 `clearance_run_s=1.5`：进入 `CLEARANCE_RUN` 后清除旧管体
 预测，不再对其做50 cm关联，也不再以 `front_corridor_clear` 作为门槛。规划器改用 NORMAL 的
 10～180 cm、横向±75 cm和连续2帧规则发现新路径障碍；确认后开启新的 encounter。没有新障碍时，
 只有Safety之后实际执行的正向帧才累计时间，停车或拒绝执行会把连续时间清零。累计1.5秒后进入
-`WAIT_VISUAL`，再按原有2秒 `BLEND_BACK` 回到巡线。该参数属于 `UNVERIFIED_TUNING`。
+`WAIT_VISUAL`，再按原有2秒 `BLEND_BACK` 回到巡线。该参数随全任务参数冻结为 v2。
+
+## 19. 32 cm/s 参数档
+
+当前默认档为 `static-route-32cm-experiment`，以冻结 v2 为基线，把巡线 `vx` 提升至 32 cm/s，
+同时联动前视、yaw、加减速度、边缘恢复、绕障净空、障碍激活距离和雷达 freshness。该档仍为
+`EXPERIMENTAL_UNVALIDATED`，逐项数值、公式与 v2 回退命令见
+[SPEED_PROFILE_32.md](SPEED_PROFILE_32.md)。

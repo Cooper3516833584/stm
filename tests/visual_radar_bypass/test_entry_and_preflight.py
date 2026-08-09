@@ -152,6 +152,7 @@ def test_32cm_experiment_preserves_frozen_profiles_and_marks_overrides_unverifie
     assert main.FROZEN_V2_PROFILE_NAME == "static-route-flight-v2"
     assert main.FROZEN_V2_PROFILE_STATUS == "FROZEN_FLIGHT_VALIDATED"
     assert v2_visual.max_vx_cm_s == 22.0
+    assert v2_visual.sharp_left_recovery_enabled
     assert v2_route.avoidance_vx_cm_s == pytest.approx(13.2)
     assert visual.max_vx_cm_s == 32.0
     assert route.avoidance_forward_ratio == 0.60
@@ -534,6 +535,7 @@ def test_frozen_v2_keeps_22cm_speed_scaled_turn_features():
         18.0,
     )
     assert config.tangent_window_points == 3
+    assert config.sharp_left_recovery_enabled
     assert config.max_planar_decel_cm_s2 == 60.0
     assert (config.curvature_yaw_ff_kp, config.curvature_yaw_ff_max_deg_s) == (
         0.10,

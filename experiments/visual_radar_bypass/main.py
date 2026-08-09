@@ -153,6 +153,7 @@ def build_frozen_v2_visual_config(
         # 120 cm/s^2 * (22 / 45) ~= 58.7; round to a conservative 60.
         max_planar_decel_cm_s2=60.0,
         max_yaw_accel_deg_s2=50.0,
+        sharp_left_recovery_enabled=True,
         degraded_speed_scale=0.90,
         curvature_slowdown_start_deg=18.0,
         curvature_full_slowdown_deg=52.0,
@@ -225,7 +226,6 @@ def build_experimental_visual_config(
         max_planar_decel_cm_s2=85.0,
         max_yaw_accel_deg_s2=65.0,
         road_loss_grace_s=0.22,
-        sharp_left_recovery_enabled=True,
         degraded_speed_scale=0.92,
         curvature_slowdown_start_deg=25.0,
         curvature_full_slowdown_deg=65.0,

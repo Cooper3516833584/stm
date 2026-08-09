@@ -68,6 +68,9 @@ class StaticRouteBypassConfig:
     # Frozen flight-validated v1 defaults.  The dataclass intentionally remains
     # configurable so a faster v2 profile can be added without mutating v1.
     target_surface_clearance_cm: float = 85.0
+    # ``None`` uses the ordinary target in every state.  The current profile
+    # uses 95 cm only while diverging, then returns to the 85 cm target.
+    diverge_target_surface_clearance_cm: float | None = None
     reshift_surface_clearance_cm: float = 75.0
     max_outward_vy_cm_s: float = 8.0
     lateral_kp_s: float = 0.20
@@ -116,6 +119,12 @@ class StaticRouteBypassConfig:
         if self.diverge_vx_cm_s is None:
             return self.avoidance_vx_cm_s
         return max(0.0, float(self.diverge_vx_cm_s))
+
+    @property
+    def active_diverge_target_surface_clearance_cm(self) -> float:
+        if self.diverge_target_surface_clearance_cm is None:
+            return self.target_surface_clearance_cm
+        return max(0.0, float(self.diverge_target_surface_clearance_cm))
 
     @property
     def half_fov_deg(self) -> float:
@@ -788,7 +797,13 @@ class StaticRouteBypassPlanner:
     def _radar_vy(self, observation: StaticTubeObservation | None, now: float) -> float:
         if observation is None or self._locked_side is None:
             return 0.0
-        error = max(0.0, self.config.target_surface_clearance_cm - observation.lateral_clearance_cm)
+        target_clearance_cm = self.config.target_surface_clearance_cm
+        if self.state in {
+            StaticRouteBypassState.DIVERGE_LEFT,
+            StaticRouteBypassState.DIVERGE_RIGHT,
+        }:
+            target_clearance_cm = self.config.active_diverge_target_surface_clearance_cm
+        error = max(0.0, target_clearance_cm - observation.lateral_clearance_cm)
         magnitude = min(self.config.max_outward_vy_cm_s, self.config.lateral_kp_s * error)
         if error > 0.0:
             magnitude = max(1.0, magnitude)

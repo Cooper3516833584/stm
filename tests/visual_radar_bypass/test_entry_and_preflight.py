@@ -100,6 +100,7 @@ def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
     assert route.active_diverge_vx_cm_s == 0.0
     assert route.require_target_clearance_before_forward
     assert route.target_surface_clearance_cm == 85.0
+    assert route.active_diverge_target_surface_clearance_cm == 95.0
     assert route.reshift_surface_clearance_cm == 75.0
     assert route.clearance_frames == 1
     assert route.clearance_run_s == 1.5
@@ -111,6 +112,7 @@ def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
         "avoidance_vx_cm_s",
         "diverge_vx_cm_s",
         "require_target_clearance_before_forward",
+        "diverge_target_surface_clearance_cm",
         "max_outward_vy_cm_s",
         "lateral_kp_s",
         "ramp_in_s",

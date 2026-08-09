@@ -61,7 +61,8 @@ v1 保持 `vx=8.4 cm/s`、雷达横移上限 `8 cm/s`、85/75 cm 净空回差和
 
 - 只有 `NORMAL → DIVERGE` 后令 `vx=0`，只做横向移动；从其他状态重新进入 `DIVERGE`
   时保持 60% 绕障前速。关闭 v1 的角度/侧边缘 fallback，管表面侧向净空 `y > 75 cm`
-  即进入 `PASS_FORWARD` 并恢复 60% 前速；雷达横向速度仍以 85 cm 净空为控制目标。
+  即进入 `PASS_FORWARD` 并恢复 60% 前速；`DIVERGE` 的雷达横向速度以 95 cm 为目标，
+  后续状态仍以 85 cm 为目标。
 - 完全旁路 Safety；前方 80 cm 停车、150 cm 限速、侧向 45 cm 停车、速度裁剪和飞行健康硬停车
   均不再生效。
 - 设置 `clearance_run_s=1.5`。进入 `CLEARANCE_RUN` 后停止旧管体关联与预测，以连续 1.5 秒

@@ -65,6 +65,7 @@ def build_parameter_registry(
         ParameterRecord("lookahead_cm", config.lookahead_cm, existing, "initial acquisition distance", True),
         ParameterRecord("intrusion_half_width_cm", config.intrusion_half_width_cm, existing, "route intrusion gate", True),
         ParameterRecord("target_surface_clearance_cm", config.target_surface_clearance_cm, v1_source("target_surface_clearance_cm"), "outward clearance target", True),
+        ParameterRecord("diverge_target_surface_clearance_cm", config.active_diverge_target_surface_clearance_cm, v1_source("diverge_target_surface_clearance_cm"), "DIVERGE-only lateral velocity target", True),
         ParameterRecord("reshift_surface_clearance_cm", config.reshift_surface_clearance_cm, v1_source("reshift_surface_clearance_cm"), "clearance hysteresis", True),
         ParameterRecord("max_outward_vy_cm_s", config.max_outward_vy_cm_s, v1_source("max_outward_vy_cm_s"), "radar-only lateral correction cap", True),
         ParameterRecord("lateral_kp_s", config.lateral_kp_s, v1_source("lateral_kp_s"), "radar-only lateral correction gain", True),

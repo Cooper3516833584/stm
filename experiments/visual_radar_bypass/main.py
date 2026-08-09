@@ -166,6 +166,7 @@ def build_experimental_static_route_config(
         ramp_in_s=0.7,
         diverge_vx_cm_s=0.0,
         require_target_clearance_before_forward=True,
+        diverge_target_surface_clearance_cm=95.0,
         clearance_frames=1,
         track_lost_forward_vx_cm_s=visual_max_vx_cm_s * 0.60,
         track_lost_use_guidance_yaw=True,

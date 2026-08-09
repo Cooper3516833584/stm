@@ -236,12 +236,13 @@ def test_target_clearance_moves_to_forward_pass_without_side_switch():
     assert decayed.vy_cm_s == 0.0
 
 
-def test_current_profile_enters_forward_pass_at_75cm_but_keeps_85cm_vy_target():
+def test_current_profile_uses_95cm_diverge_vy_then_85cm_after_75cm_exit():
     planner = StaticRouteBypassPlanner(
         replace(
             StaticRouteBypassConfig(),
             diverge_vx_cm_s=0.0,
             require_target_clearance_before_forward=True,
+            diverge_target_surface_clearance_cm=95.0,
             clearance_frames=1,
         )
     )
@@ -250,20 +251,28 @@ def test_current_profile_enters_forward_pass_at_75cm_but_keeps_85cm_vy_target():
 
     assert planner.state == StaticRouteBypassState.DIVERGE_LEFT
     assert planner.config.target_surface_clearance_cm == 85.0
+    assert planner.config.active_diverge_target_surface_clearance_cm == 95.0
     assert planner.config.reshift_surface_clearance_cm == 75.0
     assert activated.vx_cm_s == 0.0
     assert moving_outward.vx_cm_s == 0.0
     assert moving_outward.vy_cm_s > 0.0
 
-    below_exit = _update(planner, _field(_cluster(90.0, -75.0)), 1.3)
+    below_exit = _update(planner, _field(_cluster(90.0, -75.0)), 2.0)
     assert planner.state == StaticRouteBypassState.DIVERGE_LEFT
     assert below_exit.vx_cm_s == 0.0
+    below_clearance = planner.diagnostics()["obstacle_surface_clearance_cm"]
+    assert below_exit.vy_cm_s == pytest.approx(
+        planner.config.lateral_kp_s * (95.0 - below_clearance)
+    )
 
-    command = _update(planner, _field(_cluster(90.0, -77.0)), 1.4)
+    command = _update(planner, _field(_cluster(90.0, -77.0)), 2.1)
 
     assert planner.state == StaticRouteBypassState.PASS_FORWARD_LEFT
     assert command.vx_cm_s == pytest.approx(planner.config.avoidance_vx_cm_s)
-    assert command.vy_cm_s > 0.0
+    exit_clearance = planner.diagnostics()["obstacle_surface_clearance_cm"]
+    assert command.vy_cm_s == pytest.approx(
+        planner.config.lateral_kp_s * (85.0 - exit_clearance)
+    )
     assert planner.transition_reason == "diverge_exit_lateral_clearance"
 
 

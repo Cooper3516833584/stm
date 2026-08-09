@@ -37,6 +37,9 @@ def test_default_entry_is_real_sensor_dry_run(tmp_path):
     assert args.camera_index == 7
     assert args.upper_port == "/dev/ttySTM4"
     assert args.lower_port == "/dev/ttySTM9"
+    assert args.hc14_port is None
+    assert args.hc14_baudrate is None
+    assert args.hc14_connect_timeout_s == 5.0
     assert args.loop_hz == 10.0
     assert args.bypass_planner == "static-route"
     assert args.bypass_forward_transition_s == 2.0
@@ -97,6 +100,7 @@ def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
     assert route.clearance_run_s == 1.5
     assert route.normal_activation_radius_cm == 100.0
     assert route.clearance_reacquire_radius_cm == 80.0
+    assert route.max_encounter_s is None
     for name in (
         "visual_max_vx_cm_s",
         "avoidance_vx_cm_s",
@@ -104,6 +108,7 @@ def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
         "lateral_kp_s",
         "ramp_in_s",
         "clearance_run_s",
+        "max_encounter_s",
     ):
         assert by_name[name]["source"] == "UNVERIFIED_TUNING"
         assert by_name[name]["requires_flight_tuning"]
@@ -137,6 +142,7 @@ def test_target_registry_records_detection_control_height_and_safety_parameters(
     assert by_name["road_edge_yaw_max_deg_s"] == 3.0
     assert by_name["road_edge_emergency_vx_cap_cm_s"] == 18.5
     assert by_name["clearance_run_s"] == 1.5
+    assert by_name["max_encounter_s"] is None
     assert by_name["normal_activation_radius_cm"] == 100.0
     assert by_name["clearance_reacquire_radius_cm"] == 80.0
     assert by_name["target_mission.target_vx_cm_s"] == 13.2

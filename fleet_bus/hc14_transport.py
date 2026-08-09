@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import logging
 import os
 import threading
@@ -10,9 +11,9 @@ from typing import Callable, Optional
 
 LOG = logging.getLogger("fleet-air-hc14")
 
-DEFAULT_AIR_HC14_PORT = (
-    "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
-)
+CH340_VENDOR_ID = 0x1A86
+CH340_PRODUCT_ID = 0x7523
+DEFAULT_AIR_HC14_PORT = "auto"
 DEFAULT_AIR_HC14_BAUDRATE = 115200
 HC14_PORT_ENV = "D_TASK_HC14_PORT"
 HC14_BAUDRATE_ENV = "D_TASK_HC14_BAUDRATE"
@@ -24,7 +25,13 @@ def resolve_hc14_settings(
     port: Optional[str] = None,
     baudrate: Optional[int] = None,
 ):
-    resolved_port = port or os.environ.get(HC14_PORT_ENV, DEFAULT_AIR_HC14_PORT)
+    configured_port = port if port is not None else os.environ.get(
+        HC14_PORT_ENV, DEFAULT_AIR_HC14_PORT
+    )
+    if configured_port is None or configured_port.strip().lower() == "auto":
+        resolved_port = discover_hc14_port()
+    else:
+        resolved_port = configured_port.strip()
     raw_baudrate = (
         baudrate
         if baudrate is not None
@@ -39,6 +46,77 @@ def resolve_hc14_settings(
     if resolved_baudrate <= 0:
         raise ValueError("HC-14 baudrate must be positive")
     return resolved_port, resolved_baudrate
+
+
+def discover_hc14_port() -> str:
+    """Resolve the unique CH340 serial node without confusing it with CP210x."""
+    ports = _list_serial_ports()
+    matches = [port for port in ports if _is_hc14_port(port)]
+    if len(matches) == 1:
+        return _stable_serial_path(matches[0].device)
+    if len(matches) > 1:
+        devices = ", ".join(sorted(port.device for port in matches))
+        raise RuntimeError(
+            "Multiple CH340 devices (1a86:7523) found: "
+            f"{devices}; select HC-14 with --hc14-port or {HC14_PORT_ENV}"
+        )
+
+    available = ", ".join(
+        f"{getattr(item, 'device', '?')} "
+        f"({getattr(item, 'description', '')}; {getattr(item, 'hwid', '')})"
+        for item in ports
+    ) or "none"
+    if _usb_device_present(CH340_VENDOR_ID, CH340_PRODUCT_ID):
+        raise RuntimeError(
+            "CH340 USB device 1a86:7523 is enumerated but has no serial tty; "
+            "the running kernel must enable CONFIG_USB_SERIAL_CH341=y/m and "
+            f"load ch341. Available serial ports: {available}"
+        )
+    raise RuntimeError(
+        "HC-14 CH340 USB device 1a86:7523 was not detected. "
+        f"Available serial ports: {available}"
+    )
+
+
+def _list_serial_ports():
+    try:
+        from serial.tools.list_ports import comports
+    except ImportError as exc:
+        raise RuntimeError("HC-14 auto-detection requires pyserial") from exc
+    return list(comports())
+
+
+def _is_hc14_port(port: object) -> bool:
+    vid = getattr(port, "vid", None)
+    pid = getattr(port, "pid", None)
+    if vid == CH340_VENDOR_ID and pid == CH340_PRODUCT_ID:
+        return True
+    hwid = (getattr(port, "hwid", "") or "").upper()
+    return "VID:PID=1A86:7523" in hwid or "VID_1A86&PID_7523" in hwid
+
+
+def _stable_serial_path(device: str) -> str:
+    real_device = os.path.realpath(device)
+    for directory in ("/dev/serial/by-id", "/dev/serial/by-path"):
+        for link in sorted(glob.glob(os.path.join(directory, "*"))):
+            if os.path.realpath(link) == real_device:
+                return link
+    return device
+
+
+def _usb_device_present(vendor_id: int, product_id: int) -> bool:
+    for vendor_path in glob.glob("/sys/bus/usb/devices/*/idVendor"):
+        product_path = os.path.join(os.path.dirname(vendor_path), "idProduct")
+        try:
+            with open(vendor_path, encoding="ascii") as stream:
+                vendor = int(stream.read().strip(), 16)
+            with open(product_path, encoding="ascii") as stream:
+                product = int(stream.read().strip(), 16)
+        except (OSError, ValueError):
+            continue
+        if vendor == vendor_id and product == product_id:
+            return True
+    return False
 
 
 class HC14BridgeCodec:
@@ -110,11 +188,23 @@ class HC14FleetTransport:
         self._thread = None  # type: Optional[threading.Thread]
         self._serial = None
         self._lock = threading.Lock()
+        self._connected_event = threading.Event()
+        self._last_error = None  # type: Optional[Exception]
 
     @property
     def connected(self) -> bool:
         with self._lock:
             return self._serial is not None
+
+    @property
+    def last_error(self) -> Optional[Exception]:
+        with self._lock:
+            return self._last_error
+
+    def wait_connected(self, timeout_s: float) -> bool:
+        if timeout_s < 0.0:
+            raise ValueError("HC-14 connection timeout must not be negative")
+        return self._connected_event.wait(timeout_s)
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -129,6 +219,7 @@ class HC14FleetTransport:
 
     def stop(self) -> None:
         self._stop.set()
+        self._connected_event.clear()
         with self._lock:
             serial_obj = self._serial
             self._serial = None
@@ -173,6 +264,8 @@ class HC14FleetTransport:
         try:
             import serial
         except ImportError as exc:
+            with self._lock:
+                self._last_error = exc
             self._notify_disconnected(exc)
             return
 
@@ -183,12 +276,17 @@ class HC14FleetTransport:
                 self._codec.reset()
                 with self._lock:
                     self._serial = serial_obj
+                    self._last_error = None
+                self._connected_event.set()
                 if self._on_connected is not None:
                     self._on_connected()
                 self._read_loop(serial_obj)
             except Exception as exc:
                 error = exc
+                with self._lock:
+                    self._last_error = exc
             finally:
+                self._connected_event.clear()
                 with self._lock:
                     serial_obj = self._serial
                     self._serial = None

@@ -7,6 +7,7 @@ import threading
 import time
 
 from fleet_bus.models import AckReason, AirFleetState, CommandId, NodeFlags
+from loguru import logger
 
 
 class RoadPatrolOperationState(IntEnum):
@@ -109,6 +110,7 @@ def wait_for_ground_takeoff_authorization(
     indicator: object,
     stop_event: threading.Event,
     receive_timeout_s: float = 0.1,
+    start_warning_s: float = 2.0,
 ) -> bool:
     """Apply ground-issued prepare/start commands in the flight task thread."""
 
@@ -122,13 +124,32 @@ def wait_for_ground_takeoff_authorization(
             indicator.prepare_for_ground_countdown()
             prepared = True
             commands.complete(command)
+            logger.info(
+                "[VIS-RADAR] ground PREPARE completed; digital output 0=True, "
+                "indicator green"
+            )
             continue
         if command.command_id == int(CommandId.DRONE_START_MISSION):
             if not prepared:
                 commands.fail(command, int(AckReason.NOT_READY))
                 continue
+            indicator.set_red()
+            logger.warning(
+                "[VIS-RADAR] ground START accepted; indicator red for {:.1f}s",
+                start_warning_s,
+            )
+            if stop_event.wait(max(0.0, float(start_warning_s))):
+                commands.fail(command, int(AckReason.LINK_STATE_CHANGED))
+                logger.warning(
+                    "[VIS-RADAR] takeoff cancelled during airborne red warning"
+                )
+                return False
             indicator.set_green()
             commands.complete(command)
+            logger.info(
+                "[VIS-RADAR] airborne red warning complete; indicator green, "
+                "takeoff authorized"
+            )
             return True
         commands.fail(command, int(AckReason.UNSUPPORTED))
     return False

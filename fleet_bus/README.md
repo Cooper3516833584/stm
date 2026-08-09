@@ -5,9 +5,11 @@ active. The radio is connected directly to the airborne Linux computer; FleetBus
 traffic does not pass through the flight controller, its ACK path, or UART2.
 
 `attach_air_fleet_node()` creates and starts the shared `HC14FleetTransport`.
-It uses `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0` at 115200 baud by
-default. `D_TASK_HC14_PORT` and `D_TASK_HC14_BAUDRATE` may override those values
-without changing mission code. The direct transport keeps the same `BB 33 |
+It auto-detects the unique CH340 device with USB VID:PID `1a86:7523`, prefers a
+stable `/dev/serial/by-id` or `/dev/serial/by-path` link when udev provides one,
+and uses 115200 baud by default. `--hc14-port`, `D_TASK_HC14_PORT`, and
+`D_TASK_HC14_BAUDRATE` may override those values without changing mission code.
+The direct transport keeps the same `BB 33 |
 length | FleetBus frame` envelope used by the car and ground station.
 Mission code consumes `node.command_queue.receive()` in its existing task thread and
 decides whether and how an accepted command may call existing navigation logic.
@@ -25,3 +27,11 @@ are fixed and shared with the ground station, so the task omits the optional
 absolute-position extension to keep every HC-14 response bounded. An
 unrecognized cell remains `TerrainCode.UNKNOWN (0)` even when the survey is
 marked complete.
+
+The Linux kernel must provide the `ch341` driver (`CONFIG_USB_SERIAL_CH341=y` or
+`m`). Seeing `1a86:7523` in `lsusb` is not sufficient: `lsusb -t` must show
+`Driver=ch341`, and a matching tty plus `/dev/serial/by-path` link must exist.
+If USB enumeration succeeds but no tty exists, startup now fails with an
+explicit driver diagnostic before the fused program connects to the flight
+controller. The flight entry also waits for the serial port to open before it
+allows ground authorization.

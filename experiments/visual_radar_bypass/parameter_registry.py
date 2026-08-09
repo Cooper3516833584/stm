@@ -78,7 +78,7 @@ def build_parameter_registry(
         ParameterRecord("rear_margin_cm", config.rear_margin_cm, validated, "whole-tube rear margin", True),
         ParameterRecord("translation_credit_ratio", config.translation_credit_ratio, validated, "conservative command odometry", True),
         ParameterRecord("track_lost_hold_s", config.track_lost_hold_s, validated, "unexpected dropout hold", True),
-        ParameterRecord("max_encounter_s", config.max_encounter_s, validated, "latched timeout", True),
+        ParameterRecord("max_encounter_s", config.max_encounter_s, v1_source("max_encounter_s"), "latched timeout; disabled when None", True),
         ParameterRecord("radar_timeout_s", radar_timeout_s, existing, "Safety radar freshness gate", True),
         ParameterRecord("obstacle_stop_distance_cm", 80.0, existing, "Safety forward stop", True),
         ParameterRecord("obstacle_slow_distance_cm", 150.0, existing, "Safety forward slowdown", True),

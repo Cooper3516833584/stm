@@ -444,6 +444,7 @@ def attach_air_fleet_node(
     allowed_readonly_command_ids=frozenset(),
     hc14_port: Optional[str] = None,
     hc14_baudrate: Optional[int] = None,
+    connect_timeout_s: Optional[float] = None,
     transport_factory=None,
 ) -> AirFleetNode:
     """Create the airborne FleetBus endpoint on its direct CH340/HC-14 link.
@@ -451,6 +452,8 @@ def attach_air_fleet_node(
     ``state_provider`` lets a task add task-defined report fields without
     changing the navigation pose conversion shared by other missions.
     """
+    if connect_timeout_s is not None and connect_timeout_s < 0.0:
+        raise ValueError("HC-14 connection timeout must not be negative")
     from .hc14_transport import (
         HC14FleetTransport,
         resolve_hc14_settings,
@@ -495,4 +498,22 @@ def attach_air_fleet_node(
     )
     holder["node"] = node
     node.start()
+    if connect_timeout_s is not None:
+        wait_connected = getattr(transport, "wait_connected", None)
+        if not callable(wait_connected):
+            node.close()
+            raise TypeError("HC-14 transport does not support connection waiting")
+        try:
+            connected = wait_connected(connect_timeout_s)
+        except BaseException:
+            node.close()
+            raise
+        if not connected:
+            last_error = getattr(transport, "last_error", None)
+            node.close()
+            detail = f": {last_error}" if last_error is not None else ""
+            raise RuntimeError(
+                "Airborne HC-14 did not connect on "
+                f"{port} within {connect_timeout_s:g}s{detail}"
+            )
     return node

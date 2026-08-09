@@ -166,6 +166,7 @@ def build_experimental_static_route_config(
         clearance_run_s=1.5,
         normal_activation_radius_cm=100.0,
         clearance_reacquire_radius_cm=80.0,
+        max_encounter_s=None,
     )
 
 
@@ -179,6 +180,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--upper-port", default="/dev/ttySTM4")
     parser.add_argument("--lower-port", default="/dev/ttySTM9")
     parser.add_argument("--fc-port", default=None)
+    parser.add_argument(
+        "--hc14-port",
+        default=None,
+        help=(
+            "HC-14 CH340 serial port; default is auto-detection by USB "
+            "VID:PID 1a86:7523"
+        ),
+    )
+    parser.add_argument("--hc14-baudrate", type=int, default=None)
+    parser.add_argument("--hc14-connect-timeout-s", type=float, default=5.0)
     parser.add_argument("--loop-hz", type=float, default=10.0)
     parser.add_argument(
         "--runtime-mode",
@@ -249,6 +260,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--loop-hz must be greater than zero")
     if args.duration_s <= 0.0:
         raise ValueError("--duration-s must be greater than zero")
+    if args.hc14_baudrate is not None and args.hc14_baudrate <= 0:
+        raise ValueError("--hc14-baudrate must be greater than zero")
+    if args.hc14_connect_timeout_s <= 0.0:
+        raise ValueError("--hc14-connect-timeout-s must be greater than zero")
     if args.bypass_forward_transition_s < 0.0:
         raise ValueError("--bypass-forward-transition-s cannot be negative")
     if args.tuning_log_every_n <= 0:
@@ -521,17 +536,23 @@ def main(argv: list[str] | None = None) -> None:
         wait_for_visual_road(guidance, timeout_s=10.0, consecutive_frames=3)
 
         if actual_flight:
-            fc = connect_fc(FCConnectConfig(port=args.fc_port, mode=2, timeout_s=10.0))
-            flight_owned = True
-            fleet_state.bind_fc(fc)
             fleet_node = attach_air_fleet_node(
-                fc,
+                None,
                 None,
                 fleet_stop_event,
                 readonly=True,
                 allow_start_mission=True,
                 state_provider=fleet_state,
+                hc14_port=args.hc14_port,
+                hc14_baudrate=args.hc14_baudrate,
+                connect_timeout_s=args.hc14_connect_timeout_s,
             )
+            # The radio link is a precondition for ground authorization.  Do
+            # not even open the flight-controller connection until HC-14 is
+            # present, uniquely identified, and successfully opened.
+            fc = connect_fc(FCConnectConfig(port=args.fc_port, mode=2, timeout_s=10.0))
+            flight_owned = True
+            fleet_state.bind_fc(fc)
             indicator = FusionFlightIndicator(fc)
             logger.warning(
                 "[VIS-RADAR] initialization complete; waiting for ground "

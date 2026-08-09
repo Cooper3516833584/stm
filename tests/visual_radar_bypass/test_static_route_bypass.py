@@ -499,6 +499,15 @@ def test_timeout_is_latched_stop():
     assert command.vy_cm_s == 0.0
 
 
+def test_none_timeout_keeps_encounter_active():
+    planner = StaticRouteBypassPlanner(replace(StaticRouteBypassConfig(), max_encounter_s=None))
+    _activate_right(planner)
+    command = _update(planner, _field(_cluster(100.0, -40.0)), 1000.0)
+
+    assert planner.state != StaticRouteBypassState.TIMEOUT_STOP
+    assert command.vx_cm_s > 0.0
+
+
 def test_recorded_replay_never_credits_unexecuted_motion(tmp_path):
     points_dir = tmp_path / "radar_points"
     points_dir.mkdir()

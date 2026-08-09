@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 import threading
 
-from fleet_bus.models import NodeFlags
+from fleet_bus.models import AckReason, NodeFlags
 from experiments.visual_radar_bypass.road_patrol_fleet import (
     RoadPatrolFleetStateProvider,
     RoadPatrolOperationState,
@@ -60,7 +60,7 @@ def test_actual_release_has_a_distinct_durable_state():
     ) == RoadPatrolOperationState.LINE_FOLLOWING
 
 
-def test_ground_prepare_turns_red_and_start_turns_green_before_authorization():
+def test_ground_prepare_turns_green_and_start_holds_red_before_authorization():
     events = []
     prepare = SimpleNamespace(command_id=0x24)
     start = SimpleNamespace(command_id=0x23)
@@ -81,25 +81,90 @@ def test_ground_prepare_turns_red_and_start_turns_green_before_authorization():
 
     class Indicator:
         def prepare_for_ground_countdown(self):
-            events.append(("indicator", "red-and-payload-on"))
+            events.append(("indicator", "green-and-payload-on"))
+
+        def set_red(self):
+            events.append(("indicator", "red"))
 
         def set_green(self):
             events.append(("indicator", "green"))
 
+    class StopEvent:
+        def is_set(self):
+            return False
+
+        def wait(self, duration):
+            events.append(("wait", duration))
+            return False
+
     authorized = wait_for_ground_takeoff_authorization(
         fleet_node=SimpleNamespace(command_queue=Commands()),
         indicator=Indicator(),
-        stop_event=threading.Event(),
+        stop_event=StopEvent(),
     )
 
     assert authorized
     assert events == [
         ("receive", 0.1),
-        ("indicator", "red-and-payload-on"),
+        ("indicator", "green-and-payload-on"),
         ("complete", 0x24),
         ("receive", 0.1),
+        ("indicator", "red"),
+        ("wait", 2.0),
         ("indicator", "green"),
         ("complete", 0x23),
+    ]
+
+
+def test_stop_during_start_warning_keeps_red_and_refuses_takeoff():
+    events = []
+    prepare = SimpleNamespace(command_id=0x24)
+    start = SimpleNamespace(command_id=0x23)
+
+    class Commands:
+        def __init__(self):
+            self.pending = [prepare, start]
+
+        def receive(self, timeout=None):
+            return self.pending.pop(0)
+
+        def complete(self, command):
+            events.append(("complete", command.command_id))
+
+        def fail(self, command, error_code):
+            events.append(("fail", command.command_id, error_code))
+
+    class Indicator:
+        def prepare_for_ground_countdown(self):
+            events.append(("indicator", "green"))
+
+        def set_red(self):
+            events.append(("indicator", "red"))
+
+        def set_green(self):
+            events.append(("indicator", "green"))
+
+    class StopDuringWarning:
+        def is_set(self):
+            return False
+
+        def wait(self, duration):
+            events.append(("wait", duration))
+            return True
+
+    authorized = wait_for_ground_takeoff_authorization(
+        fleet_node=SimpleNamespace(command_queue=Commands()),
+        indicator=Indicator(),
+        stop_event=StopDuringWarning(),
+    )
+
+    assert not authorized
+    assert events == [
+        ("indicator", "green"),
+        ("complete", 0x24),
+        ("indicator", "red"),
+        ("wait", 2.0),
+        ("fail", 0x23, int(AckReason.LINK_STATE_CHANGED)),
     ]
 
 

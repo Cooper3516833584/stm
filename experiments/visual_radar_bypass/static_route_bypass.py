@@ -84,7 +84,8 @@ class StaticRouteBypassConfig:
     rear_margin_cm: float = 20.0
     translation_credit_ratio: float = 0.70
     track_lost_hold_s: float = 1.0
-    max_encounter_s: float = 40.0
+    # ``None`` disables the encounter-duration stop for supervised trials.
+    max_encounter_s: float | None = 40.0
     static_model_tolerance_cm: float = 25.0
     static_model_bad_frames: int = 3
     nominal_dt_s: float = 0.1
@@ -803,7 +804,11 @@ class StaticRouteBypassPlanner:
         return StaticRouteBypassState.PASS_FORWARD_LEFT if (self._locked_side or 1) > 0 else StaticRouteBypassState.PASS_FORWARD_RIGHT
 
     def _encounter_timed_out(self, now: float) -> bool:
-        return bool(self._encounter_started_s is not None and now - self._encounter_started_s >= self.config.max_encounter_s)
+        return bool(
+            self.config.max_encounter_s is not None
+            and self._encounter_started_s is not None
+            and now - self._encounter_started_s >= self.config.max_encounter_s
+        )
 
     def _road_usable(self, perception, desired: Command) -> bool:
         return bool(

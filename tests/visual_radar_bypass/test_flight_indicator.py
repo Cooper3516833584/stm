@@ -20,7 +20,7 @@ class _FakeFC:
         self.calls.append(("digital", channel, on))
 
 
-def test_ground_countdown_prepare_arms_payload_and_sets_red():
+def test_ground_countdown_prepare_arms_payload_and_sets_green():
     fc = _FakeFC()
     indicator = FusionFlightIndicator(fc)
 
@@ -28,7 +28,7 @@ def test_ground_countdown_prepare_arms_payload_and_sets_red():
 
     assert fc.calls == [
         ("digital", 0, True),
-        ("led", *RED),
+        ("led", *GREEN),
     ]
 
 

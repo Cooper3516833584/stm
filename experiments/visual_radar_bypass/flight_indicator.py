@@ -35,10 +35,10 @@ class FusionFlightIndicator:
         self._set_color(YELLOW)
 
     def prepare_for_ground_countdown(self) -> None:
-        """Arm the payload output and show that takeoff is awaiting approval."""
+        """Arm the payload output and show that ground preparation completed."""
 
         self.fc.set_digital_output(0, True)
-        self.set_red()
+        self.set_green()
 
     def update(
         self,

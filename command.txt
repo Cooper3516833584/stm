@@ -6,8 +6,11 @@ python3 road_trajectory_main.py#单巡线
 cd /usr/local/ObstacleAvoidanceDrone
 PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \
   -m experiments.visual_radar_bypass.main \
+  --runtime-mode process \
+  --bypass-planner static-route \
+  --loop-hz 10 \
+  --duration-s 100 \
+  --takeoff-height-cm 100 \
   --enable-flight \
   --auto-takeoff \
-  --confirm-visual-radar-flight-test \
-  --takeoff-height-cm 100 \
-  --duration-s 60
+  --confirm-visual-radar-flight-test

@@ -129,6 +129,171 @@ def test_visible_path_end_uses_tangent_to_keep_moving():
     assert command.vy_cm_s == pytest.approx(0.0)
 
 
+def test_sharp_left_recovery_holds_confirmed_left_yaw_when_path_falls_behind():
+    follower = _follower(
+        min_forward_lookahead_px=30.0,
+        tangent_filter_tau_s=0.0,
+        tangent_filter_max_rate_deg_s=1_000_000.0,
+        target_filter_tau_s=0.0,
+        target_filter_max_rate_px_s=1_000_000.0,
+        max_planar_decel_cm_s2=1_000_000.0,
+        sharp_left_recovery_enabled=True,
+    )
+    forward_left = [
+        (400.0, 460.0),
+        (380.0, 400.0),
+        (360.0, 340.0),
+        (340.0, 280.0),
+        (300.0, 210.0),
+        (260.0, 160.0),
+    ]
+    terminal_behind = [
+        (120.0, 460.0),
+        (160.0, 400.0),
+        (200.0, 360.0),
+        (240.0, 320.0),
+        (280.0, 300.0),
+    ]
+
+    for index in range(5):
+        reliable = follower.update(
+            _perception(forward_left),
+            now_s=1.0 + 0.1 * index,
+        )
+        assert reliable.yaw_rate_deg_s < 0.0
+
+    first_behind = follower.update(_perception(terminal_behind), now_s=1.5)
+    recovery = follower.update(_perception(terminal_behind), now_s=1.6)
+
+    assert first_behind.yaw_rate_deg_s > 0.0
+    assert recovery.vx_cm_s == pytest.approx(0.0)
+    assert recovery.vy_cm_s == pytest.approx(0.0)
+    assert -10.0 <= recovery.yaw_rate_deg_s <= -6.0
+    assert recovery.yaw_rate_deg_s == pytest.approx(
+        follower.last_diagnostics.sharp_left_recovery_hold_yaw_deg_s
+    )
+    assert follower.last_diagnostics.state == "sharp_left_recovery"
+    assert follower.last_diagnostics.sharp_left_recovery_active
+    assert not follower.last_diagnostics.sharp_left_recovery_timed_out
+    assert follower.last_diagnostics.angle_yaw_term_deg_s == pytest.approx(0.0)
+    assert follower.last_diagnostics.yaw_feedforward_deg_s == pytest.approx(0.0)
+    assert follower.last_diagnostics.edge_yaw_bias_deg_s == pytest.approx(0.0)
+
+    first_reacquire = follower.update(_perception(forward_left), now_s=1.7)
+    second_reacquire = follower.update(_perception(forward_left), now_s=1.8)
+    resumed = follower.update(_perception(forward_left), now_s=1.9)
+
+    assert first_reacquire.vx_cm_s == pytest.approx(0.0)
+    assert second_reacquire.vx_cm_s == pytest.approx(0.0)
+    assert resumed.vx_cm_s > 0.0
+    assert resumed.yaw_rate_deg_s < 0.0
+    assert follower.last_diagnostics.state == "tracking"
+    assert follower.last_diagnostics.sharp_left_recovery_consumed
+
+    follower.update(_perception(terminal_behind), now_s=2.0)
+    follower.update(_perception(terminal_behind), now_s=2.1)
+    assert follower.last_diagnostics.state == "tracking"
+
+
+def test_sharp_left_recovery_times_out_to_zero_command():
+    follower = _follower(
+        min_forward_lookahead_px=30.0,
+        tangent_filter_tau_s=0.0,
+        tangent_filter_max_rate_deg_s=1_000_000.0,
+        target_filter_tau_s=0.0,
+        target_filter_max_rate_px_s=1_000_000.0,
+        max_planar_decel_cm_s2=1_000_000.0,
+        sharp_left_recovery_enabled=True,
+        sharp_left_recovery_timeout_s=8.0,
+    )
+    forward_left = [
+        (400.0, 460.0),
+        (360.0, 340.0),
+        (300.0, 210.0),
+        (260.0, 160.0),
+    ]
+    terminal_behind = [
+        (120.0, 460.0),
+        (180.0, 380.0),
+        (240.0, 320.0),
+        (280.0, 300.0),
+    ]
+    for index in range(5):
+        follower.update(_perception(forward_left), now_s=1.0 + 0.1 * index)
+    follower.update(_perception(terminal_behind), now_s=1.5)
+    follower.update(_perception(terminal_behind), now_s=1.6)
+
+    timed_out = follower.update(_perception(terminal_behind), now_s=9.7)
+
+    assert timed_out.as_fc_tuple() == (0, 0, 0, 0)
+    assert follower.last_diagnostics.state == "sharp_left_recovery_timeout"
+    assert follower.last_diagnostics.sharp_left_recovery_active
+    assert follower.last_diagnostics.sharp_left_recovery_timed_out
+
+
+def test_sharp_left_recovery_keeps_near_center_left_history_from_flight_log():
+    follower = _follower(
+        min_forward_lookahead_px=30.0,
+        sharp_left_recovery_enabled=True,
+    )
+    for index, (forward_px, yaw_rate) in enumerate(
+        [(50.0, 3.0), (40.0, -3.0), (30.0, -5.0), (10.0, -6.0), (3.0, -8.0)]
+    ):
+        active, _, _, _ = follower._update_sharp_left_recovery(
+            now_s=1.0 + 0.1 * index,
+            raw_forward_px=forward_px,
+            target_index=10,
+            path_point_count=20,
+            normal_yaw_rate_deg_s=yaw_rate,
+        )
+        assert not active
+
+    follower._update_sharp_left_recovery(
+        now_s=1.5,
+        raw_forward_px=-3.0,
+        target_index=19,
+        path_point_count=20,
+        normal_yaw_rate_deg_s=2.0,
+    )
+    active, timed_out, hold_yaw, _ = follower._update_sharp_left_recovery(
+        now_s=1.6,
+        raw_forward_px=-17.0,
+        target_index=19,
+        path_point_count=20,
+        normal_yaw_rate_deg_s=6.0,
+    )
+
+    assert active
+    assert not timed_out
+    assert hold_yaw == pytest.approx(-6.0)
+
+
+def test_sharp_left_recovery_requires_arming_and_confirmed_left_history():
+    follower = _follower(
+        min_forward_lookahead_px=30.0,
+        tangent_filter_tau_s=0.0,
+        tangent_filter_max_rate_deg_s=1_000_000.0,
+        target_filter_tau_s=0.0,
+        target_filter_max_rate_px_s=1_000_000.0,
+        sharp_left_recovery_enabled=True,
+    )
+    straight = [(320.0, 460.0), (320.0, 300.0), (320.0, 200.0)]
+    terminal_behind = [
+        (120.0, 460.0),
+        (180.0, 380.0),
+        (240.0, 320.0),
+        (280.0, 300.0),
+    ]
+    for index in range(5):
+        follower.update(_perception(straight), now_s=1.0 + 0.1 * index)
+    follower.update(_perception(terminal_behind), now_s=1.5)
+    follower.update(_perception(terminal_behind), now_s=1.6)
+    assert follower.last_diagnostics.state == "tracking"
+
+    follower.set_sharp_left_recovery_armed(False)
+    assert not follower._sharp_left_reliable_yaw_history
+
+
 def test_degraded_fitted_path_keeps_moving_at_reduced_speed():
     points = [(320.0, float(y)) for y in range(460, 19, -20)]
     follower = _follower(degraded_speed_scale=0.75)

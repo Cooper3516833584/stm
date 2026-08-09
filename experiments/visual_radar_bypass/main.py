@@ -225,6 +225,7 @@ def build_experimental_visual_config(
         max_planar_decel_cm_s2=85.0,
         max_yaw_accel_deg_s2=65.0,
         road_loss_grace_s=0.22,
+        sharp_left_recovery_enabled=True,
         degraded_speed_scale=0.92,
         curvature_slowdown_start_deg=25.0,
         curvature_full_slowdown_deg=65.0,
@@ -756,6 +757,9 @@ def main(argv: list[str] | None = None) -> None:
             loop_start = time.perf_counter()
             dt_s = max(0.0, min(0.5, loop_start - previous_loop_s))
             previous_loop_s = loop_start
+            guidance.set_sharp_left_recovery_armed(
+                target_mission is None or not target_mission.mission_active
+            )
             sample = guidance.sample(loop_start)
             planner_elapsed_us = 0.0
             previous_planner_state = planner.state

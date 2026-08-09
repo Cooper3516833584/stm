@@ -90,6 +90,14 @@ class FrozenVisualConfig:
     road_loss_grace_vx_scale: float = 0.80
     road_loss_grace_vy_scale: float = 0.50
     road_loss_grace_yaw_scale: float = 0.70
+    sharp_left_recovery_enabled: bool = False
+    sharp_left_recovery_confirm_frames: int = 2
+    sharp_left_recovery_reacquire_frames: int = 3
+    sharp_left_recovery_history_frames: int = 5
+    sharp_left_recovery_min_confirm_yaw_deg_s: float = 3.0
+    sharp_left_recovery_min_hold_yaw_deg_s: float = 6.0
+    sharp_left_recovery_max_hold_yaw_deg_s: float = 10.0
+    sharp_left_recovery_timeout_s: float = 8.0
     degraded_speed_scale: float = 0.85
     curvature_slowdown_start_deg: float = 12.0
     curvature_full_slowdown_deg: float = 42.0
@@ -202,6 +210,26 @@ class FrozenVisualGuidance:
                 lost_grace_vx_scale=cfg.road_loss_grace_vx_scale,
                 lost_grace_vy_scale=cfg.road_loss_grace_vy_scale,
                 lost_grace_yaw_scale=cfg.road_loss_grace_yaw_scale,
+                sharp_left_recovery_enabled=cfg.sharp_left_recovery_enabled,
+                sharp_left_recovery_confirm_frames=(
+                    cfg.sharp_left_recovery_confirm_frames
+                ),
+                sharp_left_recovery_reacquire_frames=(
+                    cfg.sharp_left_recovery_reacquire_frames
+                ),
+                sharp_left_recovery_history_frames=(
+                    cfg.sharp_left_recovery_history_frames
+                ),
+                sharp_left_recovery_min_confirm_yaw_deg_s=(
+                    cfg.sharp_left_recovery_min_confirm_yaw_deg_s
+                ),
+                sharp_left_recovery_min_hold_yaw_deg_s=(
+                    cfg.sharp_left_recovery_min_hold_yaw_deg_s
+                ),
+                sharp_left_recovery_max_hold_yaw_deg_s=(
+                    cfg.sharp_left_recovery_max_hold_yaw_deg_s
+                ),
+                sharp_left_recovery_timeout_s=cfg.sharp_left_recovery_timeout_s,
                 degraded_speed_scale=cfg.degraded_speed_scale,
                 curvature_slowdown_start_deg=cfg.curvature_slowdown_start_deg,
                 curvature_full_slowdown_deg=cfg.curvature_full_slowdown_deg,
@@ -223,6 +251,9 @@ class FrozenVisualGuidance:
         if callable(disable):
             disable()
 
+    def set_sharp_left_recovery_armed(self, armed: bool) -> None:
+        self.follower.set_sharp_left_recovery_armed(armed)
+
     def sample(self, now_s: float) -> VisualSample:
         perception, age_s, stale = self.pipeline.latest_perception()
         target, target_age_s, target_stale = self.pipeline.latest_target(
@@ -237,7 +268,13 @@ class FrozenVisualGuidance:
         # Sensor failure and stale perception must still stop immediately.
         allow_lost_grace = bool(
             usable
-            and previous_state in {"tracking", "road_lost_grace"}
+            and previous_state
+            in {
+                "tracking",
+                "road_lost_grace",
+                "sharp_left_recovery",
+                "sharp_left_recovery_timeout",
+            }
         )
         desired = self.follower.update(
             perception if usable else None,
@@ -247,7 +284,13 @@ class FrozenVisualGuidance:
         diagnostics = self.follower.last_diagnostics.as_dict()
         road_guidance_usable = bool(
             usable
-            and diagnostics.get("state") in {"tracking", "road_lost_grace"}
+            and diagnostics.get("state")
+            in {
+                "tracking",
+                "road_lost_grace",
+                "sharp_left_recovery",
+                "sharp_left_recovery_timeout",
+            }
         )
         return VisualSample(
             perception=perception,

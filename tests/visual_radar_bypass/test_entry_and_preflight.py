@@ -147,6 +147,7 @@ def test_32cm_experiment_preserves_frozen_profiles_and_marks_overrides_unverifie
     by_name = {row["parameter"]: row for row in registry}
 
     assert FrozenVisualConfig().max_vx_cm_s == 14.0
+    assert not FrozenVisualConfig().sharp_left_recovery_enabled
     assert StaticRouteBypassConfig().avoidance_vx_cm_s == pytest.approx(8.4)
     assert main.FROZEN_V2_PROFILE_NAME == "static-route-flight-v2"
     assert main.FROZEN_V2_PROFILE_STATUS == "FROZEN_FLIGHT_VALIDATED"
@@ -572,6 +573,7 @@ def test_32cm_profile_uses_intermediate_speed_scaled_turn_features():
         config.max_latency_prediction_px,
     ) == (30.0, 108.0, 1.5, 28.0)
     assert config.tangent_window_points == 4
+    assert config.sharp_left_recovery_enabled
     assert (config.max_planar_accel_cm_s2, config.max_planar_decel_cm_s2) == (
         45.0,
         85.0,
@@ -680,6 +682,14 @@ def test_visual_guidance_passes_final_adaptive_parameters_to_follower():
         "road_loss_grace_vx_scale",
         "road_loss_grace_vy_scale",
         "road_loss_grace_yaw_scale",
+        "sharp_left_recovery_enabled",
+        "sharp_left_recovery_confirm_frames",
+        "sharp_left_recovery_reacquire_frames",
+        "sharp_left_recovery_history_frames",
+        "sharp_left_recovery_min_confirm_yaw_deg_s",
+        "sharp_left_recovery_min_hold_yaw_deg_s",
+        "sharp_left_recovery_max_hold_yaw_deg_s",
+        "sharp_left_recovery_timeout_s",
         "degraded_speed_scale",
         "curvature_slowdown_start_deg",
         "curvature_full_slowdown_deg",

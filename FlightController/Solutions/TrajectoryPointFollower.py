@@ -69,6 +69,14 @@ class TrajectoryPointFollowerConfig:
     lost_grace_vx_scale: float = 0.80
     lost_grace_vy_scale: float = 0.50
     lost_grace_yaw_scale: float = 0.70
+    sharp_left_recovery_enabled: bool = False
+    sharp_left_recovery_confirm_frames: int = 2
+    sharp_left_recovery_reacquire_frames: int = 3
+    sharp_left_recovery_history_frames: int = 5
+    sharp_left_recovery_min_confirm_yaw_deg_s: float = 3.0
+    sharp_left_recovery_min_hold_yaw_deg_s: float = 6.0
+    sharp_left_recovery_max_hold_yaw_deg_s: float = 10.0
+    sharp_left_recovery_timeout_s: float = 8.0
 
 
 @dataclass(frozen=True)
@@ -143,6 +151,14 @@ class TrajectoryPointFollowerDiagnostics:
     edge_ratio: float | None = None
     edge_recovery_blend: float = 0.0
     edge_speed_cap_cm_s: float | None = None
+    sharp_left_recovery_armed: bool = False
+    sharp_left_recovery_active: bool = False
+    sharp_left_recovery_timed_out: bool = False
+    sharp_left_recovery_consumed: bool = False
+    sharp_left_recovery_behind_count: int = 0
+    sharp_left_recovery_reacquire_count: int = 0
+    sharp_left_recovery_hold_yaw_deg_s: float | None = None
+    sharp_left_recovery_elapsed_s: float = 0.0
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -164,7 +180,26 @@ class TrajectoryPointFollower:
         self._limited_vx_cm_s = 0.0
         self._limited_vy_cm_s = 0.0
         self._limited_yaw_rate_deg_s = 0.0
+        self._sharp_left_recovery_armed = True
+        self._sharp_left_recovery_active = False
+        self._sharp_left_recovery_timed_out = False
+        self._sharp_left_recovery_consumed = False
+        self._sharp_left_recovery_started_s: float | None = None
+        self._sharp_left_recovery_hold_yaw_deg_s: float | None = None
+        self._sharp_left_recovery_behind_count = 0
+        self._sharp_left_recovery_reacquire_count = 0
+        self._sharp_left_reliable_yaw_history: list[float] = []
         self.last_diagnostics = TrajectoryPointFollowerDiagnostics()
+
+    def set_sharp_left_recovery_armed(self, armed: bool) -> None:
+        """Allow the one-shot recovery only while road guidance owns flight."""
+
+        requested = bool(armed)
+        if requested == self._sharp_left_recovery_armed:
+            return
+        self._sharp_left_recovery_armed = requested
+        if not requested:
+            self._reset_sharp_left_recovery_transient(clear_history=True)
 
     def update(
         self,
@@ -402,6 +437,31 @@ class TrajectoryPointFollower:
             -self.config.max_yaw_rate_deg_s,
             self.config.max_yaw_rate_deg_s,
         )
+        (
+            sharp_left_recovery_active,
+            sharp_left_recovery_timed_out,
+            sharp_left_recovery_hold_yaw,
+            sharp_left_recovery_elapsed_s,
+        ) = self._update_sharp_left_recovery(
+            now_s=float(now_s),
+            raw_forward_px=raw_forward_px,
+            target_index=target_index,
+            path_point_count=len(points),
+            normal_yaw_rate_deg_s=clamped_yaw_rate,
+        )
+        if sharp_left_recovery_active:
+            # The terminal tangent is behind the aircraft and no longer
+            # represents a forward steering direction.  Rotate in place using
+            # the last confirmed left command until a forward target returns.
+            yaw_feedback_deg_s = 0.0
+            yaw_feedforward_deg_s = 0.0
+            edge_yaw_bias_deg_s = 0.0
+            unclamped_yaw_rate = float(sharp_left_recovery_hold_yaw or 0.0)
+            clamped_yaw_rate = _clamp(
+                unclamped_yaw_rate,
+                -self.config.max_yaw_rate_deg_s,
+                self.config.max_yaw_rate_deg_s,
+            )
         yaw_rate, yaw_accel_limited = self._limit_scalar_rate(
             clamped_yaw_rate,
             self._limited_yaw_rate_deg_s,
@@ -427,6 +487,9 @@ class TrajectoryPointFollower:
         )
         requested_vx *= speed_scale
         requested_vy *= speed_scale
+        if sharp_left_recovery_active:
+            requested_vx = 0.0
+            requested_vy = 0.0
         (
             vx,
             vy,
@@ -448,8 +511,15 @@ class TrajectoryPointFollower:
         self._limited_vx_cm_s = vx
         self._limited_vy_cm_s = vy
 
+        diagnostic_state = (
+            "sharp_left_recovery_timeout"
+            if sharp_left_recovery_timed_out
+            else "sharp_left_recovery"
+            if sharp_left_recovery_active
+            else "tracking"
+        )
         self.last_diagnostics = TrajectoryPointFollowerDiagnostics(
-            state="tracking",
+            state=diagnostic_state,
             path_point_count=len(points),
             nearest_index=nearest_index,
             target_index=target_index,
@@ -516,6 +586,18 @@ class TrajectoryPointFollower:
             edge_ratio=edge_ratio,
             edge_recovery_blend=edge_recovery_blend,
             edge_speed_cap_cm_s=edge_speed_cap_cm_s,
+            sharp_left_recovery_armed=self._sharp_left_recovery_armed,
+            sharp_left_recovery_active=sharp_left_recovery_active,
+            sharp_left_recovery_timed_out=sharp_left_recovery_timed_out,
+            sharp_left_recovery_consumed=self._sharp_left_recovery_consumed,
+            sharp_left_recovery_behind_count=self._sharp_left_recovery_behind_count,
+            sharp_left_recovery_reacquire_count=(
+                self._sharp_left_recovery_reacquire_count
+            ),
+            sharp_left_recovery_hold_yaw_deg_s=(
+                self._sharp_left_recovery_hold_yaw_deg_s
+            ),
+            sharp_left_recovery_elapsed_s=sharp_left_recovery_elapsed_s,
         )
         return Command(
             vx,
@@ -524,6 +606,126 @@ class TrajectoryPointFollower:
             yaw_rate,
             f"trajectory_point_follow:{road_state}",
         )
+
+    def _update_sharp_left_recovery(
+        self,
+        *,
+        now_s: float,
+        raw_forward_px: float,
+        target_index: int,
+        path_point_count: int,
+        normal_yaw_rate_deg_s: float,
+    ) -> tuple[bool, bool, float | None, float]:
+        cfg = self.config
+        feature_available = bool(
+            cfg.sharp_left_recovery_enabled
+            and self._sharp_left_recovery_armed
+            and not self._sharp_left_recovery_consumed
+        )
+        if not feature_available:
+            self._reset_sharp_left_recovery_transient(clear_history=True)
+            return False, False, None, 0.0
+
+        reliable_forward_px = max(0.0, float(cfg.min_forward_lookahead_px))
+        forward_reacquired = float(raw_forward_px) >= reliable_forward_px
+        forward_history_valid = float(raw_forward_px) >= 0.0
+        if self._sharp_left_recovery_active:
+            self._sharp_left_recovery_reacquire_count = (
+                self._sharp_left_recovery_reacquire_count + 1
+                if forward_reacquired
+                else 0
+            )
+            elapsed_s = max(
+                0.0,
+                float(now_s)
+                - float(
+                    now_s
+                    if self._sharp_left_recovery_started_s is None
+                    else self._sharp_left_recovery_started_s
+                ),
+            )
+            if self._sharp_left_recovery_reacquire_count >= max(
+                1, int(cfg.sharp_left_recovery_reacquire_frames)
+            ):
+                self._sharp_left_recovery_consumed = True
+                self._reset_sharp_left_recovery_transient(clear_history=True)
+                return False, False, None, 0.0
+            if elapsed_s >= max(0.0, float(cfg.sharp_left_recovery_timeout_s)):
+                self._sharp_left_recovery_timed_out = True
+            hold_yaw = (
+                0.0
+                if self._sharp_left_recovery_timed_out
+                else self._sharp_left_recovery_hold_yaw_deg_s
+            )
+            return True, self._sharp_left_recovery_timed_out, hold_yaw, elapsed_s
+
+        if forward_history_valid:
+            self._sharp_left_recovery_behind_count = 0
+            history_frames = max(1, int(cfg.sharp_left_recovery_history_frames))
+            self._sharp_left_reliable_yaw_history.append(
+                float(normal_yaw_rate_deg_s)
+            )
+            del self._sharp_left_reliable_yaw_history[:-history_frames]
+            return False, False, None, 0.0
+
+        terminal_behind = bool(
+            float(raw_forward_px) <= 0.0
+            and int(target_index) >= max(0, int(path_point_count) - 2)
+        )
+        self._sharp_left_recovery_behind_count = (
+            self._sharp_left_recovery_behind_count + 1 if terminal_behind else 0
+        )
+        if self._sharp_left_recovery_behind_count < max(
+            1, int(cfg.sharp_left_recovery_confirm_frames)
+        ):
+            return False, False, None, 0.0
+
+        history = self._sharp_left_reliable_yaw_history
+        minimum_samples = min(
+            3,
+            max(1, int(cfg.sharp_left_recovery_history_frames)),
+        )
+        minimum_left_yaw = max(
+            0.0, float(cfg.sharp_left_recovery_min_confirm_yaw_deg_s)
+        )
+        left_samples = [value for value in history if value <= -minimum_left_yaw]
+        median_yaw = float(statistics.median(history)) if history else 0.0
+        if (
+            len(history) < minimum_samples
+            or len(left_samples) <= len(history) / 2.0
+            or median_yaw > -minimum_left_yaw
+        ):
+            return False, False, None, 0.0
+
+        minimum_hold = max(
+            0.0, float(cfg.sharp_left_recovery_min_hold_yaw_deg_s)
+        )
+        maximum_hold = max(
+            minimum_hold, float(cfg.sharp_left_recovery_max_hold_yaw_deg_s)
+        )
+        self._sharp_left_recovery_hold_yaw_deg_s = -_clamp(
+            abs(median_yaw), minimum_hold, maximum_hold
+        )
+        self._sharp_left_recovery_active = True
+        self._sharp_left_recovery_timed_out = False
+        self._sharp_left_recovery_started_s = float(now_s)
+        self._sharp_left_recovery_reacquire_count = 0
+        return (
+            True,
+            False,
+            self._sharp_left_recovery_hold_yaw_deg_s,
+            0.0,
+        )
+
+    def _reset_sharp_left_recovery_transient(self, *, clear_history: bool) -> None:
+        self._sharp_left_recovery_active = False
+        self._sharp_left_recovery_timed_out = False
+        self._sharp_left_recovery_started_s = None
+        self._sharp_left_recovery_hold_yaw_deg_s = None
+        self._sharp_left_recovery_behind_count = 0
+        self._sharp_left_recovery_reacquire_count = 0
+        if clear_history:
+            self._sharp_left_reliable_yaw_history.clear()
 
     def _usable_trajectory(self, perception) -> list[Point]:
         if perception is None:

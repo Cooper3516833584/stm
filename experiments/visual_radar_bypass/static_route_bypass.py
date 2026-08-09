@@ -46,8 +46,8 @@ class StaticRouteBypassConfig:
     # ``None`` preserves the v1 behavior of using ``avoidance_vx_cm_s`` while
     # diverging.  The current fusion profile sets zero for lateral-only escape.
     diverge_vx_cm_s: float | None = None
-    # The v1 edge fallback may advance at the 75 cm hysteresis line.  The
-    # current fusion profile requires the full 85 cm target before any advance.
+    # The current profile uses the 75 cm reshift line as its direct DIVERGE
+    # exit and disables the separate bearing-dependent edge fallback.
     require_target_clearance_before_forward: bool = False
     tube_radius_cm: float = 15.0
 
@@ -355,12 +355,17 @@ class StaticRouteBypassPlanner:
                 )
                 return self._avoidance_command(desired, now)
             if confirmation_due:
-                if observation.lateral_clearance_cm >= self.config.target_surface_clearance_cm:
+                exit_clearance_cm = (
+                    self.config.reshift_surface_clearance_cm
+                    if self.config.require_target_clearance_before_forward
+                    else self.config.target_surface_clearance_cm
+                )
+                if observation.lateral_clearance_cm > exit_clearance_cm:
                     self._clearance_count += 1
                 else:
                     self._clearance_count = 0
             if self._clearance_count >= max(1, int(self.config.clearance_frames)):
-                self._transition(self._pass_state(), "target_lateral_clearance", now)
+                self._transition(self._pass_state(), "diverge_exit_lateral_clearance", now)
             return self._avoidance_command(desired, now)
 
         if self.state in {StaticRouteBypassState.PASS_FORWARD_LEFT, StaticRouteBypassState.PASS_FORWARD_RIGHT}:

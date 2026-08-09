@@ -8,9 +8,8 @@
 ```text
 道路期望 / 紫色目标状态机期望
   → StaticRouteBypassPlanner
-  → SafetyArbiter
-  → send_command_safely
-  → 投放安全门（仅零速、雷达新鲜、planner normal、Safety OK）
+  → 规划器命令直接发送
+  → 投放门（仅零速、雷达新鲜、planner normal、当前无障碍）
 ```
 
 目标状态为：
@@ -23,7 +22,7 @@ ROAD_SEARCH → TARGET_CLEARANCE → TARGET_APPROACH
 
 目标丢失、30 秒未到达、终端阶段障碍冲突或高度阶段超时进入 `ABORT_RECOVERY`。放弃后先回到
 100 cm 再恢复巡线；若规划器自身已进入 `FAILSAFE_STOP` 或 `TIMEOUT_STOP`，任务不会重置规划器或
-绕过 Safety。
+改变 static-route 的 Safety 旁路策略。
 
 连续 3 帧确认目标并进入 `TARGET_CLEARANCE` 后，现有灯光仲裁显示黄灯，直到状态机进入
 `COMPLETE` 或 `ABORTED` 并把控制权交还巡线。目标任务中的正常避障优先显示红灯，净空后恢复
@@ -46,7 +45,7 @@ ROAD_SEARCH → TARGET_CLEARANCE → TARGET_APPROACH
 - 高空居中：连续 3 帧满足 `|offset_x|≤30`、`|offset_y|≤40`，悬停 2 秒。
 - 使用 `ALT_ADD` 闭环下降到 `60±5 cm`，最大垂速 10 cm/s，连续 3 帧确认。
 - 低空校准：连续 3 帧满足 `|offset_x|≤18`、`|offset_y|≤24`，悬停 1 秒。
-- 只有 planner normal、雷达新鲜、当前无障碍观测、Safety 为 OK、最终实时控制帧四轴全零时，真实飞行才调用一次
+- 只有 planner normal、雷达新鲜、当前无障碍观测、最终实时控制帧四轴全零时，真实飞行才调用一次
   `set_digital_output(0, False)`；dry-run 只记录模拟投放。
 - 投放后停止紫色检测，等待 1 秒，再使用 ALT_ADD 闭环回升 `100±5 cm` 后恢复巡线。
 
@@ -87,10 +86,8 @@ ROAD_SEARCH → TARGET_CLEARANCE → TARGET_APPROACH
 | 单高度阶段超时 | 12 s | 正常约 4 秒，保留传感器与加减速余量 |
 | 投放输出 | digital output 0=False | 任务需求；起飞前已置 True |
 | 投放后等待 | 1 s | 任务需求 |
-| 雷达 stale | 0.5 s | 现有 Safety |
-| 前方停车/减速 | 80 / 150 cm | 现有 Safety |
-| 减速速度上限 | 10 cm/s | 当前融合实验配置 |
-| 侧向停车 | 45 cm | 现有 Safety |
+| 雷达 stale | 0.5 s | 雷达快照与任务净空判定 |
+| Safety 层 | BYPASSED | static-route 规划器命令直接发送 |
 | 绕障净空/回差 | 85 / 75 cm | static-route 冻结几何 |
 | 绕障退出前飞 | 1.5 s | 当前22 cm/s配置；实际正向帧连续累计，无新路径障碍 |
 | 绕障前速/最大 `vy` | 13.2 / 12 cm/s | 当前 22 cm/s static-route 实验配置 |

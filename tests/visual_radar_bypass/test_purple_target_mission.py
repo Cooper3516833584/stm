@@ -256,8 +256,6 @@ def test_full_terminal_sequence_releases_once_and_returns_to_road_height():
     assert controller.release_is_authorized(
         planner_state="normal",
         radar_fresh=True,
-        safety_state="OK",
-        command_allowed=True,
         final_command=Command.zero(),
     )
     controller.mark_payload_released(now + 1.0)
@@ -309,7 +307,7 @@ def test_approach_timeout_aborts_after_thirty_seconds():
     assert decision.desired.vx_cm_s == 0.0
 
 
-def test_release_requires_normal_planner_fresh_radar_and_clean_safety():
+def test_release_requires_normal_planner_fresh_radar_zero_command_and_clear_path():
     controller = PurpleTargetMissionController()
     controller.state = PurpleTargetMissionState.RELEASE_PENDING
     controller._release_requested = True
@@ -317,36 +315,21 @@ def test_release_requires_normal_planner_fresh_radar_and_clean_safety():
     assert not controller.release_is_authorized(
         planner_state="diverge_left",
         radar_fresh=True,
-        safety_state="OK",
-        command_allowed=True,
         final_command=Command.zero(),
     )
     assert not controller.release_is_authorized(
         planner_state="normal",
         radar_fresh=False,
-        safety_state="OK",
-        command_allowed=True,
         final_command=Command.zero(),
     )
     assert not controller.release_is_authorized(
         planner_state="normal",
         radar_fresh=True,
-        safety_state="OBSTACLE_STOP",
-        command_allowed=True,
-        final_command=Command.zero(),
-    )
-    assert not controller.release_is_authorized(
-        planner_state="normal",
-        radar_fresh=True,
-        safety_state="OK",
-        command_allowed=True,
         final_command=Command(1.0, 0.0, 0.0, 0.0, "moving"),
     )
     assert not controller.release_is_authorized(
         planner_state="normal",
         radar_fresh=True,
-        safety_state="OK",
-        command_allowed=True,
         final_command=Command.zero(),
         obstacle_clear=False,
     )

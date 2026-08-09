@@ -100,6 +100,8 @@ def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
     assert route.active_diverge_vx_cm_s == 0.0
     assert route.require_target_clearance_before_forward
     assert route.target_surface_clearance_cm == 85.0
+    assert route.reshift_surface_clearance_cm == 75.0
+    assert route.clearance_frames == 1
     assert route.clearance_run_s == 1.5
     assert route.normal_activation_radius_cm == 100.0
     assert route.clearance_reacquire_radius_cm == 80.0
@@ -119,7 +121,7 @@ def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
         assert by_name[name]["requires_flight_tuning"]
 
 
-def test_target_registry_records_detection_control_height_and_safety_parameters():
+def test_target_registry_records_detection_control_height_and_safety_bypass():
     visual = main.build_experimental_visual_config()
     route = main.build_experimental_static_route_config(
         visual_max_vx_cm_s=visual.max_vx_cm_s
@@ -157,7 +159,29 @@ def test_target_registry_records_detection_control_height_and_safety_parameters(
     assert by_name["target_mission.camera_width_px"] == 640
     assert by_name["target_mission.target_altitude_cm"] == 60.0
     assert by_name["target_mission.return_altitude_cm"] == 100.0
-    assert by_name["obstacle_stop_distance_cm"] is None
+    assert by_name["safety_layer"] == "BYPASSED"
+    assert "obstacle_stop_distance_cm" not in by_name
+    assert "obstacle_slow_distance_cm" not in by_name
+    assert "side_stop_distance_cm" not in by_name
+
+
+def test_static_route_command_sender_is_unfiltered_and_dry_run_is_silent():
+    class _FC:
+        def __init__(self):
+            self.sent = []
+
+        def send_realtime_control_data(self, *values):
+            self.sent.append(values)
+
+    fc = _FC()
+    planned = main.Command(31.6, -18.4, 12.7, 27.6, "planner_output")
+
+    returned = main._send_command_without_safety(fc, planned, dry_run=False)
+    dry_run_returned = main._send_command_without_safety(fc, planned, dry_run=True)
+
+    assert returned is planned
+    assert dry_run_returned is planned
+    assert fc.sent == [(32, -18, 13, 28)]
 
 
 def test_smooth_sidestep_remains_explicit(tmp_path):

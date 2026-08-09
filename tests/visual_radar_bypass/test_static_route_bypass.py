@@ -236,12 +236,13 @@ def test_target_clearance_moves_to_forward_pass_without_side_switch():
     assert decayed.vy_cm_s == 0.0
 
 
-def test_current_profile_diverges_laterally_at_zero_vx_until_85cm_clearance():
+def test_current_profile_enters_forward_pass_at_75cm_but_keeps_85cm_vy_target():
     planner = StaticRouteBypassPlanner(
         replace(
             StaticRouteBypassConfig(),
             diverge_vx_cm_s=0.0,
             require_target_clearance_before_forward=True,
+            clearance_frames=1,
         )
     )
     activated = _activate_right(planner)
@@ -249,41 +250,21 @@ def test_current_profile_diverges_laterally_at_zero_vx_until_85cm_clearance():
 
     assert planner.state == StaticRouteBypassState.DIVERGE_LEFT
     assert planner.config.target_surface_clearance_cm == 85.0
+    assert planner.config.reshift_surface_clearance_cm == 75.0
     assert activated.vx_cm_s == 0.0
     assert moving_outward.vx_cm_s == 0.0
     assert moving_outward.vy_cm_s > 0.0
 
-    command = _update(planner, _field(_cluster(90.0, -65.0)), 1.25)
-    assert command.vx_cm_s == 0.0
-    command = _update(planner, _field(_cluster(80.0, -80.0)), 1.3)
-    assert command.vx_cm_s == 0.0
+    below_exit = _update(planner, _field(_cluster(90.0, -75.0)), 1.3)
+    assert planner.state == StaticRouteBypassState.DIVERGE_LEFT
+    assert below_exit.vx_cm_s == 0.0
 
-    target_clearance = _field(_cluster(70.0, -90.0))
-    for index in range(3):
-        command = _update(planner, target_clearance, 1.4 + index * 0.1)
+    command = _update(planner, _field(_cluster(90.0, -77.0)), 1.4)
 
     assert planner.state == StaticRouteBypassState.PASS_FORWARD_LEFT
     assert command.vx_cm_s == pytest.approx(planner.config.avoidance_vx_cm_s)
-
-
-def test_current_profile_does_not_use_75cm_edge_fallback_before_85cm_target():
-    planner = StaticRouteBypassPlanner(
-        replace(
-            StaticRouteBypassConfig(),
-            diverge_vx_cm_s=0.0,
-            require_target_clearance_before_forward=True,
-        )
-    )
-    left_obstacle = _field(_cluster(100.0, 40.0))
-    _update(planner, left_obstacle, 1.0)
-    _update(planner, left_obstacle, 1.1)
-
-    for index, point in enumerate(((75.0, 65.0), (45.0, 78.0), (9.0, 82.0))):
-        command = _update(planner, _field(_cluster(*point)), 1.2 + index * 0.1)
-
-    assert planner.state == StaticRouteBypassState.DIVERGE_RIGHT
-    assert planner.diagnostics()["obstacle_surface_clearance_cm"] < 85.0
-    assert command.vx_cm_s == 0.0
+    assert command.vy_cm_s > 0.0
+    assert planner.transition_reason == "diverge_exit_lateral_clearance"
 
 
 @pytest.mark.parametrize(

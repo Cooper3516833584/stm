@@ -81,6 +81,7 @@ DEFAULT_BYPASS_PLANNER = "static-route"
 EXPERIMENTAL_PROFILE_NAME = "static-route-22cm-experiment"
 EXPERIMENTAL_PROFILE_STATUS = "EXPERIMENTAL_UNVALIDATED"
 FLEET_LANDING_REPORT_GRACE_S = 1.2
+SAFETY_BYPASS_STATE = "BYPASSED"
 
 
 def build_experimental_visual_config(
@@ -165,6 +166,7 @@ def build_experimental_static_route_config(
         ramp_in_s=0.7,
         diverge_vx_cm_s=0.0,
         require_target_clearance_before_forward=True,
+        clearance_frames=1,
         track_lost_forward_vx_cm_s=visual_max_vx_cm_s * 0.60,
         track_lost_use_guidance_yaw=True,
         tracked_obstacle_disappear_distance_cm=120.0,
@@ -327,6 +329,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     validate_args(args)
     actual_flight = bool(args.enable_flight)
+    safety_layer_bypassed = args.bypass_planner == "static-route"
     target_mission_enabled = bool(
         args.bypass_planner == "static-route"
         and not args.disable_target_mission
@@ -438,6 +441,9 @@ def main(argv: list[str] | None = None) -> None:
                 "target_mission_config": (
                     target_mission_config.__dict__ if target_mission_enabled else None
                 ),
+                "safety_layer": (
+                    "bypassed" if safety_layer_bypassed else "active"
+                ),
             },
         )
     )
@@ -487,35 +493,38 @@ def main(argv: list[str] | None = None) -> None:
         if target_mission_enabled
         else None
     )
-    arbiter = SafetyArbiter(
-        SafetyConfig(
-            require_fc=actual_flight,
-            require_hold_pos_mode=actual_flight,
-            require_unlocked=actual_flight,
-            require_radar=True,
-            radar_timeout_s=args.radar_timeout_s,
-            max_vx_cm_s=visual_config.max_vx_cm_s,
-            max_vy_cm_s=visual_config.max_vy_cm_s,
-            max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
-            obstacle_stop_distance_cm=None,
-            obstacle_slow_distance_cm=150.0,
-            slow_speed_limit_cm_s=10.0,
-            side_stop_distance_cm=45.0,
+    arbiter = None
+    visual_only_arbiter = None
+    if not safety_layer_bypassed:
+        arbiter = SafetyArbiter(
+            SafetyConfig(
+                require_fc=actual_flight,
+                require_hold_pos_mode=actual_flight,
+                require_unlocked=actual_flight,
+                require_radar=True,
+                radar_timeout_s=args.radar_timeout_s,
+                max_vx_cm_s=visual_config.max_vx_cm_s,
+                max_vy_cm_s=visual_config.max_vy_cm_s,
+                max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
+                obstacle_stop_distance_cm=None,
+                obstacle_slow_distance_cm=150.0,
+                slow_speed_limit_cm_s=10.0,
+                side_stop_distance_cm=45.0,
+            )
         )
-    )
-    visual_only_arbiter = SafetyArbiter(
-        SafetyConfig(
-            require_fc=actual_flight,
-            require_hold_pos_mode=actual_flight,
-            require_unlocked=actual_flight,
-            require_radar=False,
-            radar_timeout_s=args.radar_timeout_s,
-            max_vx_cm_s=visual_config.max_vx_cm_s,
-            max_vy_cm_s=visual_config.max_vy_cm_s,
-            max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
-            obstacle_stop_distance_cm=None,
+        visual_only_arbiter = SafetyArbiter(
+            SafetyConfig(
+                require_fc=actual_flight,
+                require_hold_pos_mode=actual_flight,
+                require_unlocked=actual_flight,
+                require_radar=False,
+                radar_timeout_s=args.radar_timeout_s,
+                max_vx_cm_s=visual_config.max_vx_cm_s,
+                max_vy_cm_s=visual_config.max_vy_cm_s,
+                max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
+                obstacle_stop_distance_cm=None,
+            )
         )
-    )
 
     fc = None
     flight_owned = False
@@ -691,35 +700,57 @@ def main(argv: list[str] | None = None) -> None:
                     radar_fresh = False
                     radar_retired = True
                     planned = selected_desired
-            active_arbiter = visual_only_arbiter if radar_retired else arbiter
-            health = flight_health_from_sources(
-                fc=fc,
-                multi_radar=None if radar_retired else radars,
-                radar_timeout_s=args.radar_timeout_s,
-                camera_ok=sample.camera_ok,
-            )
-            safe = active_arbiter.filter(
-                planned,
-                flight=flight_status,
-                radar_connected=radar_fresh,
-                radar_age_s=radar_age_s,
-                radar_field=radar_field,
-                enable_flight=actual_flight,
-            )
-            decision = send_command_safely(
-                fc,
-                safe.command,
-                active_arbiter,
-                health,
-                dry_run=not actual_flight,
-            )
+            if safety_layer_bypassed:
+                final_command = _send_command_without_safety(
+                    fc,
+                    planned,
+                    dry_run=not actual_flight,
+                )
+                command_allowed = True
+                decision_reason = "safety_layer_bypassed"
+                safety_state = SAFETY_BYPASS_STATE
+                safety_reasons = []
+                nearest_forward_obstacle_cm = radar_field.nearest_forward_obstacle_cm()
+                left_side_clearance_cm = radar_field.side_clearance_cm("left")
+                right_side_clearance_cm = radar_field.side_clearance_cm("right")
+            else:
+                active_arbiter = visual_only_arbiter if radar_retired else arbiter
+                if active_arbiter is None:
+                    raise RuntimeError("SafetyArbiter missing for protected planner mode")
+                health = flight_health_from_sources(
+                    fc=fc,
+                    multi_radar=None if radar_retired else radars,
+                    radar_timeout_s=args.radar_timeout_s,
+                    camera_ok=sample.camera_ok,
+                )
+                safe = active_arbiter.filter(
+                    planned,
+                    flight=flight_status,
+                    radar_connected=radar_fresh,
+                    radar_age_s=radar_age_s,
+                    radar_field=radar_field,
+                    enable_flight=actual_flight,
+                )
+                decision = send_command_safely(
+                    fc,
+                    safe.command,
+                    active_arbiter,
+                    health,
+                    dry_run=not actual_flight,
+                )
+                final_command = decision.command
+                command_allowed = decision.allowed
+                decision_reason = decision.reason
+                safety_state = safe.state
+                safety_reasons = safe.reasons
+                nearest_forward_obstacle_cm = safe.nearest_forward_obstacle_cm
+                left_side_clearance_cm = safe.left_side_clearance_cm
+                right_side_clearance_cm = safe.right_side_clearance_cm
             payload_release_event = False
             if target_mission is not None and target_mission.release_is_authorized(
                 planner_state=planner_state_name(planner),
                 radar_fresh=radar_fresh,
-                safety_state=safe.state,
-                command_allowed=decision.allowed,
-                final_command=decision.command,
+                final_command=final_command,
                 obstacle_clear=not bool(
                     planner.diagnostics().get("observation_valid", False)
                 ),
@@ -743,7 +774,7 @@ def main(argv: list[str] | None = None) -> None:
                 state_name = planner_state_name(planner)
                 avoiding = is_avoiding(
                     planner_state=state_name,
-                    safety_state=safe.state,
+                    safety_state=safety_state,
                 )
                 target_observation_ok = bool(
                     sample.target is not None
@@ -765,8 +796,8 @@ def main(argv: list[str] | None = None) -> None:
                     avoiding=avoiding,
                     unexpected=is_unexpected(
                         planner_state=state_name,
-                        safety_state=safe.state,
-                        decision_allowed=decision.allowed,
+                        safety_state=safety_state,
+                        decision_allowed=command_allowed,
                         radar_required=not radar_retired,
                         radar_fresh=radar_fresh,
                         camera_ok=sample.camera_ok,
@@ -800,10 +831,10 @@ def main(argv: list[str] | None = None) -> None:
                         avoiding=avoiding,
                     )
                 )
-            command_applied = bool(actual_flight and decision.allowed)
+            command_applied = bool(actual_flight and command_allowed)
             report_applied = getattr(planner, "report_applied_command", None)
             if callable(report_applied):
-                report_applied(decision.command, dt_s, command_applied)
+                report_applied(final_command, dt_s, command_applied)
             planner_diagnostics = planner.diagnostics()
             planner_diagnostics["visual_vy_cm_s"] = sample.desired.vy_cm_s
             planner_diagnostics["selected_guidance_vy_cm_s"] = selected_desired.vy_cm_s
@@ -833,14 +864,14 @@ def main(argv: list[str] | None = None) -> None:
                     target_mission.transition_reason,
                 )
             final_delta = {
-                "vx_cm_s": decision.command.vx_cm_s - previous_final_command.vx_cm_s,
-                "vy_cm_s": decision.command.vy_cm_s - previous_final_command.vy_cm_s,
+                "vx_cm_s": final_command.vx_cm_s - previous_final_command.vx_cm_s,
+                "vy_cm_s": final_command.vy_cm_s - previous_final_command.vy_cm_s,
                 "yaw_rate_deg_s": (
-                    decision.command.yaw_rate_deg_s
+                    final_command.yaw_rate_deg_s
                     - previous_final_command.yaw_rate_deg_s
                 ),
             }
-            previous_final_command = decision.command
+            previous_final_command = final_command
             extra = {
                 "visual": {
                     "road_found": bool(
@@ -891,16 +922,14 @@ def main(argv: list[str] | None = None) -> None:
                     "road_desired": sample.desired.as_fc_tuple(),
                     "desired": selected_desired.as_fc_tuple(),
                     "planned": planned.as_fc_tuple(),
-                    "safe": safe.command.as_fc_tuple(),
-                    "final": decision.command.as_fc_tuple(),
-                    "safety_state": safe.state,
-                    "safety_reasons": safe.reasons,
-                    "nearest_forward_obstacle_cm": safe.nearest_forward_obstacle_cm,
-                    "left_side_clearance_cm": safe.left_side_clearance_cm,
-                    "right_side_clearance_cm": safe.right_side_clearance_cm,
-                    "safety_override": bool(
-                        safe.command != planned or decision.command != safe.command
-                    ),
+                    "safe": None if safety_layer_bypassed else final_command.as_fc_tuple(),
+                    "final": final_command.as_fc_tuple(),
+                    "safety_state": safety_state,
+                    "safety_reasons": safety_reasons,
+                    "nearest_forward_obstacle_cm": nearest_forward_obstacle_cm,
+                    "left_side_clearance_cm": left_side_clearance_cm,
+                    "right_side_clearance_cm": right_side_clearance_cm,
+                    "safety_override": bool(final_command != planned),
                     "final_delta": final_delta,
                 },
                 "right_half_handoff": (
@@ -928,8 +957,8 @@ def main(argv: list[str] | None = None) -> None:
                     radar_age_s=radar_age_s,
                     radar_connected=radar_fresh,
                     desired=selected_desired,
-                    safe_command=decision.command,
-                    decision_reason=decision.reason,
+                    safe_command=final_command,
+                    decision_reason=decision_reason,
                     extra=extra,
                 )
             if loop_count % args.tuning_log_every_n == 0:
@@ -937,15 +966,15 @@ def main(argv: list[str] | None = None) -> None:
                     loop_count=loop_count,
                     now_s=loop_start,
                     desired=selected_desired,
-                    safe_command=decision.command,
-                    decision_reason=decision.reason,
+                    safe_command=final_command,
+                    decision_reason=decision_reason,
                     extra=extra,
                 )
             if loop_start - last_log_s >= 1.0:
                 last_log_s = loop_start
                 logger.info(
                     "[VIS-RADAR] road={} err={} angle={} radar={} retired={} bypass={} "
-                    "target_y={} mission={} desired={} planned={} safe={} sent={}",
+                    "target_y={} mission={} desired={} planned={} final={} safety={} sent={}",
                     getattr(sample.perception, "is_road_found", False),
                     _float_or_none(
                         getattr(sample.perception, "corrected_pixel_error", None)
@@ -964,8 +993,9 @@ def main(argv: list[str] | None = None) -> None:
                     ),
                     selected_desired.as_fc_tuple(),
                     planned.as_fc_tuple(),
-                    safe.command.as_fc_tuple(),
-                    bool(actual_flight and decision.allowed),
+                    final_command.as_fc_tuple(),
+                    safety_state,
+                    bool(actual_flight and command_allowed),
                 )
                 timing = loop_monitor.snapshot()
                 runtime_health = process_runtime.health(loop_start) if process_runtime else None
@@ -1070,6 +1100,20 @@ def _sleep_to_rate(loop_start: float, period_s: float) -> None:
     remaining = period_s - (time.perf_counter() - loop_start)
     if remaining > 0.0:
         time.sleep(remaining)
+
+
+def _send_command_without_safety(
+    fc,
+    command: Command,
+    *,
+    dry_run: bool,
+) -> Command:
+    """Send the planner output verbatim without SafetyArbiter evaluation."""
+    if not dry_run:
+        if fc is None:
+            raise RuntimeError("cannot send an unfiltered command without an FC")
+        fc.send_realtime_control_data(*command.as_fc_tuple())
+    return command
 
 
 def _float_or_none(value) -> float | None:

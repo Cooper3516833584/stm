@@ -295,8 +295,6 @@ class PurpleTargetMissionController:
         *,
         planner_state: str,
         radar_fresh: bool,
-        safety_state: str,
-        command_allowed: bool,
         final_command: Command | None = None,
         obstacle_clear: bool = True,
     ) -> bool:
@@ -314,8 +312,6 @@ class PurpleTargetMissionController:
             and self._release_requested
             and str(planner_state) == "normal"
             and radar_fresh
-            and safety_state == "OK"
-            and command_allowed
             and command_zero
             and obstacle_clear
         )

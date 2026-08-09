@@ -123,6 +123,19 @@ def build_experimental_visual_config(
     )
 
 
+def build_experimental_target_config(
+    visual_config: FrozenVisualConfig,
+) -> PurpleTargetMissionConfig:
+    """Map the visual profile onto the current planar target controller."""
+    return PurpleTargetMissionConfig(
+        high_planar_speed_cm_s=visual_config.max_vx_cm_s * 0.60,
+        camera_width_px=visual_config.camera_width,
+        offset_filter_tau_s=visual_config.target_filter_tau_s,
+        offset_filter_max_rate_px_s=visual_config.target_filter_max_rate_px_s,
+        max_planar_accel_cm_s2=visual_config.max_planar_accel_cm_s2,
+    )
+
+
 @dataclass(frozen=True)
 class DirectCommandLimits:
     max_abs_vx_cm_s: float = 22.0
@@ -274,17 +287,7 @@ def main(argv: list[str] | None = None) -> None:
         max_abs_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
     )
     flight_config = FlightRuntimeConfig(takeoff_height_cm=args.takeoff_height_cm)
-    target_config = PurpleTargetMissionConfig(
-        target_vx_cm_s=visual_config.max_vx_cm_s * 0.60,
-        yaw_kp=visual_config.tangent_kp_yaw,
-        yaw_deadband_deg=visual_config.angle_deadband_deg,
-        max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
-        max_yaw_accel_deg_s2=visual_config.max_yaw_accel_deg_s2,
-        forward_bearing_limit_deg=visual_config.curvature_slowdown_start_deg,
-        offset_filter_tau_s=visual_config.target_filter_tau_s,
-        offset_filter_max_rate_px_s=visual_config.target_filter_max_rate_px_s,
-        max_planar_accel_cm_s2=visual_config.max_planar_accel_cm_s2,
-    )
+    target_config = build_experimental_target_config(visual_config)
     process_runtime = _build_process_runtime(args, visual_config)
     recorder = SessionRecorder(
         SessionRecorderConfig(

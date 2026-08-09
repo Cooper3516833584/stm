@@ -48,6 +48,18 @@ def test_direct_send_rejects_non_finite_values():
         main.send_direct_command(_FC(), Command(float("nan"), 0.0, 0.0, 0.0), False)
 
 
+def test_target_config_uses_current_planar_controller_fields():
+    visual = main.build_experimental_visual_config()
+
+    target = main.build_experimental_target_config(visual)
+
+    assert target.high_planar_speed_cm_s == visual.max_vx_cm_s * 0.60
+    assert target.camera_width_px == visual.camera_width
+    assert target.offset_filter_tau_s == visual.target_filter_tau_s
+    assert target.offset_filter_max_rate_px_s == visual.target_filter_max_rate_px_s
+    assert target.max_planar_accel_cm_s2 == visual.max_planar_accel_cm_s2
+
+
 def test_real_flight_requires_new_dedicated_confirmation(tmp_path):
     model = _model(tmp_path)
     with pytest.raises(ValueError, match="confirm-road-contour"):

@@ -28,12 +28,12 @@ class PurpleTargetMissionState(str, Enum):
 
 @dataclass(frozen=True)
 class PurpleTargetMissionConfig:
-    target_vx_cm_s: float = 13.2
-    yaw_kp: float = 0.45
-    yaw_deadband_deg: float = 4.0
-    max_yaw_rate_deg_s: float = 18.0
-    max_yaw_accel_deg_s2: float = 50.0
-    forward_bearing_limit_deg: float = 18.0
+    high_planar_speed_cm_s: float = 13.2
+    low_planar_speed_cm_s: float = 5.0
+    target_position_kp_s: float = 0.5
+    camera_ground_width_cm_at_reference: float = 130.0
+    camera_reference_altitude_cm: float = 100.0
+    camera_width_px: float = 640.0
     offset_filter_tau_s: float = 0.12
     offset_filter_max_rate_px_s: float = 500.0
     max_planar_accel_cm_s2: float = 36.0
@@ -106,8 +106,10 @@ class PurpleTargetMissionController:
         self._last_filter_s: float | None = None
         self._last_control_s: float | None = None
         self._limited_vx_cm_s = 0.0
-        self._limited_yaw_deg_s = 0.0
-        self._bearing_deg: float | None = None
+        self._limited_vy_cm_s = 0.0
+        self._target_error_x_cm: float | None = None
+        self._target_error_y_cm: float | None = None
+        self._planar_speed_limit_cm_s = 0.0
         self._disable_target_requested = False
         self._disable_target_consumed = False
         self._release_requested = False
@@ -207,13 +209,13 @@ class PurpleTargetMissionController:
             if self._reach_count >= max(1, self.config.reach_confirm_frames):
                 self._transition(PurpleTargetMissionState.HIGH_HOVER, "high_target_centered", now)
                 return self._mission_decision(Command.zero("purple_target:high_hover"))
-            return self._mission_decision(self._target_command(now))
+            return self._mission_decision(self._target_command(now, altitude_cm))
 
         if self.state == PurpleTargetMissionState.HIGH_HOVER:
             if not self._within(target, self.config.high_reach_x_px, self.config.high_reach_y_px):
                 self._reach_count = 0
                 self._transition(PurpleTargetMissionState.TARGET_APPROACH, "high_hover_drift", now)
-                return self._mission_decision(self._target_command(now))
+                return self._mission_decision(self._target_command(now, altitude_cm))
             if now - self._state_started_s >= self.config.high_hover_s:
                 self._height_count = 0
                 self._transition(PurpleTargetMissionState.DESCEND_60, "high_hover_complete", now)
@@ -239,13 +241,13 @@ class PurpleTargetMissionController:
             if self._reach_count >= max(1, self.config.reach_confirm_frames):
                 self._transition(PurpleTargetMissionState.LOW_HOVER, "low_target_centered", now)
                 return self._mission_decision(Command.zero("purple_target:low_hover"))
-            return self._mission_decision(self._target_command(now))
+            return self._mission_decision(self._target_command(now, altitude_cm))
 
         if self.state == PurpleTargetMissionState.LOW_HOVER:
             if not self._within(target, self.config.low_reach_x_px, self.config.low_reach_y_px):
                 self._reach_count = 0
                 self._transition(PurpleTargetMissionState.LOW_CALIBRATE, "low_hover_drift", now)
-                return self._mission_decision(self._target_command(now))
+                return self._mission_decision(self._target_command(now, altitude_cm))
             if now - self._state_started_s >= self.config.low_hover_s:
                 self._transition(PurpleTargetMissionState.RELEASE_PENDING, "low_hover_complete", now)
             return self._mission_decision(Command.zero("purple_target:low_hover"))
@@ -351,9 +353,11 @@ class PurpleTargetMissionController:
             "height_count": self._height_count,
             "filtered_offset_x_px": self._filtered_x_px,
             "filtered_offset_y_px": self._filtered_y_px,
-            "bearing_deg": self._bearing_deg,
+            "target_error_x_cm": self._target_error_x_cm,
+            "target_error_y_cm": self._target_error_y_cm,
+            "planar_speed_limit_cm_s": self._planar_speed_limit_cm_s,
             "limited_vx_cm_s": self._limited_vx_cm_s,
-            "limited_yaw_rate_deg_s": self._limited_yaw_deg_s,
+            "limited_vy_cm_s": self._limited_vy_cm_s,
             "payload_released": self.payload_released,
             "target_detection_disable_requested": self._disable_target_requested,
         }
@@ -419,40 +423,61 @@ class PurpleTargetMissionController:
         )
         return Command(0.0, 0.0, vz, 0.0, reason)
 
-    def _target_command(self, now: float) -> Command:
+    def _target_command(self, now: float, altitude_cm: float | None) -> Command:
         x = self._filtered_x_px
         y = self._filtered_y_px
         if x is None or y is None:
             return Command.zero("purple_target:offset_unavailable")
-        bearing_deg = math.degrees(math.atan2(y, x))
-        self._bearing_deg = bearing_deg
-        used_bearing = 0.0 if abs(bearing_deg) <= self.config.yaw_deadband_deg else bearing_deg
-        requested_yaw = _clamp(
-            -self.config.yaw_kp * used_bearing,
-            -self.config.max_yaw_rate_deg_s,
-            self.config.max_yaw_rate_deg_s,
+        reference_altitude = max(1e-6, float(self.config.camera_reference_altitude_cm))
+        fallback_altitude = (
+            self.config.target_altitude_cm
+            if self.state == PurpleTargetMissionState.LOW_CALIBRATE
+            else self.config.return_altitude_cm
         )
-        requested_vx = (
-            self.config.target_vx_cm_s
-            if abs(bearing_deg) <= self.config.forward_bearing_limit_deg
-            else 0.0
+        altitude = (
+            float(altitude_cm)
+            if altitude_cm is not None
+            and math.isfinite(float(altitude_cm))
+            and float(altitude_cm) > 0.0
+            else float(fallback_altitude)
+        )
+        ground_width_cm = (
+            float(self.config.camera_ground_width_cm_at_reference)
+            * altitude
+            / reference_altitude
+        )
+        cm_per_px = ground_width_cm / max(1e-6, float(self.config.camera_width_px))
+        error_x_cm = float(x) * cm_per_px
+        error_y_cm = float(y) * cm_per_px
+        self._target_error_x_cm = error_x_cm
+        self._target_error_y_cm = error_y_cm
+        speed_limit = max(
+            0.0,
+            float(
+                self.config.low_planar_speed_cm_s
+                if self.state == PurpleTargetMissionState.LOW_CALIBRATE
+                else self.config.high_planar_speed_cm_s
+            ),
+        )
+        self._planar_speed_limit_cm_s = speed_limit
+        requested_vx, requested_vy = _limit_vector_magnitude(
+            self.config.target_position_kp_s * error_x_cm,
+            self.config.target_position_kp_s * error_y_cm,
+            speed_limit,
         )
         dt = self._control_dt(now)
-        vx = _limit_rate(
+        vx, vy = _limit_vector_rate(
             requested_vx,
+            requested_vy,
             self._limited_vx_cm_s,
+            self._limited_vy_cm_s,
             self.config.max_planar_accel_cm_s2,
             dt,
         )
-        yaw = _limit_rate(
-            requested_yaw,
-            self._limited_yaw_deg_s,
-            self.config.max_yaw_accel_deg_s2,
-            dt,
-        )
+        vx, vy = _limit_vector_magnitude(vx, vy, speed_limit)
         self._limited_vx_cm_s = vx
-        self._limited_yaw_deg_s = yaw
-        return Command(vx, 0.0, 0.0, yaw, "purple_target:approach")
+        self._limited_vy_cm_s = vy
+        return Command(vx, vy, 0.0, 0.0, "purple_target:approach")
 
     def _update_filtered_offsets(self, target, now: float) -> None:
         raw_x = float(target.offset_x_px)
@@ -544,7 +569,8 @@ class PurpleTargetMissionController:
         """Start a resumed target-control segment from hover, not stale velocity."""
 
         self._limited_vx_cm_s = 0.0
-        self._limited_yaw_deg_s = 0.0
+        self._limited_vy_cm_s = 0.0
+        self._planar_speed_limit_cm_s = 0.0
         self._last_control_s = None
 
     def _control_dt(self, now: float) -> float:
@@ -566,6 +592,36 @@ def _clamp(value: float, low: float, high: float) -> float:
 def _limit_rate(target: float, previous: float, max_rate: float, dt: float) -> float:
     limit = max(0.0, float(max_rate)) * max(0.0, float(dt))
     return float(previous) + _clamp(float(target) - float(previous), -limit, limit)
+
+
+def _limit_vector_magnitude(x: float, y: float, limit: float) -> tuple[float, float]:
+    magnitude = math.hypot(float(x), float(y))
+    maximum = max(0.0, float(limit))
+    if magnitude <= maximum or magnitude <= 1e-9:
+        return float(x), float(y)
+    scale = maximum / magnitude
+    return float(x) * scale, float(y) * scale
+
+
+def _limit_vector_rate(
+    target_x: float,
+    target_y: float,
+    previous_x: float,
+    previous_y: float,
+    max_rate: float,
+    dt: float,
+) -> tuple[float, float]:
+    delta_x = float(target_x) - float(previous_x)
+    delta_y = float(target_y) - float(previous_y)
+    delta = math.hypot(delta_x, delta_y)
+    maximum_delta = max(0.0, float(max_rate)) * max(0.0, float(dt))
+    if delta <= maximum_delta or delta <= 1e-9:
+        return float(target_x), float(target_y)
+    scale = maximum_delta / delta
+    return (
+        float(previous_x) + delta_x * scale,
+        float(previous_y) + delta_y * scale,
+    )
 
 
 def _low_pass_limited(

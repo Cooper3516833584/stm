@@ -1,9 +1,11 @@
 from types import SimpleNamespace
+import math
 
 import pytest
 
 from FlightController.Solutions.Safety import Command
 from experiments.visual_radar_bypass.purple_target_mission import (
+    PurpleTargetMissionConfig,
     PurpleTargetMissionController,
     PurpleTargetMissionState,
 )
@@ -73,32 +75,35 @@ def test_search_uses_road_without_target_control_until_three_unique_detections()
 
 
 @pytest.mark.parametrize(
-    ("x", "y", "yaw_sign"),
+    ("x", "y"),
     [
-        (100.0, 100.0, -1),
-        (100.0, -100.0, 1),
-        (-100.0, 100.0, -1),
-        (-100.0, -100.0, 1),
+        (100.0, 100.0),
+        (100.0, -100.0),
+        (-100.0, 100.0),
+        (-100.0, -100.0),
     ],
 )
-def test_target_bearing_covers_all_quadrants_and_turns_in_place(x, y, yaw_sign):
+def test_target_offsets_drive_same_sign_planar_motion_without_yaw(x, y):
     controller = PurpleTargetMissionController()
     _acquire_and_clear(controller, x, y)
 
     decision = _step(controller, 0.6, _target(7, x, y))
 
-    assert decision.desired.vx_cm_s == 0.0
-    assert decision.desired.vy_cm_s == 0.0
-    assert decision.desired.yaw_rate_deg_s * yaw_sign > 0.0
-    assert abs(decision.desired.yaw_rate_deg_s) <= 18.0
+    assert decision.desired.vx_cm_s * x > 0.0
+    assert decision.desired.vy_cm_s * y > 0.0
+    assert decision.desired.yaw_rate_deg_s == 0.0
+    assert math.hypot(
+        decision.desired.vx_cm_s,
+        decision.desired.vy_cm_s,
+    ) == pytest.approx(3.6)
 
 
-def test_aligned_target_reaches_fixed_speed_through_existing_acceleration_limit():
+def test_high_approach_reaches_vector_speed_cap_through_acceleration_limit():
     controller = PurpleTargetMissionController()
-    _acquire_and_clear(controller)
+    _acquire_and_clear(controller, x=200.0)
 
     commands = [
-        _step(controller, 0.6 + index * 0.1, _target(7 + index, 100.0, 0.0)).desired
+        _step(controller, 0.6 + index * 0.1, _target(7 + index, 200.0, 0.0)).desired
         for index in range(4)
     ]
 
@@ -108,7 +113,56 @@ def test_aligned_target_reaches_fixed_speed_through_existing_acceleration_limit(
     assert all(command.yaw_rate_deg_s == 0.0 for command in commands)
 
 
-def test_obstacle_pauses_target_yaw_and_requires_three_clear_frames_to_resume():
+def test_high_diagonal_motion_caps_total_speed_not_each_axis():
+    controller = PurpleTargetMissionController()
+    _acquire_and_clear(controller, x=200.0, y=200.0)
+
+    commands = [
+        _step(
+            controller,
+            0.6 + index * 0.1,
+            _target(7 + index, 200.0, 200.0),
+        ).desired
+        for index in range(4)
+    ]
+
+    final = commands[-1]
+    assert math.hypot(final.vx_cm_s, final.vy_cm_s) == pytest.approx(13.2)
+    assert final.vx_cm_s == pytest.approx(final.vy_cm_s)
+    assert final.yaw_rate_deg_s == 0.0
+
+
+def test_low_calibration_caps_total_planar_speed_at_five():
+    controller = PurpleTargetMissionController()
+    controller.state = PurpleTargetMissionState.LOW_CALIBRATE
+
+    first = _step(controller, 0.0, _target(1, 100.0, 100.0), altitude=60.0)
+    second = _step(controller, 0.1, _target(2, 100.0, 100.0), altitude=60.0)
+
+    assert math.hypot(first.desired.vx_cm_s, first.desired.vy_cm_s) == pytest.approx(3.6)
+    assert math.hypot(second.desired.vx_cm_s, second.desired.vy_cm_s) == pytest.approx(5.0)
+    assert second.desired.yaw_rate_deg_s == 0.0
+
+
+def test_pixel_scale_tracks_altitude_from_130cm_at_100cm_calibration():
+    config = PurpleTargetMissionConfig(max_planar_accel_cm_s2=1_000.0)
+    high = PurpleTargetMissionController(config)
+    _acquire_and_clear(high, x=64.0)
+
+    high_command = _step(high, 0.6, _target(7, 64.0, 0.0), altitude=100.0)
+
+    assert high.diagnostics()["target_error_x_cm"] == pytest.approx(13.0)
+    assert high_command.desired.vx_cm_s == pytest.approx(6.5)
+
+    low = PurpleTargetMissionController(config)
+    low.state = PurpleTargetMissionState.LOW_CALIBRATE
+    low_command = _step(low, 0.0, _target(1, 64.0, 0.0), altitude=60.0)
+
+    assert low.diagnostics()["target_error_x_cm"] == pytest.approx(7.8)
+    assert low_command.desired.vx_cm_s == pytest.approx(3.9)
+
+
+def test_obstacle_pauses_target_motion_and_requires_three_clear_frames_to_resume():
     controller = PurpleTargetMissionController()
     _acquire_and_clear(controller, 100.0, 20.0)
     _step(controller, 0.6, _target(7, 100.0, 20.0))
@@ -128,7 +182,11 @@ def test_obstacle_pauses_target_yaw_and_requires_three_clear_frames_to_resume():
     resumed = _step(controller, 1.0, _target(11, 100.0, 20.0))
     assert resumed.state == PurpleTargetMissionState.TARGET_APPROACH
     moving_again = _step(controller, 1.1, _target(12, 100.0, 0.0))
-    assert moving_again.desired.vx_cm_s == pytest.approx(3.6)
+    assert math.hypot(
+        moving_again.desired.vx_cm_s,
+        moving_again.desired.vy_cm_s,
+    ) == pytest.approx(3.6)
+    assert moving_again.desired.yaw_rate_deg_s == 0.0
 
 
 def test_new_radar_conflict_pauses_before_planner_state_changes():

@@ -145,7 +145,11 @@ def test_target_registry_records_detection_control_height_and_safety_parameters(
     assert by_name["max_encounter_s"] is None
     assert by_name["normal_activation_radius_cm"] == 100.0
     assert by_name["clearance_reacquire_radius_cm"] == 80.0
-    assert by_name["target_mission.target_vx_cm_s"] == 13.2
+    assert by_name["target_mission.high_planar_speed_cm_s"] == 13.2
+    assert by_name["target_mission.low_planar_speed_cm_s"] == 5.0
+    assert by_name["target_mission.camera_ground_width_cm_at_reference"] == 130.0
+    assert by_name["target_mission.camera_reference_altitude_cm"] == 100.0
+    assert by_name["target_mission.camera_width_px"] == 640
     assert by_name["target_mission.target_altitude_cm"] == 60.0
     assert by_name["target_mission.return_altitude_cm"] == 100.0
     assert by_name["obstacle_stop_distance_cm"] == 80.0

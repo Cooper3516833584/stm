@@ -136,15 +136,15 @@ def build_parameter_registry(
         )
     if target_config is not None:
         target_purposes = {
-            "target_vx_cm_s": "60 percent target approach speed",
-            "yaw_kp": "target bearing yaw gain",
-            "yaw_deadband_deg": "target bearing yaw deadband",
-            "max_yaw_rate_deg_s": "target yaw-rate cap",
-            "max_yaw_accel_deg_s2": "target yaw acceleration cap",
-            "forward_bearing_limit_deg": "rotate before forward flight",
+            "high_planar_speed_cm_s": "100 cm target-pursuit vector-speed cap",
+            "low_planar_speed_cm_s": "low-altitude target-pursuit vector-speed cap",
+            "target_position_kp_s": "target planar position-error gain",
+            "camera_ground_width_cm_at_reference": "measured ground width across the image",
+            "camera_reference_altitude_cm": "altitude for the measured ground width",
+            "camera_width_px": "image width used for pixel-to-centimetre scaling",
             "offset_filter_tau_s": "target offset low-pass time constant",
             "offset_filter_max_rate_px_s": "target offset slew cap",
-            "max_planar_accel_cm_s2": "target forward acceleration cap",
+            "max_planar_accel_cm_s2": "target planar vector acceleration cap",
             "acquire_confirm_frames": "initial target debounce",
             "clearance_confirm_frames": "radar-clear handoff debounce",
             "reach_confirm_frames": "target-centering debounce",
@@ -170,9 +170,9 @@ def build_parameter_registry(
                 ParameterRecord(
                     f"target_mission.{name}",
                     value,
-                    fixed if name not in {"yaw_kp", "yaw_deadband_deg", "max_yaw_rate_deg_s", "max_yaw_accel_deg_s2", "offset_filter_tau_s", "offset_filter_max_rate_px_s", "max_planar_accel_cm_s2"} else unverified,
+                    fixed if name not in {"target_position_kp_s", "offset_filter_tau_s", "offset_filter_max_rate_px_s", "max_planar_accel_cm_s2"} else unverified,
                     target_purposes[name],
-                    name in {"target_vx_cm_s", "max_yaw_rate_deg_s", "max_yaw_accel_deg_s2", "forward_bearing_limit_deg", "max_planar_accel_cm_s2", "target_altitude_cm", "return_altitude_cm", "max_vz_cm_s", "altitude_kp_s", "altitude_tolerance_cm", "altitude_phase_timeout_s", "approach_timeout_s"},
+                    name in {"high_planar_speed_cm_s", "low_planar_speed_cm_s", "target_position_kp_s", "camera_ground_width_cm_at_reference", "camera_reference_altitude_cm", "camera_width_px", "max_planar_accel_cm_s2", "target_altitude_cm", "return_altitude_cm", "max_vz_cm_s", "altitude_kp_s", "altitude_tolerance_cm", "altitude_phase_timeout_s", "approach_timeout_s"},
                 )
             )
     return [row.as_dict() for row in rows]

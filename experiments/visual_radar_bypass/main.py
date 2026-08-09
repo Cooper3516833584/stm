@@ -332,12 +332,8 @@ def main(argv: list[str] | None = None) -> None:
         target_enable=target_mission_enabled,
     )
     target_mission_config = PurpleTargetMissionConfig(
-        target_vx_cm_s=visual_config.max_vx_cm_s * 0.60,
-        yaw_kp=visual_config.tangent_kp_yaw,
-        yaw_deadband_deg=visual_config.angle_deadband_deg,
-        max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
-        max_yaw_accel_deg_s2=visual_config.max_yaw_accel_deg_s2,
-        forward_bearing_limit_deg=visual_config.curvature_slowdown_start_deg,
+        high_planar_speed_cm_s=visual_config.max_vx_cm_s * 0.60,
+        camera_width_px=visual_config.camera_width,
         offset_filter_tau_s=visual_config.target_filter_tau_s,
         offset_filter_max_rate_px_s=visual_config.target_filter_max_rate_px_s,
         max_planar_accel_cm_s2=visual_config.max_planar_accel_cm_s2,

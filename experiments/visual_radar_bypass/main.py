@@ -163,6 +163,12 @@ def build_experimental_static_route_config(
         max_outward_vy_cm_s=12.0,
         lateral_kp_s=0.25,
         ramp_in_s=0.7,
+        diverge_vx_cm_s=0.0,
+        require_target_clearance_before_forward=True,
+        track_lost_forward_vx_cm_s=visual_max_vx_cm_s * 0.60,
+        track_lost_use_guidance_yaw=True,
+        tracked_obstacle_disappear_distance_cm=120.0,
+        tracked_obstacle_disappear_frames=3,
         clearance_run_s=1.5,
         normal_activation_radius_cm=100.0,
         clearance_reacquire_radius_cm=80.0,
@@ -491,7 +497,7 @@ def main(argv: list[str] | None = None) -> None:
             max_vx_cm_s=visual_config.max_vx_cm_s,
             max_vy_cm_s=visual_config.max_vy_cm_s,
             max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
-            obstacle_stop_distance_cm=80.0,
+            obstacle_stop_distance_cm=None,
             obstacle_slow_distance_cm=150.0,
             slow_speed_limit_cm_s=10.0,
             side_stop_distance_cm=45.0,
@@ -507,6 +513,7 @@ def main(argv: list[str] | None = None) -> None:
             max_vx_cm_s=visual_config.max_vx_cm_s,
             max_vy_cm_s=visual_config.max_vy_cm_s,
             max_yaw_rate_deg_s=visual_config.max_yaw_rate_deg_s,
+            obstacle_stop_distance_cm=None,
         )
     )
 
@@ -641,11 +648,17 @@ def main(argv: list[str] | None = None) -> None:
             else:
                 planner_started_ns = time.perf_counter_ns()
                 planner_options = {}
+                if isinstance(planner, StaticRouteBypassPlanner):
+                    controller_state = sample.diagnostics.get("state")
+                    if controller_state == "road_lost_grace":
+                        planner_options["guidance_usable"] = True
+                    elif not sample.camera_ok or sample.perception_stale:
+                        planner_options["guidance_usable"] = False
                 if target_decision is not None and target_decision.mission_owns_command:
-                    planner_options = {
-                        "guidance_usable": target_decision.guidance_usable,
-                        "preserve_guidance_yaw": target_decision.preserve_guidance_yaw,
-                    }
+                    planner_options.update(
+                        guidance_usable=target_decision.guidance_usable,
+                        preserve_guidance_yaw=target_decision.preserve_guidance_yaw,
+                    )
                 planned = planner.update(
                     desired=selected_desired,
                     perception=sample.perception,
@@ -768,7 +781,7 @@ def main(argv: list[str] | None = None) -> None:
                             else (
                                 True
                                 if mission_nonvisual_phase
-                                else bool(getattr(sample.perception, "is_road_found", False))
+                                else sample.road_guidance_usable
                             )
                         ),
                     ),
@@ -845,6 +858,10 @@ def main(argv: list[str] | None = None) -> None:
                     "age_s": sample.perception_age_s,
                     "stale": sample.perception_stale,
                     "camera_ok": sample.camera_ok,
+                    "guidance_usable": sample.road_guidance_usable,
+                    "road_loss_grace": (
+                        sample.diagnostics.get("state") == "road_lost_grace"
+                    ),
                     "controller": sample.diagnostics,
                 },
                 "purple_target": {

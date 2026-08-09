@@ -97,6 +97,9 @@ def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
     assert visual.max_vx_cm_s == 22.0
     assert route.avoidance_forward_ratio == 0.60
     assert route.avoidance_vx_cm_s == pytest.approx(13.2)
+    assert route.active_diverge_vx_cm_s == 0.0
+    assert route.require_target_clearance_before_forward
+    assert route.target_surface_clearance_cm == 85.0
     assert route.clearance_run_s == 1.5
     assert route.normal_activation_radius_cm == 100.0
     assert route.clearance_reacquire_radius_cm == 80.0
@@ -104,6 +107,8 @@ def test_22cm_experiment_preserves_v1_and_marks_overrides_unverified():
     for name in (
         "visual_max_vx_cm_s",
         "avoidance_vx_cm_s",
+        "diverge_vx_cm_s",
+        "require_target_clearance_before_forward",
         "max_outward_vy_cm_s",
         "lateral_kp_s",
         "ramp_in_s",
@@ -152,7 +157,7 @@ def test_target_registry_records_detection_control_height_and_safety_parameters(
     assert by_name["target_mission.camera_width_px"] == 640
     assert by_name["target_mission.target_altitude_cm"] == 60.0
     assert by_name["target_mission.return_altitude_cm"] == 100.0
-    assert by_name["obstacle_stop_distance_cm"] == 80.0
+    assert by_name["obstacle_stop_distance_cm"] is None
 
 
 def test_smooth_sidestep_remains_explicit(tmp_path):
@@ -523,12 +528,84 @@ def test_visual_guidance_passes_final_adaptive_parameters_to_follower():
         "tangent_filter_tau_s",
         "max_planar_accel_cm_s2",
         "max_planar_decel_cm_s2",
+        "road_loss_grace_s",
+        "road_loss_grace_vx_scale",
+        "road_loss_grace_vy_scale",
+        "road_loss_grace_yaw_scale",
         "degraded_speed_scale",
         "curvature_slowdown_start_deg",
         "curvature_full_slowdown_deg",
         "min_curve_speed_cm_s",
     ):
-        assert getattr(follower, field_name) == getattr(snapshot, field_name)
+        follower_field_name = field_name.replace("road_loss_", "lost_")
+        assert getattr(follower, follower_field_name) == getattr(snapshot, field_name)
+
+
+class _VisualPipelineStub:
+    def __init__(self, perception, *, stale=False, camera_ok=True):
+        self.perception = perception
+        self.stale = stale
+        self.camera_ok = camera_ok
+
+    def latest_perception(self):
+        return self.perception, 0.01, self.stale
+
+    def latest_target(self, *, max_age_s):
+        del max_age_s
+        return None, float("inf"), True
+
+    def latest_frame(self):
+        return None, 0.0
+
+
+def _visual_road_perception(*, found=True):
+    return SimpleNamespace(
+        is_road_found=found,
+        confidence=0.95 if found else 0.0,
+        trajectory_points=(
+            [(320.0, float(y)) for y in range(460, 19, -20)] if found else []
+        ),
+        path_width_px=200.0,
+        road_state="normal",
+    )
+
+
+def test_visual_guidance_debounces_fresh_road_loss_for_command_and_light():
+    guidance = FrozenVisualGuidance()
+    pipeline = _VisualPipelineStub(_visual_road_perception())
+    guidance.pipeline = pipeline
+
+    tracking = guidance.sample(now_s=1.0)
+    pipeline.perception = _visual_road_perception(found=False)
+    grace = guidance.sample(now_s=1.1)
+    stopped = guidance.sample(now_s=1.41)
+
+    assert tracking.road_guidance_usable
+    assert grace.diagnostics["state"] == "road_lost_grace"
+    assert grace.road_guidance_usable
+    assert grace.desired.vx_cm_s > 0.0
+    assert stopped.diagnostics["state"] == "road_lost_hold"
+    assert not stopped.road_guidance_usable
+    assert stopped.desired.vx_cm_s == 0.0
+
+
+@pytest.mark.parametrize(
+    ("stale", "camera_ok"),
+    [(True, True), (False, False)],
+)
+def test_visual_guidance_does_not_debounce_sensor_faults(stale, camera_ok):
+    guidance = FrozenVisualGuidance()
+    pipeline = _VisualPipelineStub(_visual_road_perception())
+    guidance.pipeline = pipeline
+    guidance.sample(now_s=1.0)
+
+    pipeline.stale = stale
+    pipeline.camera_ok = camera_ok
+    fault = guidance.sample(now_s=1.1)
+
+    assert fault.diagnostics["state"] == "road_lost_hold"
+    assert not fault.road_guidance_usable
+    assert fault.desired.vx_cm_s == 0.0
 
 
 class _ReadyRadars:

@@ -714,6 +714,23 @@ def test_road_loss_stops_after_grace_expires():
     assert follower.last_diagnostics.state == "road_lost_hold"
 
 
+def test_road_loss_grace_can_be_bypassed_for_sensor_failure():
+    points = [(320.0, float(y)) for y in range(460, 19, -20)]
+    follower = _follower(max_vx_cm_s=45.0, lost_grace_s=0.30)
+    follower.update(_perception(points), now_s=1.0)
+
+    stopped = follower.update(
+        None,
+        now_s=1.1,
+        allow_lost_grace=False,
+    )
+
+    assert stopped.vx_cm_s == 0.0
+    assert stopped.vy_cm_s == 0.0
+    assert stopped.yaw_rate_deg_s == 0.0
+    assert follower.last_diagnostics.state == "road_lost_hold"
+
+
 @pytest.mark.parametrize(
     "perception",
     [None, _perception([], found=False), _perception([(320.0, 240.0)])],

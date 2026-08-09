@@ -99,7 +99,9 @@ class SafetyConfig:
     max_yaw_rate_deg_s: float = 30.0
 
     # Compatibility and obstacle-gate fields used by earlier entry points.
-    obstacle_stop_distance_cm: float = 80.0
+    # ``None`` disables the legacy forward-corridor stop while preserving the
+    # slowdown, side-motion gates, and all flight-health hard stops.
+    obstacle_stop_distance_cm: float | None = 80.0
     obstacle_slow_distance_cm: float = 150.0
     slow_speed_limit_cm_s: float = 12.0
     side_stop_distance_cm: float = 45.0
@@ -282,7 +284,12 @@ class SafetyArbiter:
         cmd = decision.command
         reasons: list[str] = []
 
-        if nearest is not None and nearest <= self.config.obstacle_stop_distance_cm and cmd.vx_cm_s > 0:
+        if (
+            nearest is not None
+            and self.config.obstacle_stop_distance_cm is not None
+            and nearest <= self.config.obstacle_stop_distance_cm
+            and cmd.vx_cm_s > 0
+        ):
             reasons.append("front_obstacle_stop")
             cmd = Command(
                 0.0,

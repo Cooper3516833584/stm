@@ -166,10 +166,16 @@ class TrajectoryPointFollower:
         self._limited_yaw_rate_deg_s = 0.0
         self.last_diagnostics = TrajectoryPointFollowerDiagnostics()
 
-    def update(self, perception, now_s: float) -> Command:
+    def update(
+        self,
+        perception,
+        now_s: float,
+        *,
+        allow_lost_grace: bool = True,
+    ) -> Command:
         points = self._usable_trajectory(perception)
         if len(points) < 2:
-            return self._lost_command(now_s)
+            return self._lost_command(now_s, allow_grace=allow_lost_grace)
 
         self._lost_since_s = None
         self._lost_entry_command = None
@@ -986,7 +992,7 @@ class TrajectoryPointFollower:
         alpha = dt_s / (max(0.0, float(tau_s)) + dt_s)
         return _wrap_angle_deg(previous + alpha * delta)
 
-    def _lost_command(self, now_s: float) -> Command:
+    def _lost_command(self, now_s: float, *, allow_grace: bool = True) -> Command:
         if self._lost_since_s is None:
             self._lost_since_s = float(now_s)
             self._lost_entry_command = (
@@ -999,7 +1005,8 @@ class TrajectoryPointFollower:
 
         grace_s = max(0.0, float(self.config.lost_grace_s))
         if (
-            grace_s > 0.0
+            allow_grace
+            and grace_s > 0.0
             and lost_elapsed_s <= grace_s
             and self._lost_entry_command is not None
         ):

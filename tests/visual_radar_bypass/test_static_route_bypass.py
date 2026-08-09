@@ -236,6 +236,86 @@ def test_target_clearance_moves_to_forward_pass_without_side_switch():
     assert decayed.vy_cm_s == 0.0
 
 
+def test_current_profile_diverges_laterally_at_zero_vx_until_85cm_clearance():
+    planner = StaticRouteBypassPlanner(
+        replace(
+            StaticRouteBypassConfig(),
+            diverge_vx_cm_s=0.0,
+            require_target_clearance_before_forward=True,
+        )
+    )
+    activated = _activate_right(planner)
+    moving_outward = _update(planner, _field(_cluster(100.0, -40.0)), 1.2)
+
+    assert planner.state == StaticRouteBypassState.DIVERGE_LEFT
+    assert planner.config.target_surface_clearance_cm == 85.0
+    assert activated.vx_cm_s == 0.0
+    assert moving_outward.vx_cm_s == 0.0
+    assert moving_outward.vy_cm_s > 0.0
+
+    command = _update(planner, _field(_cluster(90.0, -65.0)), 1.25)
+    assert command.vx_cm_s == 0.0
+    command = _update(planner, _field(_cluster(80.0, -80.0)), 1.3)
+    assert command.vx_cm_s == 0.0
+
+    target_clearance = _field(_cluster(70.0, -90.0))
+    for index in range(3):
+        command = _update(planner, target_clearance, 1.4 + index * 0.1)
+
+    assert planner.state == StaticRouteBypassState.PASS_FORWARD_LEFT
+    assert command.vx_cm_s == pytest.approx(planner.config.avoidance_vx_cm_s)
+
+
+def test_current_profile_does_not_use_75cm_edge_fallback_before_85cm_target():
+    planner = StaticRouteBypassPlanner(
+        replace(
+            StaticRouteBypassConfig(),
+            diverge_vx_cm_s=0.0,
+            require_target_clearance_before_forward=True,
+        )
+    )
+    left_obstacle = _field(_cluster(100.0, 40.0))
+    _update(planner, left_obstacle, 1.0)
+    _update(planner, left_obstacle, 1.1)
+
+    for index, point in enumerate(((75.0, 65.0), (45.0, 78.0), (9.0, 82.0))):
+        command = _update(planner, _field(_cluster(*point)), 1.2 + index * 0.1)
+
+    assert planner.state == StaticRouteBypassState.DIVERGE_RIGHT
+    assert planner.diagnostics()["obstacle_surface_clearance_cm"] < 85.0
+    assert command.vx_cm_s == 0.0
+
+
+@pytest.mark.parametrize(
+    "source_state",
+    [
+        StaticRouteBypassState.PASS_FORWARD_LEFT,
+        StaticRouteBypassState.CLEARANCE_RUN,
+        StaticRouteBypassState.WAIT_VISUAL,
+        StaticRouteBypassState.BLEND_BACK,
+        StaticRouteBypassState.PATH_LOST_HOLD,
+        StaticRouteBypassState.TRACK_LOST_HOLD,
+    ],
+)
+def test_only_normal_source_zeros_vx_when_entering_diverge(source_state):
+    planner = StaticRouteBypassPlanner(
+        replace(StaticRouteBypassConfig(), diverge_vx_cm_s=0.0)
+    )
+    planner.state = source_state
+    planner._locked_side = 1
+
+    planner._transition(
+        StaticRouteBypassState.DIVERGE_LEFT,
+        "test_non_normal_diverge_entry",
+        2.0,
+    )
+    command = planner._avoidance_command(_desired(), 2.1)
+
+    assert planner.previous_state == source_state
+    assert not planner.diagnostics()["zero_vx_during_diverge"]
+    assert command.vx_cm_s == pytest.approx(planner.config.avoidance_vx_cm_s)
+
+
 def test_unexpected_central_dropout_stops_instead_of_claiming_passage():
     planner = StaticRouteBypassPlanner()
     _activate_right(planner)
@@ -245,6 +325,59 @@ def test_unexpected_central_dropout_stops_instead_of_claiming_passage():
     assert planner.state == StaticRouteBypassState.TRACK_LOST_HOLD
     assert command.vx_cm_s == 0.0
     assert command.vy_cm_s == 0.0
+
+
+def test_current_profile_track_loss_flies_forward_with_guidance_yaw_and_zero_vy():
+    planner = StaticRouteBypassPlanner(
+        replace(
+            StaticRouteBypassConfig(),
+            track_lost_forward_vx_cm_s=13.2,
+            track_lost_use_guidance_yaw=True,
+        )
+    )
+    _activate_right(planner)
+    desired = _desired(vy=-9.0, yaw=-7.0)
+
+    entered = _update(planner, _field([]), 1.3, desired=desired)
+    continuing = _update(planner, _field([]), 1.4, desired=desired)
+
+    assert planner.state == StaticRouteBypassState.TRACK_LOST_HOLD
+    for command in (entered, continuing):
+        assert command.vx_cm_s == pytest.approx(13.2)
+        assert command.vy_cm_s == 0.0
+        assert command.yaw_rate_deg_s == -7.0
+
+
+def test_tracked_obstacle_beyond_120cm_for_three_frames_returns_to_normal():
+    planner = StaticRouteBypassPlanner(
+        replace(
+            StaticRouteBypassConfig(),
+            normal_activation_radius_cm=100.0,
+            tracked_obstacle_disappear_distance_cm=120.0,
+            tracked_obstacle_disappear_frames=3,
+        )
+    )
+    near = _field(_cluster(80.0, -20.0))
+    far = _field(_cluster(110.0, -20.0))
+    desired = _desired(vy=-6.0, yaw=3.0)
+    _update(planner, near, 1.0, desired=desired)
+    _update(planner, near, 1.1, desired=desired)
+
+    _update(planner, far, 1.2, desired=desired)
+    _update(planner, far, 1.3, desired=desired)
+    assert planner.diagnostics()["tracked_obstacle_far_count"] == 2
+
+    # A near observation breaks the consecutive-frame sequence.
+    _update(planner, near, 1.4, desired=desired)
+    assert planner.diagnostics()["tracked_obstacle_far_count"] == 0
+    _update(planner, far, 1.5, desired=desired)
+    _update(planner, far, 1.6, desired=desired)
+    restored = _update(planner, far, 1.7, desired=desired)
+
+    assert planner.state == StaticRouteBypassState.NORMAL
+    assert planner.transition_reason == "tracked_obstacle_beyond_disappear_distance"
+    assert planner.active_bypass_side is None
+    assert restored == desired
 
 
 def test_path_loss_stops_active_bypass_and_recovers_same_side():

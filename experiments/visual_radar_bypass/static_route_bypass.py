@@ -1,8 +1,9 @@
 """Static tube bypass using the physical front-half-plane radar returns.
 
 Body coordinates are +X forward and +Y left.  During an encounter vision owns
-only the path-tangent yaw command; forward speed is fixed at 60 percent of the
-isolated visual limit and lateral motion is derived solely from radar clearance.
+only the path-tangent yaw command and lateral motion is derived solely from
+radar clearance.  The active profile may hold forward speed at zero while
+diverging, then use the configured avoidance speed after clearance.
 """
 
 from __future__ import annotations
@@ -42,6 +43,12 @@ class StaticRouteBypassConfig:
     front_fov_deg: float = 180.0
     visual_max_vx_cm_s: float = 14.0
     avoidance_forward_ratio: float = 0.60
+    # ``None`` preserves the v1 behavior of using ``avoidance_vx_cm_s`` while
+    # diverging.  The current fusion profile sets zero for lateral-only escape.
+    diverge_vx_cm_s: float | None = None
+    # The v1 edge fallback may advance at the 75 cm hysteresis line.  The
+    # current fusion profile requires the full 85 cm target before any advance.
+    require_target_clearance_before_forward: bool = False
     tube_radius_cm: float = 15.0
 
     # Existing experiment geometry.
@@ -84,6 +91,16 @@ class StaticRouteBypassConfig:
     rear_margin_cm: float = 20.0
     translation_credit_ratio: float = 0.70
     track_lost_hold_s: float = 1.0
+    # Frozen v1 stops during an unexpected tracking dropout.  Experimental
+    # profiles may continue forward while using only guidance yaw to follow the
+    # image path; visual lateral velocity remains suppressed.
+    track_lost_forward_vx_cm_s: float = 0.0
+    track_lost_use_guidance_yaw: bool = False
+    # ``None`` preserves the frozen v1 behavior.  When configured, a tracked
+    # obstacle beyond this body-frame center distance for the requested number
+    # of 10 Hz confirmation frames is treated as having left the encounter.
+    tracked_obstacle_disappear_distance_cm: float | None = None
+    tracked_obstacle_disappear_frames: int = 3
     # ``None`` disables the encounter-duration stop for supervised trials.
     max_encounter_s: float | None = 40.0
     static_model_tolerance_cm: float = 25.0
@@ -93,6 +110,12 @@ class StaticRouteBypassConfig:
     @property
     def avoidance_vx_cm_s(self) -> float:
         return self.visual_max_vx_cm_s * self.avoidance_forward_ratio
+
+    @property
+    def active_diverge_vx_cm_s(self) -> float:
+        if self.diverge_vx_cm_s is None:
+            return self.avoidance_vx_cm_s
+        return max(0.0, float(self.diverge_vx_cm_s))
 
     @property
     def half_fov_deg(self) -> float:
@@ -125,6 +148,15 @@ class StaticRouteBypassPlanner:
         StaticRouteBypassState.CLEARANCE_RUN,
         StaticRouteBypassState.WAIT_VISUAL,
         StaticRouteBypassState.BLEND_BACK,
+        StaticRouteBypassState.PATH_LOST_HOLD,
+        StaticRouteBypassState.TRACK_LOST_HOLD,
+    }
+    TRACKED_OBSTACLE_STATES = {
+        StaticRouteBypassState.DIVERGE_LEFT,
+        StaticRouteBypassState.DIVERGE_RIGHT,
+        StaticRouteBypassState.PASS_FORWARD_LEFT,
+        StaticRouteBypassState.PASS_FORWARD_RIGHT,
+        StaticRouteBypassState.SIDE_PASS_CONFIRM,
         StaticRouteBypassState.PATH_LOST_HOLD,
         StaticRouteBypassState.TRACK_LOST_HOLD,
     }
@@ -164,6 +196,9 @@ class StaticRouteBypassPlanner:
         self._nearest_candidate_to_prediction_cm: float | None = None
         self._last_static_model_error_cm: float | None = None
         self._preserve_guidance_yaw = True
+        self._zero_vx_during_diverge = False
+        self._tracked_obstacle_distance_cm: float | None = None
+        self._tracked_obstacle_far_count = 0
 
     @property
     def active_bypass_side(self) -> int | None:
@@ -263,6 +298,13 @@ class StaticRouteBypassPlanner:
             self._start_encounter(observation, radar_field, now)
             return self._avoidance_command(desired, now)
 
+        if self._tracked_obstacle_disappeared(
+            observation,
+            confirmation_due=confirmation_due,
+        ):
+            self.reset("tracked_obstacle_beyond_disappear_distance")
+            return desired
+
         if self._encounter_timed_out(now):
             self._transition(StaticRouteBypassState.TIMEOUT_STOP, "encounter_timeout", now)
             return self._stop_command(desired, "timeout_stop")
@@ -288,7 +330,7 @@ class StaticRouteBypassPlanner:
                 self._transition(StaticRouteBypassState.FAILSAFE_STOP, "track_reacquire_timeout", now)
                 return self._stop_command(desired, "track_reacquire_timeout")
             else:
-                return self._stop_command(desired, "track_lost_hold")
+                return self._track_lost_command(desired)
 
         if self.state in {StaticRouteBypassState.DIVERGE_LEFT, StaticRouteBypassState.DIVERGE_RIGHT}:
             if observation is None:
@@ -300,7 +342,8 @@ class StaticRouteBypassPlanner:
             # as a valid side pass instead of waiting for an impossible 85 cm
             # reading and turning the expected edge exit into a tracking fault.
             if (
-                observation.lateral_clearance_cm >= self.config.reshift_surface_clearance_cm
+                not self.config.require_target_clearance_before_forward
+                and observation.lateral_clearance_cm >= self.config.reshift_surface_clearance_cm
                 and self._edge_ready(observation)
             ):
                 self._edge_armed = True
@@ -470,6 +513,9 @@ class StaticRouteBypassPlanner:
         self._nearest_candidate_to_prediction_cm = None
         self._last_static_model_error_cm = None
         self._clearance_forward_s = 0.0
+        self._zero_vx_during_diverge = False
+        self._tracked_obstacle_distance_cm = None
+        self._tracked_obstacle_far_count = 0
 
     def diagnostics(self) -> dict[str, object]:
         observation = self._observation
@@ -487,6 +533,7 @@ class StaticRouteBypassPlanner:
             "visual_vy_cm_s": None,
             "radar_vy_cm_s": self._radar_vy(observation, self._last_update_s or 0.0),
             "avoidance_vx_cm_s": self.config.avoidance_vx_cm_s,
+            "zero_vx_during_diverge": self._zero_vx_during_diverge,
             "observation_valid": observation is not None,
             "cluster_point_count": 0 if observation is None else observation.point_count,
             "obstacle_bearing_deg": None if observation is None else observation.bearing_deg,
@@ -505,6 +552,8 @@ class StaticRouteBypassPlanner:
             "last_applied": self._last_applied,
             "static_model_bad_count": self._static_model_bad_count,
             "static_model_error_cm": self._last_static_model_error_cm,
+            "tracked_obstacle_distance_cm": self._tracked_obstacle_distance_cm,
+            "tracked_obstacle_far_count": self._tracked_obstacle_far_count,
             "association_status": self._association_status,
             "nearest_candidate_to_prediction_cm": self._nearest_candidate_to_prediction_cm,
             "front_corridor_clear": self._last_radar_forward_clear,
@@ -526,6 +575,11 @@ class StaticRouteBypassPlanner:
         self._forward_decrease_count = 0
         self._static_model_bad_count = 0
         self._last_static_model_error_cm = None
+        self._tracked_obstacle_distance_cm = math.hypot(
+            observation.center_x_cm,
+            observation.center_y_cm,
+        )
+        self._tracked_obstacle_far_count = 0
         self._last_observed_x_cm = observation.center_x_cm
         self._last_seen_s = now
         self._last_outward_vy_cm_s = 0.0
@@ -694,7 +748,10 @@ class StaticRouteBypassPlanner:
 
     def _avoidance_command(self, desired: Command, now: float) -> Command:
         vy = 0.0
+        vx = self.config.avoidance_vx_cm_s
         if self.state in {StaticRouteBypassState.DIVERGE_LEFT, StaticRouteBypassState.DIVERGE_RIGHT}:
+            if self._zero_vx_during_diverge:
+                vx = self.config.active_diverge_vx_cm_s
             vy = self._radar_vy(self._observation, now)
             if abs(vy) > 1e-9:
                 self._last_outward_vy_cm_s = vy
@@ -716,7 +773,7 @@ class StaticRouteBypassPlanner:
                 ) / max(1e-6, self.config.lateral_decay_s)
                 vy = self._last_outward_vy_cm_s * max(0.0, min(1.0, remaining))
         return Command(
-            self.config.avoidance_vx_cm_s,
+            vx,
             vy,
             desired.vz_cm_s,
             desired.yaw_rate_deg_s if self._preserve_guidance_yaw else 0.0,
@@ -772,7 +829,52 @@ class StaticRouteBypassPlanner:
     def _enter_track_hold(self, desired: Command, now: float, reason: str) -> Command:
         self._resume_state = self.state
         self._transition(StaticRouteBypassState.TRACK_LOST_HOLD, reason, now)
-        return self._stop_command(desired, "track_lost_hold")
+        return self._track_lost_command(desired)
+
+    def _track_lost_command(self, desired: Command) -> Command:
+        yaw_rate = 0.0
+        if self.config.track_lost_use_guidance_yaw and self._preserve_guidance_yaw:
+            yaw_rate = desired.yaw_rate_deg_s
+        return Command(
+            max(0.0, float(self.config.track_lost_forward_vx_cm_s)),
+            0.0,
+            desired.vz_cm_s,
+            yaw_rate,
+            _append_reason(desired.reason, "static_route:track_lost_hold"),
+        )
+
+    def _tracked_obstacle_disappeared(
+        self,
+        observation: StaticTubeObservation | None,
+        *,
+        confirmation_due: bool,
+    ) -> bool:
+        threshold = self.config.tracked_obstacle_disappear_distance_cm
+        if self.state not in self.TRACKED_OBSTACLE_STATES or threshold is None:
+            self._tracked_obstacle_distance_cm = None
+            self._tracked_obstacle_far_count = 0
+            return False
+        if observation is None:
+            self._tracked_obstacle_distance_cm = None
+            if confirmation_due:
+                self._tracked_obstacle_far_count = 0
+            return False
+
+        distance_cm = math.hypot(
+            observation.center_x_cm,
+            observation.center_y_cm,
+        )
+        self._tracked_obstacle_distance_cm = distance_cm
+        if not confirmation_due:
+            return False
+        if distance_cm > max(0.0, float(threshold)):
+            self._tracked_obstacle_far_count += 1
+        else:
+            self._tracked_obstacle_far_count = 0
+        return self._tracked_obstacle_far_count >= max(
+            1,
+            int(self.config.tracked_obstacle_disappear_frames),
+        )
 
     def _stop_command(self, desired: Command, reason: str) -> Command:
         return Command(0.0, 0.0, desired.vz_cm_s, 0.0, _append_reason(desired.reason, f"static_route:{reason}"))
@@ -780,7 +882,15 @@ class StaticRouteBypassPlanner:
     def _transition(self, new_state: StaticRouteBypassState, reason: str, now: float) -> None:
         if new_state == self.state:
             return
-        self.previous_state = self.state
+        source_state = self.state
+        entering_diverge = new_state in {
+            StaticRouteBypassState.DIVERGE_LEFT,
+            StaticRouteBypassState.DIVERGE_RIGHT,
+        }
+        self._zero_vx_during_diverge = bool(
+            entering_diverge and source_state == StaticRouteBypassState.NORMAL
+        )
+        self.previous_state = source_state
         self.state = new_state
         self.transition_reason = str(reason)
         self._phase_started_s = float(now)

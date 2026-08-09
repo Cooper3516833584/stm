@@ -239,6 +239,24 @@ def test_front_stop_preserves_safe_lateral_escape_command():
     assert result.command.vy_cm_s == 8.0
 
 
+def test_front_stop_can_be_disabled_without_disabling_radar_observation():
+    result = SafetyArbiter(
+        SafetyConfig(require_unlocked=True, obstacle_stop_distance_cm=None)
+    ).filter(
+        Command(8.4, 0.0, 0.0, 0.0, "fusion_static_route"),
+        flight=_healthy_flight(),
+        radar_connected=True,
+        radar_age_s=0.0,
+        radar_field=_radar_field([[60.0, 0.0]]),
+        enable_flight=True,
+    )
+
+    assert result.state == "OK"
+    assert result.reasons == []
+    assert result.command.vx_cm_s == 8.4
+    assert result.nearest_forward_obstacle_cm == 60.0
+
+
 def test_nonfinite_radar_points_are_removed_before_safety_geometry():
     field = _radar_field([[math.nan, -40.0], [0.0, math.inf], [0.0, -40.0]])
 

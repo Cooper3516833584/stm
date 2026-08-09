@@ -86,6 +86,10 @@ class FrozenVisualConfig:
     max_planar_accel_cm_s2: float = 24.0
     max_planar_decel_cm_s2: float = 24.0
     max_yaw_accel_deg_s2: float = 20.0
+    road_loss_grace_s: float = 0.30
+    road_loss_grace_vx_scale: float = 0.80
+    road_loss_grace_vy_scale: float = 0.50
+    road_loss_grace_yaw_scale: float = 0.70
     degraded_speed_scale: float = 0.85
     curvature_slowdown_start_deg: float = 12.0
     curvature_full_slowdown_deg: float = 42.0
@@ -102,6 +106,7 @@ class VisualSample:
     frame: Any | None
     frame_time_s: float
     diagnostics: dict[str, object]
+    road_guidance_usable: bool
     target: Any | None = None
     target_age_s: float = float("inf")
     target_stale: bool = True
@@ -193,6 +198,10 @@ class FrozenVisualGuidance:
                 max_planar_accel_cm_s2=cfg.max_planar_accel_cm_s2,
                 max_planar_decel_cm_s2=cfg.max_planar_decel_cm_s2,
                 max_yaw_accel_deg_s2=cfg.max_yaw_accel_deg_s2,
+                lost_grace_s=cfg.road_loss_grace_s,
+                lost_grace_vx_scale=cfg.road_loss_grace_vx_scale,
+                lost_grace_vy_scale=cfg.road_loss_grace_vy_scale,
+                lost_grace_yaw_scale=cfg.road_loss_grace_yaw_scale,
                 degraded_speed_scale=cfg.degraded_speed_scale,
                 curvature_slowdown_start_deg=cfg.curvature_slowdown_start_deg,
                 curvature_full_slowdown_deg=cfg.curvature_full_slowdown_deg,
@@ -220,20 +229,36 @@ class FrozenVisualGuidance:
             max_age_s=self.config.target_stale_timeout_s
         )
         frame, frame_time_s = self.pipeline.latest_frame()
-        usable = perception is not None and not stale
+        camera_ok = bool(self.pipeline.camera_ok)
+        perception_fresh = perception is not None and not stale
+        usable = perception_fresh and camera_ok
+        previous_state = self.follower.last_diagnostics.state
+        # Debounce only a fresh single-frame road miss after tracking has begun.
+        # Sensor failure and stale perception must still stop immediately.
+        allow_lost_grace = bool(
+            usable
+            and previous_state in {"tracking", "road_lost_grace"}
+        )
         desired = self.follower.update(
             perception if usable else None,
             now_s=now_s,
+            allow_lost_grace=allow_lost_grace,
+        )
+        diagnostics = self.follower.last_diagnostics.as_dict()
+        road_guidance_usable = bool(
+            usable
+            and diagnostics.get("state") in {"tracking", "road_lost_grace"}
         )
         return VisualSample(
             perception=perception,
             desired=desired,
             perception_age_s=float(age_s),
             perception_stale=bool(stale),
-            camera_ok=bool(self.pipeline.camera_ok),
+            camera_ok=camera_ok,
             frame=frame,
             frame_time_s=float(frame_time_s or 0.0),
-            diagnostics=self.follower.last_diagnostics.as_dict(),
+            diagnostics=diagnostics,
+            road_guidance_usable=road_guidance_usable,
             target=target,
             target_age_s=float(target_age_s),
             target_stale=bool(target_stale),

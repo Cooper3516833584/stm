@@ -195,7 +195,7 @@ def test_sharp_left_recovery_holds_confirmed_left_yaw_when_path_falls_behind():
     assert follower.last_diagnostics.state == "tracking"
 
 
-def test_sharp_left_recovery_times_out_to_zero_command():
+def test_sharp_left_recovery_timeout_exits_and_cannot_retrigger():
     follower = _follower(
         min_forward_lookahead_px=30.0,
         tangent_filter_tau_s=0.0,
@@ -225,13 +225,20 @@ def test_sharp_left_recovery_times_out_to_zero_command():
 
     timed_out = follower.update(_perception(terminal_behind), now_s=9.7)
 
-    assert timed_out.as_fc_tuple() == (0, 0, 0, 0)
+    assert timed_out.vx_cm_s == pytest.approx(0.0)
+    assert timed_out.vy_cm_s != pytest.approx(0.0)
     assert follower.last_diagnostics.state == "sharp_left_recovery_timeout"
-    assert follower.last_diagnostics.sharp_left_recovery_active
+    assert not follower.last_diagnostics.sharp_left_recovery_active
     assert follower.last_diagnostics.sharp_left_recovery_timed_out
+    assert follower.last_diagnostics.sharp_left_recovery_consumed
+
+    follower.update(_perception(terminal_behind), now_s=9.8)
+    follower.update(_perception(terminal_behind), now_s=9.9)
+    assert follower.last_diagnostics.state == "tracking"
+    assert follower.last_diagnostics.sharp_left_recovery_consumed
 
 
-def test_sharp_left_recovery_keeps_near_center_left_history_from_flight_log():
+def test_sharp_left_recovery_rejects_barely_forward_history_from_flight_log():
     follower = _follower(
         min_forward_lookahead_px=30.0,
         sharp_left_recovery_enabled=True,
@@ -263,9 +270,80 @@ def test_sharp_left_recovery_keeps_near_center_left_history_from_flight_log():
         normal_yaw_rate_deg_s=6.0,
     )
 
-    assert active
+    assert not active
     assert not timed_out
-    assert hold_yaw == pytest.approx(-6.0)
+    assert hold_yaw is None
+    assert not follower._sharp_left_reliable_yaw_history
+
+
+def test_sharp_left_recovery_rejects_off_road_history_after_target_mission():
+    follower = _follower(
+        min_forward_lookahead_px=28.0,
+        edge_recovery_start_ratio=0.55,
+        sharp_left_recovery_enabled=True,
+    )
+    for index, (forward_px, edge_ratio) in enumerate(
+        [(50.0, 2.13), (50.0, 2.05), (3.0, 1.64)]
+    ):
+        active, _, _, _ = follower._update_sharp_left_recovery(
+            now_s=1.0 + 0.1 * index,
+            raw_forward_px=forward_px,
+            target_index=40,
+            path_point_count=41,
+            normal_yaw_rate_deg_s=-18.0,
+            edge_ratio=edge_ratio,
+        )
+        assert not active
+
+    for index in range(2):
+        active, timed_out, hold_yaw, _ = follower._update_sharp_left_recovery(
+            now_s=1.3 + 0.1 * index,
+            raw_forward_px=-17.0,
+            target_index=29,
+            path_point_count=30,
+            normal_yaw_rate_deg_s=6.0,
+            edge_ratio=0.96,
+        )
+
+    assert not active
+    assert not timed_out
+    assert hold_yaw is None
+    assert not follower._sharp_left_reliable_yaw_history
+
+
+def test_sharp_left_recovery_readiness_resets_on_road_loss():
+    follower = _follower(
+        min_forward_lookahead_px=30.0,
+        tangent_filter_tau_s=0.0,
+        tangent_filter_max_rate_deg_s=1_000_000.0,
+        target_filter_tau_s=0.0,
+        target_filter_max_rate_px_s=1_000_000.0,
+        sharp_left_recovery_enabled=True,
+    )
+    forward_left = [
+        (400.0, 460.0),
+        (380.0, 400.0),
+        (340.0, 280.0),
+        (300.0, 200.0),
+        (260.0, 140.0),
+    ]
+    terminal_behind = [
+        (120.0, 460.0),
+        (180.0, 380.0),
+        (240.0, 320.0),
+        (280.0, 300.0),
+    ]
+    for index in range(5):
+        follower.update(_perception(forward_left), now_s=1.0 + 0.1 * index)
+    assert follower.last_diagnostics.sharp_left_recovery_ready
+
+    follower.update(None, now_s=1.5)
+    assert not follower._sharp_left_reliable_yaw_history
+
+    follower.update(_perception(terminal_behind), now_s=1.6)
+    follower.update(_perception(terminal_behind), now_s=1.7)
+    assert follower.last_diagnostics.state == "tracking"
+    assert not follower.last_diagnostics.sharp_left_recovery_active
 
 
 def test_sharp_left_recovery_requires_arming_and_confirmed_left_history():

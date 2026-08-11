@@ -157,6 +157,8 @@ class TrajectoryPointFollowerDiagnostics:
     sharp_left_recovery_consumed: bool = False
     sharp_left_recovery_behind_count: int = 0
     sharp_left_recovery_reacquire_count: int = 0
+    sharp_left_recovery_ready: bool = False
+    sharp_left_recovery_history_count: int = 0
     sharp_left_recovery_hold_yaw_deg_s: float | None = None
     sharp_left_recovery_elapsed_s: float = 0.0
 
@@ -448,6 +450,7 @@ class TrajectoryPointFollower:
             target_index=target_index,
             path_point_count=len(points),
             normal_yaw_rate_deg_s=clamped_yaw_rate,
+            edge_ratio=edge_ratio,
         )
         if sharp_left_recovery_active:
             # The terminal tangent is behind the aircraft and no longer
@@ -594,6 +597,13 @@ class TrajectoryPointFollower:
             sharp_left_recovery_reacquire_count=(
                 self._sharp_left_recovery_reacquire_count
             ),
+            sharp_left_recovery_ready=(
+                len(self._sharp_left_reliable_yaw_history)
+                >= max(1, int(self.config.sharp_left_recovery_history_frames))
+            ),
+            sharp_left_recovery_history_count=len(
+                self._sharp_left_reliable_yaw_history
+            ),
             sharp_left_recovery_hold_yaw_deg_s=(
                 self._sharp_left_recovery_hold_yaw_deg_s
             ),
@@ -615,6 +625,7 @@ class TrajectoryPointFollower:
         target_index: int,
         path_point_count: int,
         normal_yaw_rate_deg_s: float,
+        edge_ratio: float | None = None,
     ) -> tuple[bool, bool, float | None, float]:
         cfg = self.config
         feature_available = bool(
@@ -628,7 +639,15 @@ class TrajectoryPointFollower:
 
         reliable_forward_px = max(0.0, float(cfg.min_forward_lookahead_px))
         forward_reacquired = float(raw_forward_px) >= reliable_forward_px
-        forward_history_valid = float(raw_forward_px) >= 0.0
+        centered_for_history = bool(
+            edge_ratio is None
+            or (
+                math.isfinite(float(edge_ratio))
+                and float(edge_ratio)
+                <= max(0.0, float(cfg.edge_recovery_start_ratio))
+            )
+        )
+        forward_history_valid = bool(forward_reacquired and centered_for_history)
         if self._sharp_left_recovery_active:
             self._sharp_left_recovery_reacquire_count = (
                 self._sharp_left_recovery_reacquire_count + 1
@@ -651,21 +670,33 @@ class TrajectoryPointFollower:
                 self._reset_sharp_left_recovery_transient(clear_history=True)
                 return False, False, None, 0.0
             if elapsed_s >= max(0.0, float(cfg.sharp_left_recovery_timeout_s)):
-                self._sharp_left_recovery_timed_out = True
-            hold_yaw = (
-                0.0
-                if self._sharp_left_recovery_timed_out
-                else self._sharp_left_recovery_hold_yaw_deg_s
+                # Timeout is a terminal outcome for this one-shot recovery.
+                # Returning to normal tracking prevents the old active+zero-yaw
+                # combination from pinning every subsequent command at zero.
+                self._sharp_left_recovery_consumed = True
+                self._reset_sharp_left_recovery_transient(clear_history=True)
+                return False, True, None, elapsed_s
+            return (
+                True,
+                False,
+                self._sharp_left_recovery_hold_yaw_deg_s,
+                elapsed_s,
             )
-            return True, self._sharp_left_recovery_timed_out, hold_yaw, elapsed_s
 
-        if forward_history_valid:
+        if float(raw_forward_px) >= 0.0:
             self._sharp_left_recovery_behind_count = 0
-            history_frames = max(1, int(cfg.sharp_left_recovery_history_frames))
-            self._sharp_left_reliable_yaw_history.append(
-                float(normal_yaw_rate_deg_s)
-            )
-            del self._sharp_left_reliable_yaw_history[:-history_frames]
+            if forward_history_valid:
+                history_frames = max(
+                    1, int(cfg.sharp_left_recovery_history_frames)
+                )
+                self._sharp_left_reliable_yaw_history.append(
+                    float(normal_yaw_rate_deg_s)
+                )
+                del self._sharp_left_reliable_yaw_history[:-history_frames]
+            else:
+                # Readings that are only barely forward or captured while the
+                # aircraft is outside the road edge must not arm recovery.
+                self._sharp_left_reliable_yaw_history.clear()
             return False, False, None, 0.0
 
         terminal_behind = bool(
@@ -681,10 +712,7 @@ class TrajectoryPointFollower:
             return False, False, None, 0.0
 
         history = self._sharp_left_reliable_yaw_history
-        minimum_samples = min(
-            3,
-            max(1, int(cfg.sharp_left_recovery_history_frames)),
-        )
+        minimum_samples = max(1, int(cfg.sharp_left_recovery_history_frames))
         minimum_left_yaw = max(
             0.0, float(cfg.sharp_left_recovery_min_confirm_yaw_deg_s)
         )
@@ -1195,6 +1223,13 @@ class TrajectoryPointFollower:
         return _wrap_angle_deg(previous + alpha * delta)
 
     def _lost_command(self, now_s: float, *, allow_grace: bool = True) -> Command:
+        if not self._sharp_left_recovery_active:
+            # Readiness requires consecutive valid, centered forward samples.
+            # A road-loss interval breaks that evidence even when grace keeps
+            # the previous flight command alive briefly.
+            self._sharp_left_recovery_behind_count = 0
+            self._sharp_left_recovery_reacquire_count = 0
+            self._sharp_left_reliable_yaw_history.clear()
         if self._lost_since_s is None:
             self._lost_since_s = float(now_s)
             self._lost_entry_command = (

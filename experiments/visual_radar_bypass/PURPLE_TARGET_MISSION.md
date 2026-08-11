@@ -88,7 +88,7 @@ ROAD_SEARCH → TARGET_CLEARANCE → TARGET_APPROACH
 | 投放后等待 | 1 s | 任务需求 |
 | 雷达 stale | 0.35 s | 32 cm/s 下保持与 v2 接近的最大盲移距离 |
 | Safety 层 | BYPASSED | static-route 规划器命令直接发送 |
-| 绕障净空/回差 | 90 / 80 cm | 当前 32 cm/s 档；冻结 v2 为 85/75 |
+| 绕障净空/回差 | 90 / 75 cm | 当前 32 cm/s 档；回差分界及 1 帧确认与冻结 v2 相同 |
 | 绕障退出前飞 | 1.2 s | 以 19.2 cm/s 前飞约 23 cm，不少于 v2 的约 20 cm |
 | 绕障前速/最大 `vy` | 19.2 / 14 cm/s | 当前 32 cm/s static-route 实验配置 |
 

@@ -75,6 +75,6 @@ v1 保持 `vx=8.4 cm/s`、雷达横移上限 `8 cm/s`、85/75 cm 净空回差和
   确认帧后，认为障碍已经离开本次 encounter，立即复位到 `NORMAL` 并恢复完整视觉寻路。
 
 32 cm/s 未验证档以 v2 为基线，绕障前速为 19.2 cm/s，横移上限 14 cm/s，净空为
-90/80 cm（DIVERGE 横移目标 100 cm），普通激活/再捕获半径为 120/115 cm，
+90/75 cm（DIVERGE 横移目标 100 cm）；离开/回退分界及 1 帧确认与 v2 相同。普通激活/再捕获半径为 120/115 cm，
 `CLEARANCE_RUN=1.2 s`，雷达失跟前速仍限制在 v2 的 13.2 cm/s。逐项依据见
 [SPEED_PROFILE_32.md](SPEED_PROFILE_32.md)。

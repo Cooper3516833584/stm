@@ -161,8 +161,8 @@ def test_32cm_experiment_preserves_frozen_profiles_and_marks_overrides_unverifie
     assert route.require_target_clearance_before_forward
     assert route.target_surface_clearance_cm == 90.0
     assert route.active_diverge_target_surface_clearance_cm == 100.0
-    assert route.reshift_surface_clearance_cm == 80.0
-    assert route.clearance_frames == 2
+    assert route.reshift_surface_clearance_cm == v2_route.reshift_surface_clearance_cm == 75.0
+    assert route.clearance_frames == v2_route.clearance_frames == 1
     assert route.clearance_run_s == 1.2
     assert route.normal_activation_radius_cm == 120.0
     assert route.clearance_reacquire_radius_cm == 115.0

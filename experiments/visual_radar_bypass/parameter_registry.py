@@ -100,7 +100,7 @@ def build_parameter_registry(
         ParameterRecord("track_lost_hold_s", config.track_lost_hold_s, validated, "unexpected dropout hold", True),
         ParameterRecord("track_lost_forward_vx_cm_s", config.track_lost_forward_vx_cm_s, route_source("track_lost_forward_vx_cm_s"), "forward speed while reacquiring a lost tracked obstacle", True),
         ParameterRecord("track_lost_use_guidance_yaw", config.track_lost_use_guidance_yaw, route_source("track_lost_use_guidance_yaw"), "follow image-path heading during tracking dropout while suppressing visual vy", True),
-        ParameterRecord("tracked_obstacle_disappear_distance_cm", config.tracked_obstacle_disappear_distance_cm, route_source("tracked_obstacle_disappear_distance_cm"), "tracked obstacle center range treated as encounter exit", True),
+        ParameterRecord("tracked_obstacle_disappear_distance_cm", config.tracked_obstacle_disappear_distance_cm, route_source("tracked_obstacle_disappear_distance_cm"), "tracked obstacle surface-point range treated as encounter exit", True),
         ParameterRecord("tracked_obstacle_disappear_frames", config.tracked_obstacle_disappear_frames, fixed, "consecutive 10 Hz confirmations beyond the disappearance range", True),
         ParameterRecord("max_encounter_s", config.max_encounter_s, route_source("max_encounter_s"), "latched timeout; disabled when None", True),
         ParameterRecord("radar_timeout_s", radar_timeout_s, validated if radar_timeout_s == validated_radar_timeout_s else unverified, "radar snapshot freshness and target-mission gate", True),

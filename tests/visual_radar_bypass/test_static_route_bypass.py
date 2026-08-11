@@ -338,7 +338,7 @@ def test_current_profile_track_loss_flies_forward_with_guidance_yaw_and_zero_vy(
         assert command.yaw_rate_deg_s == -7.0
 
 
-def test_tracked_obstacle_beyond_120cm_for_three_frames_returns_to_normal():
+def test_tracked_obstacle_surface_beyond_120cm_for_three_frames_returns_to_normal():
     planner = StaticRouteBypassPlanner(
         replace(
             StaticRouteBypassConfig(),
@@ -348,21 +348,31 @@ def test_tracked_obstacle_beyond_120cm_for_three_frames_returns_to_normal():
         )
     )
     near = _field(_cluster(80.0, -20.0))
-    far = _field(_cluster(110.0, -20.0))
+    center_only_far = _field(_cluster(110.0, -20.0))
+    far = _field(_cluster(125.0, -20.0))
     desired = _desired(vy=-6.0, yaw=3.0)
     _update(planner, near, 1.0, desired=desired)
     _update(planner, near, 1.1, desired=desired)
 
-    _update(planner, far, 1.2, desired=desired)
-    _update(planner, far, 1.3, desired=desired)
+    # Its inferred center is beyond 120 cm, but the measured surface is not.
+    _update(planner, center_only_far, 1.2, desired=desired)
+    _update(planner, center_only_far, 1.3, desired=desired)
+    assert planner.diagnostics()["tracked_obstacle_far_count"] == 0
+
+    _update(planner, far, 1.4, desired=desired)
+    _update(planner, far, 1.5, desired=desired)
     assert planner.diagnostics()["tracked_obstacle_far_count"] == 2
+    assert (
+        planner.diagnostics()["tracked_obstacle_surface_distance_cm"]
+        > 120.0
+    )
 
     # A near observation breaks the consecutive-frame sequence.
-    _update(planner, near, 1.4, desired=desired)
+    _update(planner, near, 1.6, desired=desired)
     assert planner.diagnostics()["tracked_obstacle_far_count"] == 0
-    _update(planner, far, 1.5, desired=desired)
-    _update(planner, far, 1.6, desired=desired)
-    restored = _update(planner, far, 1.7, desired=desired)
+    _update(planner, far, 1.7, desired=desired)
+    _update(planner, far, 1.8, desired=desired)
+    restored = _update(planner, far, 1.9, desired=desired)
 
     assert planner.state == StaticRouteBypassState.NORMAL
     assert planner.transition_reason == "tracked_obstacle_beyond_disappear_distance"

@@ -252,7 +252,7 @@ def build_experimental_static_route_config(
         ramp_in_s=0.6,
         clearance_frames=2,
         clearance_run_s=1.2,
-        normal_activation_radius_cm=145.0,
+        normal_activation_radius_cm=120.0,
         clearance_reacquire_radius_cm=115.0,
         # Do not scale blind forward motion with the new cruise speed.
         track_lost_forward_vx_cm_s=13.2,

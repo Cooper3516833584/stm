@@ -206,7 +206,7 @@ class StaticRouteBypassPlanner:
         self._last_static_model_error_cm: float | None = None
         self._preserve_guidance_yaw = True
         self._zero_vx_during_diverge = False
-        self._tracked_obstacle_distance_cm: float | None = None
+        self._tracked_obstacle_surface_distance_cm: float | None = None
         self._tracked_obstacle_far_count = 0
 
     @property
@@ -528,7 +528,7 @@ class StaticRouteBypassPlanner:
         self._last_static_model_error_cm = None
         self._clearance_forward_s = 0.0
         self._zero_vx_during_diverge = False
-        self._tracked_obstacle_distance_cm = None
+        self._tracked_obstacle_surface_distance_cm = None
         self._tracked_obstacle_far_count = 0
 
     def diagnostics(self) -> dict[str, object]:
@@ -566,7 +566,9 @@ class StaticRouteBypassPlanner:
             "last_applied": self._last_applied,
             "static_model_bad_count": self._static_model_bad_count,
             "static_model_error_cm": self._last_static_model_error_cm,
-            "tracked_obstacle_distance_cm": self._tracked_obstacle_distance_cm,
+            "tracked_obstacle_surface_distance_cm": (
+                self._tracked_obstacle_surface_distance_cm
+            ),
             "tracked_obstacle_far_count": self._tracked_obstacle_far_count,
             "association_status": self._association_status,
             "nearest_candidate_to_prediction_cm": self._nearest_candidate_to_prediction_cm,
@@ -589,9 +591,9 @@ class StaticRouteBypassPlanner:
         self._forward_decrease_count = 0
         self._static_model_bad_count = 0
         self._last_static_model_error_cm = None
-        self._tracked_obstacle_distance_cm = math.hypot(
-            observation.center_x_cm,
-            observation.center_y_cm,
+        self._tracked_obstacle_surface_distance_cm = math.hypot(
+            observation.surface_x_cm,
+            observation.surface_y_cm,
         )
         self._tracked_obstacle_far_count = 0
         self._last_observed_x_cm = observation.center_x_cm
@@ -871,20 +873,20 @@ class StaticRouteBypassPlanner:
     ) -> bool:
         threshold = self.config.tracked_obstacle_disappear_distance_cm
         if self.state not in self.TRACKED_OBSTACLE_STATES or threshold is None:
-            self._tracked_obstacle_distance_cm = None
+            self._tracked_obstacle_surface_distance_cm = None
             self._tracked_obstacle_far_count = 0
             return False
         if observation is None:
-            self._tracked_obstacle_distance_cm = None
+            self._tracked_obstacle_surface_distance_cm = None
             if confirmation_due:
                 self._tracked_obstacle_far_count = 0
             return False
 
         distance_cm = math.hypot(
-            observation.center_x_cm,
-            observation.center_y_cm,
+            observation.surface_x_cm,
+            observation.surface_y_cm,
         )
-        self._tracked_obstacle_distance_cm = distance_cm
+        self._tracked_obstacle_surface_distance_cm = distance_cm
         if not confirmation_due:
             return False
         if distance_cm > max(0.0, float(threshold)):

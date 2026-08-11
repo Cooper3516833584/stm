@@ -164,8 +164,9 @@ def test_32cm_experiment_preserves_frozen_profiles_and_marks_overrides_unverifie
     assert route.reshift_surface_clearance_cm == 80.0
     assert route.clearance_frames == 2
     assert route.clearance_run_s == 1.2
-    assert route.normal_activation_radius_cm == 145.0
+    assert route.normal_activation_radius_cm == 120.0
     assert route.clearance_reacquire_radius_cm == 115.0
+    assert route.tracked_obstacle_disappear_distance_cm == 140.0
     assert route.track_lost_forward_vx_cm_s == 13.2
     assert route.max_encounter_s is None
     for name in (
@@ -243,8 +244,9 @@ def test_target_registry_records_detection_control_height_and_safety_bypass():
     assert by_name["road_edge_emergency_vx_cap_cm_s"] == 27.0
     assert by_name["clearance_run_s"] == 1.2
     assert by_name["max_encounter_s"] is None
-    assert by_name["normal_activation_radius_cm"] == 145.0
+    assert by_name["normal_activation_radius_cm"] == 120.0
     assert by_name["clearance_reacquire_radius_cm"] == 115.0
+    assert by_name["tracked_obstacle_disappear_distance_cm"] == 140.0
     assert by_name["target_mission.high_planar_speed_cm_s"] == 19.2
     assert by_record["target_mission.high_planar_speed_cm_s"]["source"] == "UNVERIFIED_TUNING"
     assert by_name["target_mission.low_planar_speed_cm_s"] == 5.0

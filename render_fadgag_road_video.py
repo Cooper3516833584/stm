@@ -18,11 +18,12 @@ import road_perception  # noqa: F401,E402
 
 from ultralytics import YOLO  # noqa: E402
 
-from render_road_follow_videos import WEIGHTS, render_video  # noqa: E402
+from render_road_follow_videos import render_video  # noqa: E402
 
 
-SOURCE = Path(r"C:\Users\TZDEZACR\Desktop\fadgag\video_20260808_153857.mp4")
+SOURCE = Path(r"D:\drone2\video_20260811_160549.mp4")
 DESTINATION = SOURCE.with_name(f"{SOURCE.stem}_road_follow.mp4")
+WEIGHTS = Path(r"d:/drone2/ObstacleAvoidanceDrone/FlightController/Solutions/model/map.pt")
 
 
 def main() -> None:

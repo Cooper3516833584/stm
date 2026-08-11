@@ -9,8 +9,13 @@ import time
 from pathlib import Path
 
 if os.name == "nt":
-    conda_root = Path(sys.executable).resolve().parents[2]
-    os.add_dll_directory(str(conda_root / "Library" / "bin"))
+    exe_dir = Path(sys.executable).resolve().parent
+    conda_root = next(
+        (p for p in [exe_dir, *exe_dir.parents] if (p / "Library" / "bin").is_dir()),
+        None,
+    )
+    if conda_root is not None:
+        os.add_dll_directory(str(conda_root / "Library" / "bin"))
 
 import cv2
 import numpy as np

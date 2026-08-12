@@ -46,6 +46,7 @@ class PurpleTargetMissionConfig:
     low_reach_y_px: float = 24.0
     high_hover_s: float = 2.0
     low_hover_s: float = 1.0
+    low_calibrate_timeout_s: float = 6.0
     target_altitude_cm: float = 60.0
     return_altitude_cm: float = 100.0
     max_vz_cm_s: float = 10.0
@@ -241,6 +242,13 @@ class PurpleTargetMissionController:
             if self._reach_count >= max(1, self.config.reach_confirm_frames):
                 self._transition(PurpleTargetMissionState.LOW_HOVER, "low_target_centered", now)
                 return self._mission_decision(Command.zero("purple_target:low_hover"))
+            if now - self._state_started_s >= self.config.low_calibrate_timeout_s:
+                self._transition(
+                    PurpleTargetMissionState.RELEASE_PENDING,
+                    "low_calibrate_timeout_release",
+                    now,
+                )
+                return self._mission_decision(Command.zero("purple_target:release_pending"))
             return self._mission_decision(self._target_command(now, altitude_cm))
 
         if self.state == PurpleTargetMissionState.LOW_HOVER:

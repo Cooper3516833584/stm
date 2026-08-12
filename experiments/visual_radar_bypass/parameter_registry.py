@@ -182,6 +182,7 @@ def build_parameter_registry(
             "low_reach_y_px": "low-altitude lateral image threshold",
             "high_hover_s": "hover before descent",
             "low_hover_s": "hover before release",
+            "low_calibrate_timeout_s": "forced release timeout during low-altitude centering",
             "target_altitude_cm": "payload calibration altitude",
             "return_altitude_cm": "road-follow return altitude",
             "max_vz_cm_s": "height-loop speed cap",

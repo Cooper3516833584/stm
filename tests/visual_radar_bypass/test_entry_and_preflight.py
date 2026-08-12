@@ -254,6 +254,7 @@ def test_target_registry_records_detection_control_height_and_safety_bypass():
     assert by_name["target_mission.camera_reference_altitude_cm"] == 100.0
     assert by_name["target_mission.camera_width_px"] == 640
     assert by_name["target_mission.target_altitude_cm"] == 60.0
+    assert by_name["target_mission.low_calibrate_timeout_s"] == 6.0
     assert by_name["target_mission.return_altitude_cm"] == 100.0
     assert by_name["safety_layer"] == "BYPASSED"
     assert "obstacle_stop_distance_cm" not in by_name

@@ -3,6 +3,9 @@ cd /usr/local/ObstacleAvoidanceDrone
 python3 road_trajectory_main.py#单巡线
 
 
+
+
+ssh root@192.168.137.2
 cd /usr/local/ObstacleAvoidanceDrone
 
 PYTHONPATH=. /usr/local/UFC_venv/bin/python3 -u \

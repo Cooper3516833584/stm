@@ -144,6 +144,57 @@ def test_low_calibration_caps_total_planar_speed_at_five():
     assert second.desired.yaw_rate_deg_s == 0.0
 
 
+def test_low_calibration_timeout_requests_immediate_release_after_six_seconds():
+    controller = PurpleTargetMissionController()
+    controller.state = PurpleTargetMissionState.LOW_CALIBRATE
+    controller._state_started_s = 10.0
+
+    adjusting = _step(
+        controller,
+        15.99,
+        _target(1, 100.0, 100.0),
+        altitude=60.0,
+    )
+    assert adjusting.state == PurpleTargetMissionState.LOW_CALIBRATE
+    assert not controller.release_is_authorized(
+        planner_state="normal",
+        radar_fresh=True,
+        final_command=Command.zero(),
+    )
+
+    timed_out = _step(
+        controller,
+        16.0,
+        _target(2, 100.0, 100.0),
+        altitude=60.0,
+    )
+    assert timed_out.state == PurpleTargetMissionState.RELEASE_PENDING
+    assert timed_out.desired == Command.zero("purple_target:release_pending")
+    assert controller.transition_reason == "low_calibrate_timeout_release"
+    assert controller.release_is_authorized(
+        planner_state="normal",
+        radar_fresh=True,
+        final_command=Command.zero(),
+    )
+
+
+def test_low_calibration_threshold_wins_over_timeout_on_same_frame():
+    controller = PurpleTargetMissionController()
+    controller.state = PurpleTargetMissionState.LOW_CALIBRATE
+    controller._state_started_s = 10.0
+    controller._reach_count = 2
+
+    decision = _step(
+        controller,
+        16.0,
+        _target(1, 0.0, 0.0),
+        altitude=60.0,
+    )
+
+    assert decision.state == PurpleTargetMissionState.LOW_HOVER
+    assert controller.transition_reason == "low_target_centered"
+
+
 def test_pixel_scale_tracks_altitude_from_130cm_at_100cm_calibration():
     config = PurpleTargetMissionConfig(max_planar_accel_cm_s2=1_000.0)
     high = PurpleTargetMissionController(config)

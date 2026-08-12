@@ -44,7 +44,8 @@ ROAD_SEARCH → TARGET_CLEARANCE → TARGET_APPROACH
 
 - 高空居中：连续 3 帧满足 `|offset_x|≤30`、`|offset_y|≤40`，悬停 2 秒。
 - 使用 `ALT_ADD` 闭环下降到 `60±5 cm`，最大垂速 10 cm/s，连续 3 帧确认。
-- 低空校准：连续 3 帧满足 `|offset_x|≤18`、`|offset_y|≤24`，悬停 1 秒。
+- 低空校准：连续 3 帧满足 `|offset_x|≤18`、`|offset_y|≤24`，悬停 1 秒后投放；若进入
+  `LOW_CALIBRATE` 6 秒仍未满足门限，则跳过低空悬停并直接请求投放。
 - 只有 planner normal、雷达新鲜、当前无障碍观测、最终实时控制帧四轴全零时，真实飞行才调用一次
   `set_digital_output(0, False)`；dry-run 只记录模拟投放。
 - 投放后停止紫色检测，等待 1 秒，再使用 ALT_ADD 闭环回升 `100±5 cm` 后恢复巡线。
@@ -80,6 +81,7 @@ ROAD_SEARCH → TARGET_CLEARANCE → TARGET_APPROACH
 | 目标丢失等待 | 2 s | 任务确认值 |
 | 到达高空目标超时 | 30 s | 任务确认值 |
 | 高/低悬停 | 2 s / 1 s | 任务需求 |
+| 低空校准强制投放超时 | 6 s | 超时未满足低空居中门限时直接请求投放 |
 | 下降/返回高度 | 60 / 100 cm | 任务需求，数据源仅 ALT_ADD |
 | 高度 Kp/最大垂速 | 0.5 s⁻¹ / 10 cm/s | 40 cm 高差先限速、近目标减速 |
 | 高度确认 | ±5 cm，连续 3 帧 | 任务确认值 |
